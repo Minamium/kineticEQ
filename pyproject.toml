@@ -1,0 +1,18 @@
+[project]
+name = "kineticEQ"
+version = "0.1.5"
+description = "kinetic equation solvers"
+authors = [{ name = "Minamium", email = "arcadia.battery@gmail.com" }]
+readme = "README.md"
+license = { text = "None" }
+requires-python = ">=3.9"
+dependencies = [
+  "numpy",
+  "torch>=2.0",
+  "matplotlib",
+  "scipy"
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
