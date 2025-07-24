@@ -1,1 +1,3 @@
 src/kineticEQ.egg-info/
+__pycache__/
+*.py[cod]
