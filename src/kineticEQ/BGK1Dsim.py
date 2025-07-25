@@ -1209,7 +1209,7 @@ class BGK1DPlotMixin:
                 f    = np.asarray(res["f"])
                 err  = _get_error(res)
 
-                fig, axes = plt.subplots(2, 1, figsize=(8, 10),
+                fig, axes = plt.subplots(2, 1, figsize=(12, 10),
                                          constrained_layout=True)
 
                 im0 = axes[0].imshow(f, origin="lower", aspect="auto",
