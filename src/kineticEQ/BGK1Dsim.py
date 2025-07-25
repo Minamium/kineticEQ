@@ -1243,7 +1243,7 @@ class BGK1DPlotMixin:
             n_rows  = 2 * int(np.ceil(n_grids / n_cols))   # f と err で 2 倍
 
             fig, axes = plt.subplots(
-                n_rows, n_cols, figsize=(12, 6 * n_rows),
+                n_rows, n_cols, figsize=(9, 4 * n_rows),
                 constrained_layout=True
             )
 
