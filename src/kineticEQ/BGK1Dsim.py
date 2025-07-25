@@ -1305,133 +1305,108 @@ class BGK1DPlotMixin:
         return {"saved_files": saved_files, "grid_keys": sorted_keys}
 
     # ベンチマーク結果の分布関数インタラクティブ3次元プロット
-    def plot_distribution_interactive(
+    def plot_distribution_voxels(
         self,
         bench_results: dict,
-        keys: int | list[int] | None = None,
+        key: int | None = None,                 # 単一格子キー（None→最細格子）
         show_plots: bool = True,
         save_png: bool = False,
-        fname_base: str = "distribution_pyvista"
-        ) -> dict:
+        fname_base: str = "distribution_voxels",
+    ) -> dict:
         """
-        PyVista を用いてセル値を 3D ボクセルで描画する。
+        ヒートマップのセルを 1 セル = 1 立方体ブロックとしてそのまま 3-D 表示する。
 
-        Parameters
-        ----------
-        keys : int | list[int] | None
-            描画したい格子キー（None → 最細格子のみ）。
-        show_plots : bool
-            インタラクティブウインドウを表示するか。
-        save_png : bool
-            PNG でスクリーンショットを保存するか。
-        fname_base : str
-            保存ファイル名のベース。
+        * x, v 方向とも **インデックス座標** を採用し、各セルをほぼ立方体に描画
+        * 左パネル: f(x,v)、右パネル: |f − f_ref|
+        * カメラは 2 パネルでリンク
 
-        Returns
-        -------
-        dict
-            {"saved_files": [...], "grid_keys": [...]}
+        依存:
+            pip install "pyvista[all]"  # VTK 同梱
         """
         import numpy as np
-        from scipy.interpolate import interp1d
         import pyvista as pv
+        from scipy.interpolate import interp1d
 
-        # ───── 入力チェック ─────
+        # ─── 入力チェック ───
         if not bench_results:
             raise ValueError("ベンチマーク結果が空です")
-
-        bench_type = bench_results["bench_type"]
         bench_dict = {k: v for k, v in bench_results.items() if isinstance(k, int)}
         if not bench_dict:
             raise ValueError("数値格子キーが見つかりません")
 
-        ref_key     = max(bench_dict.keys())
-        ref_result  = bench_dict[ref_key]
+        ref_key = max(bench_dict)
+        ref_res = bench_dict[ref_key]
 
-        # ───── 対象キー ─────
-        if keys is None:
-            target_keys = [ref_key]
-        elif isinstance(keys, (int, np.integer)):
-            if keys not in bench_dict:
-                raise ValueError(f"key={keys} が存在しません")
-            target_keys = [int(keys)]
-        else:
-            target_keys = [k for k in keys if k in bench_dict]
-            if not target_keys:
-                raise ValueError("keys に有効な格子キーがありません")
+        if key is None:
+            key = ref_key
+        if key not in bench_dict:
+            raise ValueError(f"key={key} が bench_results に存在しません")
+        res = bench_dict[key]
 
-        # ───── 補間誤差 ─────
-        def _nearest(arr, ax_ref, ax_tgt):
-            return interp1d(ax_ref, arr, kind="nearest", assume_sorted=True)(ax_tgt)
+        bench_type = bench_results["bench_type"]
 
-        def _err(res):
-            if bench_type == "spatial":
-                ref_f = np.stack([_nearest(ref_result["f"][:, j],
-                                           ref_result["x"], res["x"])
-                                   for j in range(len(res["v"]))], axis=1)
-            else:
-                ref_f = np.stack([_nearest(ref_result["f"][i, :],
-                                           ref_result["v"], res["v"])
-                                   for i in range(len(res["x"]))], axis=0)
-            return np.abs(res["f"] - ref_f)
+        # ─── 誤差計算 (nearest) ───
+        def ninterp(a, ax_ref, ax_tgt):
+            return interp1d(ax_ref, a, kind="nearest", assume_sorted=True)(ax_tgt)
 
-        def _cell_edges(center):
-            """セル中心座標 → エッジ座標 (len = N+1)"""
-            edges = np.empty(len(center) + 1, dtype=center.dtype)
-            edges[1:-1] = 0.5 * (center[:-1] + center[1:])
-            edges[0]  = center[0]  - (center[1] - center[0]) * 0.5
-            edges[-1] = center[-1] + (center[-1] - center[-2]) * 0.5
-            return edges
+        if bench_type == "spatial":
+            ref_f = np.stack(
+                [ninterp(ref_res["f"][:, j], ref_res["x"], res["x"])
+                 for j in range(len(res["v"]))], axis=1)
+        else:  # velocity
+            ref_f = np.stack(
+                [ninterp(ref_res["f"][i, :], ref_res["v"], res["v"])
+                 for i in range(len(res["x"]))], axis=0)
+        err = np.abs(res["f"] - ref_f)
+
+        f_val = np.asarray(res["f"])
+        nx, nv = f_val.shape
+
+        # ─── インデックスベースの UniformGrid ───
+        #   点数 = (nx+1, nv+1, 2)  → セル数 = nx × nv × 1
+        ug = pv.UniformGrid(
+            dimensions=(nx + 1, nv + 1, 2),
+            spacing=(1.0, 1.0, 1.0),            # 各セル ≈ 立方体
+            origin=(0.0, 0.0, 0.0),
+        )
+        ug.cell_data["f"]   = f_val.ravel(order="F")
+        ug.cell_data["err"] = err.ravel(order="F")
+
+        # ─── プロット ───
+        plotter = pv.Plotter(shape=(1, 2), border=False, lighting="none")
+        cmap_f, cmap_e = "cividis", "magma"
+
+        # f パネル
+        plotter.subplot(0, 0)
+        plotter.add_mesh(ug, scalars="f", cmap=cmap_f,
+                         opacity=1.0, show_edges=False)
+        plotter.add_scalar_bar(title="f(x,v)", n_labels=4, vertical=True)
+
+        # err パネル
+        plotter.subplot(0, 1)
+        plotter.add_mesh(ug, scalars="err", cmap=cmap_e,
+                         opacity=1.0, show_edges=False)
+        plotter.add_scalar_bar(title="|f − f_ref|", n_labels=4, vertical=True)
+
+        # 共通設定
+        plotter.link_views()
+        plotter.view_isometric()
+        plotter.add_text(
+            f"Grid {key}  (nx×nv={nx}×{nv})",
+            font_size=12, position="upper_edge"
+        )
 
         saved = []
+        if save_png:
+            fname = f"{fname_base}_grid{key}.png"
+            plotter.screenshot(fname, window_size=(1600, 900))
+            saved.append(fname)
+        if show_plots:
+            plotter.show()
+        plotter.close()
 
-        # ═════════════ 描画ループ ═════════════
-        for key in target_keys:
-            res   = bench_dict[key]
-            f_val = np.asarray(res["f"])
-            err   = _err(res)
+        return {"saved_files": saved, "grid_keys": [key]}
 
-            x_c, v_c = np.asarray(res["x"]), np.asarray(res["v"])
-            x_e, v_e = _cell_edges(x_c), _cell_edges(v_c)
-
-            # StructuredGrid 座標 (厚み = 1 単位セル)
-            X, V, Z = np.meshgrid(x_e, v_e, [0, 1], indexing="ij")
-            grid = pv.StructuredGrid(X, V, Z)
-            grid.cell_data["f"]   = f_val.ravel(order="F")
-            grid.cell_data["err"] = err.ravel(order="F")
-
-            # ── PyVista プロッタ（左右 2 シーン） ──
-            plotter = pv.Plotter(shape=(1, 2), border=False)
-            cmap_f, cmap_e = "cividis", "magma"
-
-            # 左: f
-            plotter.subplot(0, 0)
-            plotter.add_mesh(grid, scalars="f", cmap=cmap_f,
-                             show_edges=False, opacity=1.0)
-            plotter.add_scalar_bar(title="f(x,v)")
-
-            # 右: |err|
-            plotter.subplot(0, 1)
-            plotter.add_mesh(grid, scalars="err", cmap=cmap_e,
-                             show_edges=False, opacity=1.0)
-            plotter.add_scalar_bar(title="|f − f_ref|")
-
-            plotter.link_views()
-            plotter.view_isometric()
-            plotter.add_text(f"Grid {key}  (nx×nv={f_val.shape[0]}×{f_val.shape[1]})",
-                             font_size=10, position="upper_edge")
-
-            # 保存 & 表示
-            if save_png:
-                fname = f"{fname_base}_grid{key}.png"
-                plotter.screenshot(fname, transparent_background=False)
-                saved.append(fname)
-            if show_plots:
-                plotter.show()
-
-            plotter.close()
-
-        return {"saved_files": saved, "grid_keys": target_keys}
 
     # ベンチマーク結果の保存・読み込みユーティリティ
     def save_benchmark_results(self, bench_results: dict | None = None, filename: str = "benchmark_results.pkl") -> str:
