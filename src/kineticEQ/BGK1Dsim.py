@@ -703,7 +703,6 @@ class BGK1DBase:
 
         # エラー計算
         for grid_num in result_dict:
-            # 線形補間
             if bench_type == 'spatial':
                 # 空間ベンチマーク：x方向のみ補間（v方向は同じ格子）
                 current_result = result_dict[grid_num]
@@ -1147,220 +1146,142 @@ class BGK1DPlotMixin:
         }
 
     # ベンチマーク結果の分布関数プロット
-    def plot_distribution_heatmaps(self, bench_results: dict, 
-                                 show_plots: bool = True,
-                                 save_individual: bool = False,
-                                 fname_base: str = "distribution_heatmaps") -> dict:
+    def plot_distribution_heatmaps(
+        self,
+        bench_results: dict,
+        show_plots: bool = True,
+        save_individual: bool = False,
+        fname_base: str = "distribution_heatmaps"
+        ) -> dict:
         """
-        分布関数3次元プロット可視化メソッド
-
-        Parameters:
-        -----------
-        bench_results : dict
-            ベンチマーク結果辞書 {grid_key: {'f': array, 'x': array, 'v': array, ...}}
-        show_plots : bool, default=True  
-            プロットを画面に表示するかどうか
-        save_individual : bool, default=False
-            各格子レベルを個別ファイルに保存するかどうか
-        fname_base : str, default="distribution_heatmaps"
-            保存ファイル名のベース
-
-        Returns:
-        --------
-        dict
-            {'saved_files': list, 'grid_keys': list}
+        f(x,v) と |f − f_ref| をヒートマップで可視化
+        補間は compute_error と同じく nearest。引数と戻り値は従来どおり。
         """
-        import matplotlib.pyplot as plt
-        from mpl_toolkits.mplot3d import Axes3D
-
         if not bench_results:
             raise ValueError("ベンチマーク結果が空です")
 
-        # 格子キーをソート（数値キーのみ抽出）
-        numeric_keys = []
-        for key in bench_results.keys():
-            try:
-                int(key)  # 数値変換テスト
-                numeric_keys.append(key)
-            except ValueError:
-                # 'bench_type'などの文字列キーをスキップ
-                continue
-
-        if not numeric_keys:
+        # ─ 基本情報 ─
+        bench_type = bench_results["bench_type"]
+        bench_dict = {k: v for k, v in bench_results.items() if isinstance(k, int)}
+        if not bench_dict:
             raise ValueError("数値格子キーが見つかりません")
 
-        sorted_keys = sorted(numeric_keys, key=lambda x: int(x))
-        n_grids = len(sorted_keys)
+        ref_key      = max(bench_dict.keys())
+        ref_result   = bench_dict[ref_key]
+        sorted_keys  = sorted(bench_dict.keys())
+        n_grids      = len(sorted_keys)
 
-        print(f"検出された格子キー: {sorted_keys}")
+        # ─ 共通関数 ─
+        def nearest_interp(ref_arr, ref_axis, tgt_axis):
+            """ref_axis→tgt_axis へ最近接補間（1-D）"""
+            return interp1d(ref_axis, ref_arr, kind="nearest", assume_sorted=True)(tgt_axis)
 
+        def get_error(current_res):
+            """粗格子に合わせた絶対誤差 |f − f_ref| を返す"""
+            if bench_type == "spatial":
+                # x 方向だけ粗い
+                ref_f = np.zeros_like(current_res["f"])
+                for v_idx in range(len(current_res["v"])):
+                    ref_f[:, v_idx] = nearest_interp(
+                        ref_result["f"][:, v_idx],
+                        ref_result["x"], current_res["x"])
+            else:  # velocity
+                ref_f = np.zeros_like(current_res["f"])
+                for x_idx in range(len(current_res["x"])):
+                    ref_f[x_idx, :] = nearest_interp(
+                        ref_result["f"][x_idx, :],
+                        ref_result["v"], current_res["v"])
+            return np.abs(current_res["f"] - ref_f)
+
+        # ─ 保存ファイル名リスト ─
         saved_files = []
 
+        # ───────────────────────────────
+        # ① 個別保存モード
+        # ───────────────────────────────
         if save_individual:
-            # 個別ファイル保存
             for key in sorted_keys:
-                result = bench_results[key]
-                f_data = result['f']
-                x_data = result['x'] 
-                v_data = result['v']
+                res  = bench_dict[key]
+                f    = np.asarray(res["f"])
+                err  = get_error(res)
 
-                fig = plt.figure(figsize=(12, 9))
-                ax = fig.add_subplot(111, projection='3d')
+                fig, axes = plt.subplots(2, 1, figsize=(8, 10),
+                                         constrained_layout=True)
 
-                # f_dataがCPU numpyでない場合の対応
-                if hasattr(f_data, 'cpu'):
-                    f_cpu = f_data.cpu().numpy()
-                else:
-                    f_cpu = np.array(f_data)
+                # f(x,v)
+                im0 = axes[0].imshow(f, origin="lower", aspect="auto",
+                                     cmap="cividis")
+                axes[0].set_title(f"f(x,v) – Grid {key}")
+                fig.colorbar(im0, ax=axes[0])
 
-                if hasattr(x_data, 'cpu'):
-                    x_cpu = x_data.cpu().numpy()
-                else:
-                    x_cpu = np.array(x_data)
+                # |f − f_ref|
+                im1 = axes[1].imshow(err, origin="lower", aspect="auto",
+                                     cmap="magma",
+                                     norm=Normalize(vmin=0, vmax=err.max()))
+                axes[1].set_title(r"|f − f$_{\mathrm{ref}}$|")
+                fig.colorbar(im1, ax=axes[1])
 
-                if hasattr(v_data, 'cpu'):
-                    v_cpu = v_data.cpu().numpy()
-                else:
-                    v_cpu = np.array(v_data)
+                for ax in axes:
+                    ax.set_xlabel("v-index")
+                    ax.set_ylabel("x-index")
 
-                # メッシュグリッド作成
-                X, V = np.meshgrid(x_cpu, v_cpu, indexing='ij')
-
-                # 3Dサーフェスプロット作成
-                surf = ax.plot_surface(X, V, f_cpu, 
-                                     cmap='viridis', 
-                                     alpha=0.8,
-                                     linewidth=0.5,
-                                     antialiased=True)
-
-                ax.set_xlabel('Position x')
-                ax.set_ylabel('Velocity v')
-                ax.set_zlabel('f(x,v)')
-                ax.set_title(f'Distribution Function f(x,v) - Grid {key}')
-
-                # 視点設定
-                ax.view_init(elev=30, azim=45)
-
-                # カラーバー追加
-                cbar = plt.colorbar(surf, ax=ax, shrink=0.5, aspect=20)
-                cbar.set_label('f(x,v)')
-
-                plt.tight_layout()
-
-                # ファイル保存
-                filename = f"{fname_base}_grid_{key}.png"
                 if show_plots:
                     plt.show()
-                    print(f"格子{key}の3Dプロットを表示しました")
+                fname = f"{fname_base}_grid_{key}.png"
+                fig.savefig(fname, dpi=300, bbox_inches="tight")
+                plt.close(fig)
+                saved_files.append(fname)
 
-                plt.savefig(filename, dpi=300, bbox_inches='tight')
-                plt.close()
-                saved_files.append(filename)
-
+        # ───────────────────────────────
+        # ② 統合保存モード
+        # ───────────────────────────────
         else:
-            # 統合ファイル保存（サブプロット）
-            # グリッド数に応じてサブプロット配置を決定
-            if n_grids <= 2:
-                rows, cols = 1, n_grids
-                figsize = (8 * cols, 8)
-            elif n_grids <= 4:
-                rows, cols = 2, 2
-                figsize = (16, 16)
-            elif n_grids <= 6:
-                rows, cols = 2, 3
-                figsize = (24, 16)
-            elif n_grids <= 9:
-                rows, cols = 3, 3
-                figsize = (24, 24)
-            else:
-                rows, cols = 4, int(np.ceil(n_grids / 4))
-                figsize = (8 * cols, 8 * rows)
+            # 2 行（上: f, 下: 誤差）× n_grids 列
+            fig, axes = plt.subplots(2, n_grids,
+                                     figsize=(4 * n_grids, 8),
+                                     constrained_layout=True)
 
-            fig = plt.figure(figsize=figsize)
+            # 共通カラー範囲（f 用）
+            f_all = np.concatenate([np.asarray(bench_dict[k]["f"]).ravel()
+                                    for k in sorted_keys])
+            f_norm = Normalize(vmin=f_all.min(), vmax=f_all.max())
 
-            # 全データの最大値・最小値を事前計算（カラーマップ統一）
-            f_max = 0
-            f_min = float('inf')
-            for key in sorted_keys:
-                result = bench_results[key]
-                f_data = result['f']
-                if hasattr(f_data, 'cpu'):
-                    f_cpu = f_data.cpu().numpy()
-                else:
-                    f_cpu = np.array(f_data)
-                f_max = max(f_max, np.max(f_cpu))
-                f_min = min(f_min, np.min(f_cpu))
+            for col, key in enumerate(sorted_keys):
+                res  = bench_dict[key]
+                f    = np.asarray(res["f"])
+                err  = get_error(res)
 
-            # 各格子レベルをプロット
-            for i, key in enumerate(sorted_keys):
-                result = bench_results[key]
-                f_data = result['f']
-                x_data = result['x']
-                v_data = result['v']
+                # f
+                im0 = axes[0, col].imshow(f, origin="lower", aspect="auto",
+                                          cmap="cividis", norm=f_norm)
+                axes[0, col].set_title(f"f – N={key}")
 
-                # CPU配列に変換
-                if hasattr(f_data, 'cpu'):
-                    f_cpu = f_data.cpu().numpy()
-                else:
-                    f_cpu = np.array(f_data)
+                # error
+                im1 = axes[1, col].imshow(err, origin="lower", aspect="auto",
+                                          cmap="magma",
+                                          norm=Normalize(vmin=0, vmax=err.max()))
+                axes[1, col].set_title("|f − f_ref|")
 
-                if hasattr(x_data, 'cpu'):
-                    x_cpu = x_data.cpu().numpy()
-                else:
-                    x_cpu = np.array(x_data)
+                for ax in (axes[0, col], axes[1, col]):
+                    ax.set_xlabel("v")
+                    ax.set_ylabel("x")
 
-                if hasattr(v_data, 'cpu'):
-                    v_cpu = v_data.cpu().numpy()
-                else:
-                    v_cpu = np.array(v_data)
+            # 個別カラーバー
+            fig.colorbar(im0, ax=axes[0, :].tolist(), shrink=0.6, location="right")
+            fig.colorbar(im1, ax=axes[1, :].tolist(), shrink=0.6, location="right")
 
-                # 3Dサブプロット作成
-                ax = fig.add_subplot(rows, cols, i+1, projection='3d')
-
-                # メッシュグリッド作成
-                X, V = np.meshgrid(x_cpu, v_cpu, indexing='ij')
-
-                # 3Dサーフェスプロット作成
-                surf = ax.plot_surface(X, V, f_cpu, 
-                                     cmap='viridis', 
-                                     alpha=0.8,
-                                     linewidth=0.3,
-                                     antialiased=True,
-                                     vmin=f_min, vmax=f_max)
-
-                ax.set_xlabel('Position x')
-                ax.set_ylabel('Velocity v')
-                ax.set_zlabel('f(x,v)')
-                ax.set_title(f'f(x,v) - Grid {key}')
-
-                # 視点設定
-                ax.view_init(elev=30, azim=45)
-
-                # Z軸範囲統一
-                ax.set_zlim([f_min, f_max])
-
-            plt.tight_layout()
-
-            # 統合ファイル保存
-            filename = f"{fname_base}.png"
             if show_plots:
                 plt.show()
-                print(f"全{n_grids}格子の3Dプロットを表示しました")
+            fname = f"{fname_base}.png"
+            fig.savefig(fname, dpi=300, bbox_inches="tight")
+            plt.close(fig)
+            saved_files.append(fname)
 
-            plt.savefig(filename, dpi=300, bbox_inches='tight')
-            plt.close()
-            saved_files.append(filename)
+        print("=== ヒートマップ保存完了 ===")
+        for i, f in enumerate(saved_files, 1):
+            print(f"{i}. {f}")
 
-        print(f"\n=== 3Dプロット保存完了 ===")
-        print(f"格子レベル数: {n_grids}")
-        print(f"保存ファイル: {len(saved_files)}個")
-        for i, file in enumerate(saved_files):
-            print(f"  {i+1}. {file}")
-
-        return {
-            'saved_files': saved_files,
-            'grid_keys': sorted_keys
-        }
+        return {"saved_files": saved_files, "grid_keys": sorted_keys}
 
     # ベンチマーク結果の分布関数インタラクティブ3次元プロット
     def plot_distribution_interactive(self, bench_results: dict, 
