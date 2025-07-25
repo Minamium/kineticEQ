@@ -1307,7 +1307,7 @@ class BGK1DPlotMixin:
     # ベンチマーク結果の分布関数インタラクティブ3次元プロット
     def plot_distribution_interactive(self, bench_results: dict, 
                                      show_plots: bool = True,
-                                     save_html: bool = True,
+                                     save_html: bool = False,
                                      fname_base: str = "distribution_interactive") -> dict:
         """
         分布関数インタラクティブ3次元プロット可視化メソッド（個別ファイル保存）
