@@ -1230,29 +1230,34 @@ class BGK1DPlotMixin:
                 if show_plots:
                     plt.show()
                 fname = f"{fname_base}_grid_{key}.png"
-                fig.savefig(fname, dpi=300, bbox_inches="tight")
+                fig.savefig(fname, dpi=300, bbox_inches='tight')
                 plt.close(fig)
                 saved_files.append(fname)
 
         # ─────────────────────────────────────────────
-        # ② 統合保存モード
+        # ② 統合保存モード（3 列固定）
         # ─────────────────────────────────────────────
         else:
-            ## サブプロット行列サイズを計算
+            # サブプロット行列サイズ
             n_cols  = 3
-            n_pairs = n_grids
-            n_rows  = 2 * int(np.ceil(n_pairs / n_cols))   # f と err で 2 倍
+            n_rows  = 2 * int(np.ceil(n_grids / n_cols))   # f と err で 2 倍
 
             fig, axes = plt.subplots(
-                n_rows, n_cols, figsize=(9, 3 * n_rows),  # 1 サブプロット 3×3 inch
+                n_rows, n_cols, figsize=(9, 3 * n_rows),
                 constrained_layout=True
             )
 
-            # カラースケールを全格子で統一（f 用）
+            # f 用カラースケール（共有）
             f_all  = np.concatenate(
                 [np.asarray(bench_dict[k]["f"]).ravel() for k in sorted_keys]
             )
             f_norm = Normalize(vmin=f_all.min(), vmax=f_all.max())
+
+            # err 用カラースケール（共有）
+            err_all  = np.concatenate(
+                [_get_error(bench_dict[k]).ravel() for k in sorted_keys]
+            )
+            err_norm = Normalize(vmin=0, vmax=err_all.max())
 
             # --------------------- 描画ループ ---------------------
             for idx, key in enumerate(sorted_keys):
@@ -1274,8 +1279,7 @@ class BGK1DPlotMixin:
                 # |f − f_ref|
                 ax_e = axes[pair_row + 1, col]
                 im_e = ax_e.imshow(err, origin="lower", aspect="auto",
-                                   cmap="magma",
-                                   norm=Normalize(vmin=0, vmax=err.max()))
+                                   cmap="magma", norm=err_norm)
                 ax_e.set_title("|f − f_ref|")
                 ax_e.set_xlabel("v")
                 ax_e.set_ylabel("x")
