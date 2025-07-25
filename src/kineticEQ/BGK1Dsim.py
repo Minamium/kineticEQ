@@ -1305,185 +1305,151 @@ class BGK1DPlotMixin:
         return {"saved_files": saved_files, "grid_keys": sorted_keys}
 
     # ベンチマーク結果の分布関数インタラクティブ3次元プロット
-    def plot_distribution_interactive(self, bench_results: dict, 
-                                     show_plots: bool = True,
-                                     save_html: bool = False,
-                                     fname_base: str = "distribution_interactive") -> dict:
+    def plot_distribution_interactive(
+        self,
+        bench_results: dict,
+        keys: list[int] | None = None,          # ← 追加：描画対象の格子キー
+        show_plots: bool = True,
+        save_html: bool = False,
+        fname_base: str = "distribution_interactive"
+        ) -> dict:
         """
-        分布関数インタラクティブ3次元プロット可視化メソッド（個別ファイル保存）
+        指定された格子キーについて
+        * f(x,v) の 3D サーフェス
+        * |f − f_ref| の 3D サーフェス
+        を横並びで表示・保存する。
 
-        Parameters:
-        -----------
-        bench_results : dict
-            ベンチマーク結果辞書 {grid_key: {'f': array, 'x': array, 'v': array, ...}}
-        show_plots : bool, default=True  
-            プロットを画面に表示するかどうか
-        save_html : bool, default=True
-            HTMLファイルとして保存するかどうか
-        fname_base : str, default="distribution_interactive"
-            保存ファイル名のベース
-
-        Returns:
-        --------
-        dict
-            {'saved_files': list, 'grid_keys': list}
+        Notes
+        -----
+        - `keys` が None の場合は最細格子（max key）のみ描画
+        - 誤差は `bench_type` を参照し、compute_error と同じ最近接補間で計算
         """
+        import numpy as np
+        from matplotlib.colors import Normalize
+        from scipy.interpolate import interp1d
         try:
             import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
         except ImportError:
-            raise ImportError("Plotlyが必要です: pip install plotly")
+            raise ImportError("Plotly が必要です: pip install plotly")
 
+        # ─── 入力チェック ───
         if not bench_results:
             raise ValueError("ベンチマーク結果が空です")
 
-        # 格子キーをソート（数値キーのみ抽出）
-        numeric_keys = []
-        for key in bench_results.keys():
-            try:
-                int(key)  # 数値変換テスト
-                numeric_keys.append(key)
-            except ValueError:
-                # 'bench_type'などの文字列キーをスキップ
-                continue
-
-        if not numeric_keys:
+        bench_type = bench_results["bench_type"]
+        bench_dict = {k: v for k, v in bench_results.items() if isinstance(k, int)}
+        if not bench_dict:
             raise ValueError("数値格子キーが見つかりません")
 
-        sorted_keys = sorted(numeric_keys, key=lambda x: int(x))
-        n_grids = len(sorted_keys)
+        ref_key    = max(bench_dict.keys())
+        ref_result = bench_dict[ref_key]
 
-        print(f"検出された格子キー: {sorted_keys}")
+        # 対象キー決定
+        if keys is None:
+            target_keys = [ref_key]           # デフォルト: 最細格子
+        else:
+            target_keys = [k for k in keys if k in bench_dict]
+            if not target_keys:
+                raise ValueError("指定 keys が bench_results に存在しません")
+
+        # ─── 関数定義 ───
+        def _nearest_interp(ref_arr, ref_axis, tgt_axis):
+            return interp1d(ref_axis, ref_arr,
+                            kind="nearest", assume_sorted=True)(tgt_axis)
+
+        def _get_error(coarse_res):
+            """粗格子に合わせた |f − f_ref|"""
+            if bench_type == "spatial":
+                ref_f = np.zeros_like(coarse_res["f"])
+                for v_idx in range(len(coarse_res["v"])):
+                    ref_f[:, v_idx] = _nearest_interp(
+                        ref_result["f"][:, v_idx],
+                        ref_result["x"], coarse_res["x"])
+            else:  # velocity
+                ref_f = np.zeros_like(coarse_res["f"])
+                for x_idx in range(len(coarse_res["x"])):
+                    ref_f[x_idx, :] = _nearest_interp(
+                        ref_result["f"][x_idx, :],
+                        ref_result["v"], coarse_res["v"])
+            return np.abs(coarse_res["f"] - ref_f)
+
+        # f, err のグローバル正規化
+        all_f   = np.concatenate([bench_dict[k]["f"].ravel() for k in target_keys])
+        f_min   = all_f.min()
+        f_max   = all_f.max()
+        all_err = np.concatenate([_get_error(bench_dict[k]).ravel() for k in target_keys])
+        err_max = all_err.max()
 
         saved_files = []
 
-        # 全データの最大値・最小値を事前計算（カラーマップ統一）
-        f_max = 0
-        f_min = float('inf')
-        for key in sorted_keys:
-            result = bench_results[key]
-            f_data = result['f']
-            if hasattr(f_data, 'cpu'):
-                f_cpu = f_data.cpu().numpy()
-            else:
-                f_cpu = np.array(f_data)
-            f_max = max(f_max, np.max(f_cpu))
-            f_min = min(f_min, np.min(f_cpu))
+        # ─── 描画ループ ───
+        for key in target_keys:
+            res  = bench_dict[key]
+            f    = np.asarray(res["f"])
+            err  = _get_error(res)
+            x    = np.asarray(res["x"])
+            v    = np.asarray(res["v"])
 
-        print(f"分布関数の値範囲: [{f_min:.6f}, {f_max:.6f}]")
-
-        # 各格子レベルを個別にプロット
-        for i, key in enumerate(sorted_keys):
-            result = bench_results[key]
-            f_data = result['f']
-            x_data = result['x']
-            v_data = result['v']
-
-            # CPU配列に変換
-            if hasattr(f_data, 'cpu'):
-                f_cpu = f_data.cpu().numpy()
-            else:
-                f_cpu = np.array(f_data)
-
-            if hasattr(x_data, 'cpu'):
-                x_cpu = x_data.cpu().numpy()
-            else:
-                x_cpu = np.array(x_data)
-
-            if hasattr(v_data, 'cpu'):
-                v_cpu = v_data.cpu().numpy()
-            else:
-                v_cpu = np.array(v_data)
-
-            # 格子情報を取得
-            nx, nv = f_cpu.shape
-            x_min, x_max = x_cpu[0], x_cpu[-1]
-            v_min, v_max = v_cpu[0], v_cpu[-1]
-
-            # 個別の図を作成
-            fig = go.Figure()
-
-            # 3Dサーフェスプロット作成
-            surface = go.Surface(
-                x=x_cpu,
-                y=v_cpu,
-                z=f_cpu.T,
-                colorscale='Viridis',
-                cmin=f_min,
-                cmax=f_max,
-                colorbar=dict(
-                    title="f(x,v)",
-                ),
-                hovertemplate='x: %{x:.3f}<br>v: %{y:.3f}<br>f: %{z:.6f}<extra></extra>'
+            # Figure with 2 surfaces side-by-side
+            fig = make_subplots(
+                rows=1, cols=2,
+                specs=[[{'type': 'surface'}, {'type': 'surface'}]],
+                column_widths=[0.5, 0.5],
+                horizontal_spacing=0.05,
+                subplot_titles=("f(x,v)", "|f − f_ref|")
             )
 
-            fig.add_trace(surface)
-
-            # レイアウト設定
-            fig.update_layout(
-                title=dict(
-                    text=f"Distribution Function f(x,v) - Grid {key}<br>"
-                         f"Size: {nx}×{nv}, Range: x∈[{x_min:.2f},{x_max:.2f}], v∈[{v_min:.2f},{v_max:.2f}]",
-                    x=0.5,
-                    font=dict(size=16)
+            # f surface
+            fig.add_trace(
+                go.Surface(
+                    x=x, y=v, z=f.T,
+                    colorscale="Viridis",
+                    cmin=f_min, cmax=f_max,
+                    showscale=False,
+                    hovertemplate='x:%{x:.3f}<br>v:%{y:.3f}<br>f:%{z:.6f}<extra></extra>'
                 ),
+                row=1, col=1
+            )
+
+            # error surface
+            fig.add_trace(
+                go.Surface(
+                    x=x, y=v, z=err.T,
+                    colorscale="Magma",
+                    cmin=0, cmax=err_max,
+                    showscale=False,
+                    hovertemplate='x:%{x:.3f}<br>v:%{y:.3f}<br>|err|:%{z:.6e}<extra></extra>'
+                ),
+                row=1, col=2
+            )
+
+            # レイアウト
+            fig.update_layout(
+                title=f"Grid {key} – nx×nv = {f.shape[0]}×{f.shape[1]}",
                 scene=dict(
-                    xaxis_title='Position x',
-                    yaxis_title='Velocity v',
-                    zaxis_title='f(x,v)',
-                    camera=dict(
-                        eye=dict(x=1.5, y=1.5, z=1.5)
-                    ),
+                    xaxis_title='x', yaxis_title='v', zaxis_title='f',
                     aspectmode='cube'
                 ),
-                width=800,
-                height=600,
-                margin=dict(l=50, r=50, t=100, b=50)
+                scene2=dict(
+                    xaxis_title='x', yaxis_title='v', zaxis_title='|err|',
+                    aspectmode='cube'
+                ),
+                width=1100, height=550,
+                margin=dict(l=20, r=20, t=40, b=20)
             )
 
-            # HTMLファイル保存
+            # 保存
             if save_html:
-                filename = f"{fname_base}_grid{key}.html"
-                fig.write_html(filename)
-                saved_files.append(filename)
-                print(f"Grid {key}: {filename} を保存")
+                fname = f"{fname_base}_grid{key}.html"
+                fig.write_html(fname)
+                saved_files.append(fname)
+                print(f"Grid {key}: {fname} を保存")
 
-            # 表示
             if show_plots:
                 fig.show()
-                print(f"Grid {key}: インタラクティブ3Dプロットを表示")
 
-        print(f"\n=== インタラクティブ3Dプロット完了 ===")
-        print(f"格子レベル数: {n_grids}")
-        print(f"保存ファイル: {len(saved_files)}個")
-        for i, file in enumerate(saved_files):
-            print(f"  {i+1}. {file}")
-
-        # 各格子の詳細情報を表示
-        print("\n各格子の詳細:")
-        for key in sorted_keys:
-            result = bench_results[key]
-            if hasattr(result['x'], 'cpu'):
-                x_min, x_max = result['x'].cpu().numpy()[0], result['x'].cpu().numpy()[-1]
-                v_min, v_max = result['v'].cpu().numpy()[0], result['v'].cpu().numpy()[-1]
-                nx, nv = result['f'].cpu().numpy().shape
-            else:
-                x_min, x_max = result['x'][0], result['x'][-1]
-                v_min, v_max = result['v'][0], result['v'][-1]
-                nx, nv = result['f'].shape
-            print(f"  Grid {key}: {nx}×{nv}, x=[{x_min:.3f}, {x_max:.3f}], v=[{v_min:.3f}, {v_max:.3f}]")
-
-        print(f"\n分布関数値範囲: [{f_min:.6f}, {f_max:.6f}]")
-        print("\n操作方法:")
-        print("  - マウスドラッグ: 回転")
-        print("  - ホイール: ズーム")
-        print("  - Shift+ドラッグ: パン")
-        print("  - ホバー: 値表示")
-        print("\n各格子レベルを個別のHTMLファイルで確認してください。")
-
-        return {
-            'saved_files': saved_files,
-            'grid_keys': sorted_keys
-        }
+        return {"saved_files": saved_files, "grid_keys": target_keys}
 
     # ベンチマーク結果の保存・読み込みユーティリティ
     def save_benchmark_results(self, bench_results: dict | None = None, filename: str = "benchmark_results.pkl") -> str:

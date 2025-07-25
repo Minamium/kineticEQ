@@ -1,6 +1,5 @@
 # kineticEQ
 Hello, Github.
-
 This is a kinetic equation solver useing torch library.
 
 ## Installation
@@ -20,8 +19,8 @@ sim = BGK1D({
         #"solver": "implicit",
         "solver": "explicit",
 
-        # chose implicit solver
-        "implicit_solver": "cuSOLVER",
+        # if you chose implicit, chose implicit solver.
+        #"implicit_solver": "cuSOLVER",
         #"implicit_solver": "tdma",
         #"implicit_solver": "full",
 
@@ -30,13 +29,13 @@ sim = BGK1D({
         "picard_tol": 1e-6,
 
         # chose hyperparameter
-        "tau_tilde": 5e-6,
+        "tau_tilde": 5e-2,
 
         # chose numercial parameter
-        "nx": 10000,
-        "nv": 1000,
+        "nx": 128,
+        "nv": 64,
         "v_max": 10.0,
-        "dt": 5e-6,
+        "dt": 5e-3,
 
         "initial_regions": [
         {"x_range": (0.0, 0.5), "n": 1.0, "u": 0.0, "T": 1.0},
