@@ -7,7 +7,7 @@ This is a kinetic equation solver useing torch library.
 
 ```bash
 git clone https://github.com/Minamium/kineticEQ.git
-pip install -e kineticEQ
+pip install -e ./kineticEQ
 ```
 
 ## Usage
