@@ -1308,97 +1308,177 @@ class BGK1DPlotMixin:
     def plot_distribution_interactive(
         self,
         bench_results: dict,
-        keys: int | list[int] | None = None,
-        style: str = "volume",              # "surface" / "voxel" / "volume"
+        keys: int | list[int] | None = None,          # 描画する格子キー
+        style: str = "volume",                        # "surface" | "voxel" | "volume"
         show_plots: bool = True,
         save_html: bool = False,
         fname_base: str = "distribution_interactive"
         ) -> dict:
         """
-        style="volume" で f と |f−f_ref| を半透明ボリュームとして表示。
-        そのほかの引数・戻り値は従来と同じ。
+        指定格子キーの f(x,v) と |f − f_ref| を 3-D 可視化する。
+
+        Notes
+        -----
+        * keys=None            → 最細格子のみ
+        * keys=129             → 単一キー
+        * keys=[33,65,129]     → 列挙
+        * style
+            - "surface" : 従来の滑らかなサーフェス
+            - "voxel"   : Plotly 5 系限定の立方体セル表示
+            - "volume"  : 半透明 Volume 表示（6 系でも可）
         """
         import numpy as np
         from scipy.interpolate import interp1d
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
 
-        # ───── 入力検証・キー決定（略） ─────
-        # ※ ここは前回版と同じロジックを使う
-        # ...（bench_dict, ref_result, target などを用意）...
+        # ── voxel 用関数の有無を確認 ──
+        _has_voxel = False
+        if style == "voxel":
+            try:
+                from plotly.figure_factory import create_voxel
+                _has_voxel = True
+            except (ImportError, AttributeError):
+                print("⚠ create_voxel が見つからないため style='surface' に切替えます")
+                style = "surface"
 
-        # ───── 誤差計算関数（略） ─────
-        # ... _err(res) を定義 ...
+        # ── 入力チェック ──
+        if not bench_results:
+            raise ValueError("ベンチマーク結果が空です")
 
-        saved = []
-        for k in target:
-            res = bench_dict[k]
-            fval = np.asarray(res["f"])
-            err  = _err(res)
-            nx, nv = fval.shape
+        bench_type = bench_results["bench_type"]
+        bench_dict = {k: v for k, v in bench_results.items() if isinstance(k, int)}
+        if not bench_dict:
+            raise ValueError("数値格子キーが見つかりません")
 
-            # 3D 配列を薄い板状に拡張：shape = (nx, nv, 1)
-            f_vol  = fval[:, :, None]
-            err_vol = err[:, :, None]
+        ref_key     = max(bench_dict.keys())
+        ref_result  = bench_dict[ref_key]
+
+        # ── 対象キー決定 ──
+        if keys is None:
+            target_keys = [ref_key]
+        elif isinstance(keys, (int, np.integer)):
+            if keys not in bench_dict:
+                raise ValueError(f"key={keys} は存在しません")
+            target_keys = [int(keys)]
+        else:
+            target_keys = [k for k in keys if k in bench_dict]
+            if not target_keys:
+                raise ValueError("keys に有効な格子キーがありません")
+
+        # ── 誤差計算 ──
+        def _nearest(arr, ax_ref, ax_tgt):
+            return interp1d(ax_ref, arr, kind="nearest", assume_sorted=True)(ax_tgt)
+
+        def _get_err(res):
+            if bench_type == "spatial":
+                ref_f = np.stack([_nearest(ref_result["f"][:, j],
+                                           ref_result["x"], res["x"])
+                                   for j in range(len(res["v"]))], axis=1)
+            else:
+                ref_f = np.stack([_nearest(ref_result["f"][i, :],
+                                           ref_result["v"], res["v"])
+                                   for i in range(len(res["x"]))], axis=0)
+            return np.abs(res["f"] - ref_f)
+
+        # ── 共通カラースケール ──
+        all_f   = np.concatenate([bench_dict[k]["f"].ravel() for k in target_keys])
+        all_err = np.concatenate([_get_err(bench_dict[k]).ravel() for k in target_keys])
+        f_min, f_max   = all_f.min(),  all_f.max()
+        err_min, err_max = 0,          all_err.max()
+
+        saved_files = []
+
+        # ═════════════ 描画ループ ═════════════
+        for key in target_keys:
+            res   = bench_dict[key]
+            f_val = np.asarray(res["f"])
+            err   = _get_err(res)
+            nx, nv = f_val.shape
 
             fig = make_subplots(
                 rows=1, cols=2,
                 specs=[[{"type": "scene"}, {"type": "scene"}]],
                 subplot_titles=("f(x,v)", "|f − f_ref|"),
-                horizontal_spacing=0.05,
-            )
+                horizontal_spacing=0.05)
 
-            # ── f Volume ──
-            fig.add_trace(
-                go.Volume(
+            # ─ f 描画 ─
+            if style == "surface":
+                fig.add_surface(
+                    x=res["x"], y=res["v"], z=f_val.T,
+                    colorscale="Viridis", cmin=f_min, cmax=f_max,
+                    showscale=False,
+                    hovertemplate="x=%{x:.3f}<br>v=%{y:.3f}<br>f=%{z:.6f}<extra></extra>",
+                    row=1, col=1)
+            elif style == "voxel" and _has_voxel:
+                xx, vv, zz = np.mgrid[0:nx, 0:nv, 0:1]
+                vox_f = create_voxel(
+                    xx, vv, zz,
+                    value=f_val[..., None],
+                    opacity=0.9, colorscale="Viridis",
+                    cmin=f_min, cmax=f_max, showscale=False)
+                for tr in vox_f.data:
+                    tr.hovertemplate="x=%{x}<br>v=%{y}<br>f=%{value:.6f}<extra></extra>"
+                    fig.add_trace(tr, row=1, col=1)
+            else:  # volume
+                fig.add_volume(
                     x=np.repeat(np.arange(nx), nv),
                     y=np.tile  (np.arange(nv), nx),
                     z=np.zeros(nx*nv),
-                    value=f_vol.ravel(),
-                    isomin=f_vol.min(), isomax=f_vol.max(),
-                    opacity=0.8,
-                    surface_count=15,
-                    colorscale="Viridis",
-                    showscale=False,
+                    value=f_val.ravel(),
+                    isomin=f_min, isomax=f_max,
+                    opacity=0.8, surface_count=15,
+                    colorscale="Viridis", showscale=False,
                     hovertemplate="x=%{x}<br>v=%{y}<br>f=%{value:.6f}<extra></extra>",
-                ),
-                row=1, col=1
-            )
+                    row=1, col=1)
 
-            # ── err Volume ──
-            fig.add_trace(
-                go.Volume(
+            # ─ err 描画 ─
+            if style == "surface":
+                fig.add_surface(
+                    x=res["x"], y=res["v"], z=err.T,
+                    colorscale="Magma", cmin=err_min, cmax=err_max,
+                    showscale=False,
+                    hovertemplate="x=%{x:.3f}<br>v=%{y:.3f}<br>|err|=%{z:.6e}<extra></extra>",
+                    row=1, col=2)
+            elif style == "voxel" and _has_voxel:
+                xx, vv, zz = np.mgrid[0:nx, 0:nv, 0:1]
+                vox_e = create_voxel(
+                    xx, vv, zz,
+                    value=err[..., None],
+                    opacity=0.9, colorscale="Magma",
+                    cmin=err_min, cmax=err_max, showscale=False)
+                for tr in vox_e.data:
+                    tr.hovertemplate="x=%{x}<br>v=%{y}<br>|err|=%{value:.6e}<extra></extra>"
+                    fig.add_trace(tr, row=1, col=2)
+            else:  # volume
+                fig.add_volume(
                     x=np.repeat(np.arange(nx), nv),
                     y=np.tile  (np.arange(nv), nx),
                     z=np.zeros(nx*nv),
-                    value=err_vol.ravel(),
-                    isomin=0, isomax=err_vol.max(),
-                    opacity=0.8,
-                    surface_count=15,
-                    colorscale="Magma",
-                    showscale=False,
+                    value=err.ravel(),
+                    isomin=err_min, isomax=err_max,
+                    opacity=0.8, surface_count=15,
+                    colorscale="Magma", showscale=False,
                     hovertemplate="x=%{x}<br>v=%{y}<br>|err|=%{value:.6e}<extra></extra>",
-                ),
-                row=1, col=2
-            )
+                    row=1, col=2)
 
+            # ─ レイアウト ─
             fig.update_layout(
-                title=f"Grid {k} (nx×nv={nx}×{nv}) – volume",
+                title=f"Grid {key}  (nx×nv={nx}×{nv})  [{style}]",
                 width=1100, height=550,
-                margin=dict(l=20, r=20, t=60, b=20),
-            )
+                margin=dict(l=20, r=20, t=60, b=20))
             fig.update_scenes(aspectmode="cube",
                               xaxis_title="x", yaxis_title="v", zaxis_title="")
 
-            # 保存・表示
+            # 保存 / 表示
             if save_html:
-                fn = f"{fname_base}_grid{k}_volume.html"
-                fig.write_html(fn)
-                saved.append(fn)
+                fname = f"{fname_base}_grid{key}_{style}.html"
+                fig.write_html(fname)
+                saved_files.append(fname)
             if show_plots:
                 fig.show()
 
-        return {"saved_files": saved, "grid_keys": target}
+        return {"saved_files": saved_files, "grid_keys": target_keys}
 
     # ベンチマーク結果の保存・読み込みユーティリティ
     def save_benchmark_results(self, bench_results: dict | None = None, filename: str = "benchmark_results.pkl") -> str:
