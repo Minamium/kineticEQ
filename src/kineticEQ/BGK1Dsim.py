@@ -1154,72 +1154,69 @@ class BGK1DPlotMixin:
         fname_base: str = "distribution_heatmaps"
         ) -> dict:
         """
-        f(x,v) と |f − f_ref| をヒートマップで可視化
+        f(x,v) と |f − f_ref| をヒートマップで可視化。
         補間は compute_error と同じく nearest。引数と戻り値は従来どおり。
         """
-
+        import numpy as np
         import matplotlib.pyplot as plt
         from matplotlib.colors import Normalize
-        
-        
+        from scipy.interpolate import interp1d
+
+        # ────────────── 入力チェック ──────────────
         if not bench_results:
             raise ValueError("ベンチマーク結果が空です")
 
-        # ─ 基本情報 ─
         bench_type = bench_results["bench_type"]
         bench_dict = {k: v for k, v in bench_results.items() if isinstance(k, int)}
         if not bench_dict:
             raise ValueError("数値格子キーが見つかりません")
 
-        ref_key      = max(bench_dict.keys())
-        ref_result   = bench_dict[ref_key]
-        sorted_keys  = sorted(bench_dict.keys())
-        n_grids      = len(sorted_keys)
+        ref_key     = max(bench_dict.keys())
+        ref_result  = bench_dict[ref_key]
+        sorted_keys = sorted(bench_dict.keys())
+        n_grids     = len(sorted_keys)
 
-        # ─ 共通関数 ─
-        def nearest_interp(ref_arr, ref_axis, tgt_axis):
-            """ref_axis→tgt_axis へ最近接補間（1-D）"""
-            return interp1d(ref_axis, ref_arr, kind="nearest", assume_sorted=True)(tgt_axis)
+        # ────────────── 補間と誤差計算 ──────────────
+        def _nearest_interp(ref_arr, ref_axis, tgt_axis):
+            return interp1d(ref_axis, ref_arr,
+                            kind="nearest", assume_sorted=True)(tgt_axis)
 
-        def get_error(current_res):
-            """粗格子に合わせた絶対誤差 |f − f_ref| を返す"""
+        def _get_error(coarse_res):
+            """粗格子に合わせた |f − f_ref|"""
             if bench_type == "spatial":
-                # x 方向だけ粗い
-                ref_f = np.zeros_like(current_res["f"])
-                for v_idx in range(len(current_res["v"])):
-                    ref_f[:, v_idx] = nearest_interp(
+                ref_f = np.zeros_like(coarse_res["f"])
+                for v_idx in range(len(coarse_res["v"])):
+                    ref_f[:, v_idx] = _nearest_interp(
                         ref_result["f"][:, v_idx],
-                        ref_result["x"], current_res["x"])
+                        ref_result["x"], coarse_res["x"])
             else:  # velocity
-                ref_f = np.zeros_like(current_res["f"])
-                for x_idx in range(len(current_res["x"])):
-                    ref_f[x_idx, :] = nearest_interp(
+                ref_f = np.zeros_like(coarse_res["f"])
+                for x_idx in range(len(coarse_res["x"])):
+                    ref_f[x_idx, :] = _nearest_interp(
                         ref_result["f"][x_idx, :],
-                        ref_result["v"], current_res["v"])
-            return np.abs(current_res["f"] - ref_f)
+                        ref_result["v"], coarse_res["v"])
+            return np.abs(coarse_res["f"] - ref_f)
 
-        # ─ 保存ファイル名リスト ─
+        # ────────────── 保存ファイル管理 ──────────────
         saved_files = []
 
-        # ───────────────────────────────
+        # ─────────────────────────────────────────────
         # ① 個別保存モード
-        # ───────────────────────────────
+        # ─────────────────────────────────────────────
         if save_individual:
             for key in sorted_keys:
                 res  = bench_dict[key]
                 f    = np.asarray(res["f"])
-                err  = get_error(res)
+                err  = _get_error(res)
 
                 fig, axes = plt.subplots(2, 1, figsize=(8, 10),
                                          constrained_layout=True)
 
-                # f(x,v)
                 im0 = axes[0].imshow(f, origin="lower", aspect="auto",
                                      cmap="cividis")
                 axes[0].set_title(f"f(x,v) – Grid {key}")
                 fig.colorbar(im0, ax=axes[0])
 
-                # |f − f_ref|
                 im1 = axes[1].imshow(err, origin="lower", aspect="auto",
                                      cmap="magma",
                                      norm=Normalize(vmin=0, vmax=err.max()))
@@ -1237,31 +1234,27 @@ class BGK1DPlotMixin:
                 plt.close(fig)
                 saved_files.append(fname)
 
-        # ───────────────────────────────
+        # ─────────────────────────────────────────────
         # ② 統合保存モード
-        # ───────────────────────────────
+        # ─────────────────────────────────────────────
         else:
-            # 2 行（上: f, 下: 誤差）× n_grids 列
             fig, axes = plt.subplots(2, n_grids,
                                      figsize=(4 * n_grids, 8),
                                      constrained_layout=True)
 
-            # 共通カラー範囲（f 用）
-            f_all = np.concatenate([np.asarray(bench_dict[k]["f"]).ravel()
-                                    for k in sorted_keys])
+            f_all  = np.concatenate(
+                [np.asarray(bench_dict[k]["f"]).ravel() for k in sorted_keys])
             f_norm = Normalize(vmin=f_all.min(), vmax=f_all.max())
 
             for col, key in enumerate(sorted_keys):
                 res  = bench_dict[key]
                 f    = np.asarray(res["f"])
-                err  = get_error(res)
+                err  = _get_error(res)
 
-                # f
                 im0 = axes[0, col].imshow(f, origin="lower", aspect="auto",
                                           cmap="cividis", norm=f_norm)
                 axes[0, col].set_title(f"f – N={key}")
 
-                # error
                 im1 = axes[1, col].imshow(err, origin="lower", aspect="auto",
                                           cmap="magma",
                                           norm=Normalize(vmin=0, vmax=err.max()))
@@ -1271,7 +1264,6 @@ class BGK1DPlotMixin:
                     ax.set_xlabel("v")
                     ax.set_ylabel("x")
 
-            # 個別カラーバー
             fig.colorbar(im0, ax=axes[0, :].tolist(), shrink=0.6, location="right")
             fig.colorbar(im1, ax=axes[1, :].tolist(), shrink=0.6, location="right")
 
