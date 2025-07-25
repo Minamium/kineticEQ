@@ -1238,37 +1238,57 @@ class BGK1DPlotMixin:
         # ② 統合保存モード
         # ─────────────────────────────────────────────
         else:
-            fig, axes = plt.subplots(2, n_grids,
-                                     figsize=(4 * n_grids, 8),
-                                     constrained_layout=True)
+            ## サブプロット行列サイズを計算
+            n_cols  = 3
+            n_pairs = n_grids
+            n_rows  = 2 * int(np.ceil(n_pairs / n_cols))   # f と err で 2 倍
 
+            fig, axes = plt.subplots(
+                n_rows, n_cols, figsize=(9, 3 * n_rows),  # 1 サブプロット 3×3 inch
+                constrained_layout=True
+            )
+
+            # カラースケールを全格子で統一（f 用）
             f_all  = np.concatenate(
-                [np.asarray(bench_dict[k]["f"]).ravel() for k in sorted_keys])
+                [np.asarray(bench_dict[k]["f"]).ravel() for k in sorted_keys]
+            )
             f_norm = Normalize(vmin=f_all.min(), vmax=f_all.max())
 
-            for col, key in enumerate(sorted_keys):
+            # --------------------- 描画ループ ---------------------
+            for idx, key in enumerate(sorted_keys):
+                pair_row = (idx // n_cols) * 2     # f 用行
+                col      = idx % n_cols            # 列
+
                 res  = bench_dict[key]
                 f    = np.asarray(res["f"])
                 err  = _get_error(res)
 
-                im0 = axes[0, col].imshow(f, origin="lower", aspect="auto",
-                                          cmap="cividis", norm=f_norm)
-                axes[0, col].set_title(f"f – N={key}")
+                # f(x,v)
+                ax_f = axes[pair_row, col]
+                im_f = ax_f.imshow(f, origin="lower", aspect="auto",
+                                   cmap="cividis", norm=f_norm)
+                ax_f.set_title(f"f – N={key}")
+                ax_f.set_xlabel("v")
+                ax_f.set_ylabel("x")
 
-                im1 = axes[1, col].imshow(err, origin="lower", aspect="auto",
-                                          cmap="magma",
-                                          norm=Normalize(vmin=0, vmax=err.max()))
-                axes[1, col].set_title("|f − f_ref|")
+                # |f − f_ref|
+                ax_e = axes[pair_row + 1, col]
+                im_e = ax_e.imshow(err, origin="lower", aspect="auto",
+                                   cmap="magma",
+                                   norm=Normalize(vmin=0, vmax=err.max()))
+                ax_e.set_title("|f − f_ref|")
+                ax_e.set_xlabel("v")
+                ax_e.set_ylabel("x")
 
-                for ax in (axes[0, col], axes[1, col]):
-                    ax.set_xlabel("v")
-                    ax.set_ylabel("x")
-
-            fig.colorbar(im0, ax=axes[0, :].tolist(), shrink=0.6, location="right")
-            fig.colorbar(im1, ax=axes[1, :].tolist(), shrink=0.6, location="right")
+            # カラーバー（左: f, 右: 誤差）を 1 本ずつ
+            fig.colorbar(im_f, ax=axes[0::2, :].ravel().tolist(),
+                         location="left", shrink=0.6, pad=0.02)
+            fig.colorbar(im_e, ax=axes[1::2, :].ravel().tolist(),
+                         location="right", shrink=0.6, pad=0.02)
 
             if show_plots:
                 plt.show()
+
             fname = f"{fname_base}.png"
             fig.savefig(fname, dpi=300, bbox_inches="tight")
             plt.close(fig)
