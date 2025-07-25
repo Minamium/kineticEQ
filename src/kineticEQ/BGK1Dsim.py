@@ -1305,108 +1305,149 @@ class BGK1DPlotMixin:
         return {"saved_files": saved_files, "grid_keys": sorted_keys}
 
     # ベンチマーク結果の分布関数インタラクティブ3次元プロット
-    def plot_distribution_voxels(
+    def plot_distribution_interactive(
         self,
         bench_results: dict,
-        key: int | None = None,                 # 単一格子キー（None→最細格子）
+        keys: list[int] | None = None,          # ← 追加：描画対象の格子キー
         show_plots: bool = True,
-        save_png: bool = False,
-        fname_base: str = "distribution_voxels",
-    ) -> dict:
+        save_html: bool = False,
+        fname_base: str = "distribution_interactive"
+        ) -> dict:
         """
-        ヒートマップのセルを 1 セル = 1 立方体ブロックとしてそのまま 3-D 表示する。
+        指定された格子キーについて
+        * f(x,v) の 3D サーフェス
+        * |f − f_ref| の 3D サーフェス
+        を横並びで表示・保存する。
 
-        * x, v 方向とも **インデックス座標** を採用し、各セルをほぼ立方体に描画
-        * 左パネル: f(x,v)、右パネル: |f − f_ref|
-        * カメラは 2 パネルでリンク
-
-        依存:
-            pip install "pyvista[all]"  # VTK 同梱
+        Notes
+        -----
+        - `keys` が None の場合は最細格子（max key）のみ描画
+        - 誤差は `bench_type` を参照し、compute_error と同じ最近接補間で計算
         """
         import numpy as np
-        import pyvista as pv
+        from matplotlib.colors import Normalize
         from scipy.interpolate import interp1d
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+        except ImportError:
+            raise ImportError("Plotly が必要です: pip install plotly")
 
         # ─── 入力チェック ───
         if not bench_results:
             raise ValueError("ベンチマーク結果が空です")
+
+        bench_type = bench_results["bench_type"]
         bench_dict = {k: v for k, v in bench_results.items() if isinstance(k, int)}
         if not bench_dict:
             raise ValueError("数値格子キーが見つかりません")
 
-        ref_key = max(bench_dict)
-        ref_res = bench_dict[ref_key]
+        ref_key    = max(bench_dict.keys())
+        ref_result = bench_dict[ref_key]
 
-        if key is None:
-            key = ref_key
-        if key not in bench_dict:
-            raise ValueError(f"key={key} が bench_results に存在しません")
-        res = bench_dict[key]
+        # 対象キー決定
+        if keys is None:
+            target_keys = [ref_key]           # デフォルト: 最細格子
+        else:
+            target_keys = [k for k in keys if k in bench_dict]
+            if not target_keys:
+                raise ValueError("指定 keys が bench_results に存在しません")
 
-        bench_type = bench_results["bench_type"]
+        # ─── 関数定義 ───
+        def _nearest_interp(ref_arr, ref_axis, tgt_axis):
+            return interp1d(ref_axis, ref_arr,
+                            kind="nearest", assume_sorted=True)(tgt_axis)
 
-        # ─── 誤差計算 (nearest) ───
-        def ninterp(a, ax_ref, ax_tgt):
-            return interp1d(ax_ref, a, kind="nearest", assume_sorted=True)(ax_tgt)
+        def _get_error(coarse_res):
+            """粗格子に合わせた |f − f_ref|"""
+            if bench_type == "spatial":
+                ref_f = np.zeros_like(coarse_res["f"])
+                for v_idx in range(len(coarse_res["v"])):
+                    ref_f[:, v_idx] = _nearest_interp(
+                        ref_result["f"][:, v_idx],
+                        ref_result["x"], coarse_res["x"])
+            else:  # velocity
+                ref_f = np.zeros_like(coarse_res["f"])
+                for x_idx in range(len(coarse_res["x"])):
+                    ref_f[x_idx, :] = _nearest_interp(
+                        ref_result["f"][x_idx, :],
+                        ref_result["v"], coarse_res["v"])
+            return np.abs(coarse_res["f"] - ref_f)
 
-        if bench_type == "spatial":
-            ref_f = np.stack(
-                [ninterp(ref_res["f"][:, j], ref_res["x"], res["x"])
-                 for j in range(len(res["v"]))], axis=1)
-        else:  # velocity
-            ref_f = np.stack(
-                [ninterp(ref_res["f"][i, :], ref_res["v"], res["v"])
-                 for i in range(len(res["x"]))], axis=0)
-        err = np.abs(res["f"] - ref_f)
+        # f, err のグローバル正規化
+        all_f   = np.concatenate([bench_dict[k]["f"].ravel() for k in target_keys])
+        f_min   = all_f.min()
+        f_max   = all_f.max()
+        all_err = np.concatenate([_get_error(bench_dict[k]).ravel() for k in target_keys])
+        err_max = all_err.max()
 
-        f_val = np.asarray(res["f"])
-        nx, nv = f_val.shape
+        saved_files = []
 
-        # ─── インデックスベースの UniformGrid ───
-        #   点数 = (nx+1, nv+1, 2)  → セル数 = nx × nv × 1
-        ug = pv.UniformGrid(
-            dimensions=(nx + 1, nv + 1, 2),
-            spacing=(1.0, 1.0, 1.0),            # 各セル ≈ 立方体
-            origin=(0.0, 0.0, 0.0),
-        )
-        ug.cell_data["f"]   = f_val.ravel(order="F")
-        ug.cell_data["err"] = err.ravel(order="F")
+        # ─── 描画ループ ───
+        for key in target_keys:
+            res  = bench_dict[key]
+            f    = np.asarray(res["f"])
+            err  = _get_error(res)
+            x    = np.asarray(res["x"])
+            v    = np.asarray(res["v"])
 
-        # ─── プロット ───
-        plotter = pv.Plotter(shape=(1, 2), border=False, lighting="none")
-        cmap_f, cmap_e = "cividis", "magma"
+            # Figure with 2 surfaces side-by-side
+            fig = make_subplots(
+                rows=1, cols=2,
+                specs=[[{'type': 'surface'}, {'type': 'surface'}]],
+                column_widths=[0.5, 0.5],
+                horizontal_spacing=0.05,
+                subplot_titles=("f(x,v)", "|f − f_ref|")
+            )
 
-        # f パネル
-        plotter.subplot(0, 0)
-        plotter.add_mesh(ug, scalars="f", cmap=cmap_f,
-                         opacity=1.0, show_edges=False)
-        plotter.add_scalar_bar(title="f(x,v)", n_labels=4, vertical=True)
+            # f surface
+            fig.add_trace(
+                go.Surface(
+                    x=x, y=v, z=f.T,
+                    colorscale="Viridis",
+                    cmin=f_min, cmax=f_max,
+                    showscale=False,
+                    hovertemplate='x:%{x:.3f}<br>v:%{y:.3f}<br>f:%{z:.6f}<extra></extra>'
+                ),
+                row=1, col=1
+            )
 
-        # err パネル
-        plotter.subplot(0, 1)
-        plotter.add_mesh(ug, scalars="err", cmap=cmap_e,
-                         opacity=1.0, show_edges=False)
-        plotter.add_scalar_bar(title="|f − f_ref|", n_labels=4, vertical=True)
+            # error surface
+            fig.add_trace(
+                go.Surface(
+                    x=x, y=v, z=err.T,
+                    colorscale="Magma",
+                    cmin=0, cmax=err_max,
+                    showscale=False,
+                    hovertemplate='x:%{x:.3f}<br>v:%{y:.3f}<br>|err|:%{z:.6e}<extra></extra>'
+                ),
+                row=1, col=2
+            )
 
-        # 共通設定
-        plotter.link_views()
-        plotter.view_isometric()
-        plotter.add_text(
-            f"Grid {key}  (nx×nv={nx}×{nv})",
-            font_size=12, position="upper_edge"
-        )
+            # レイアウト
+            fig.update_layout(
+                title=f"Grid {key} – nx×nv = {f.shape[0]}×{f.shape[1]}",
+                scene=dict(
+                    xaxis_title='x', yaxis_title='v', zaxis_title='f',
+                    aspectmode='cube'
+                ),
+                scene2=dict(
+                    xaxis_title='x', yaxis_title='v', zaxis_title='|err|',
+                    aspectmode='cube'
+                ),
+                width=1100, height=550,
+                margin=dict(l=20, r=20, t=40, b=20)
+            )
 
-        saved = []
-        if save_png:
-            fname = f"{fname_base}_grid{key}.png"
-            plotter.screenshot(fname, window_size=(1600, 900))
-            saved.append(fname)
-        if show_plots:
-            plotter.show()
-        plotter.close()
+            # 保存
+            if save_html:
+                fname = f"{fname_base}_grid{key}.html"
+                fig.write_html(fname)
+                saved_files.append(fname)
+                print(f"Grid {key}: {fname} を保存")
 
-        return {"saved_files": saved, "grid_keys": [key]}
-
+            if show_plots:
+                fig.show()
 
     # ベンチマーク結果の保存・読み込みユーティリティ
     def save_benchmark_results(self, bench_results: dict | None = None, filename: str = "benchmark_results.pkl") -> str:
