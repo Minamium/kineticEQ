@@ -1157,6 +1157,11 @@ class BGK1DPlotMixin:
         f(x,v) と |f − f_ref| をヒートマップで可視化
         補間は compute_error と同じく nearest。引数と戻り値は従来どおり。
         """
+
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import Normalize
+        
+        
         if not bench_results:
             raise ValueError("ベンチマーク結果が空です")
 
