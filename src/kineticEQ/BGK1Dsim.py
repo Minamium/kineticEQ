@@ -1305,7 +1305,7 @@ class BGK1DPlotMixin:
         return {"saved_files": saved_files, "grid_keys": sorted_keys}
 
     # ベンチマーク結果の分布関数インタラクティブ3次元プロット
-    def plot_distribution_pyvista(
+    def plot_distribution_interactive(
         self,
         bench_results: dict,
         keys: int | list[int] | None = None,
