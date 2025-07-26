@@ -2,29 +2,29 @@
 ! 1D advection equation simulator for HPC cpu node 
 ! Using OpenMP for parallelization
 
-! モジュールの定義
+! Module definition
 module sample_1d_advection_module
     implicit none
     
 contains
-    ! モジュール内のサブルーチン定義
+    ! Subroutine definition within the module
     subroutine advec_upwind_step(nx, dt, dx, u, q, q_new)
         implicit none
 
-        ! 引数の属性設定
-        real, intent(in) :: dt, dx, u
+        ! Argument attribute settings
         integer, intent(in) :: nx
-        real, intent(in) :: q(:)
-        real, intent(out) :: q_new(:)
+        real, intent(in) :: dt, dx, u
+        real, intent(in) :: q(nx)
+        real, intent(out) :: q_new(nx)
 
-        ! ユーティリティ変数宣言
+        ! Utility variable declarations
         integer :: i
         real :: c
 
-        ! CFLnumの計算
+        ! CFL number calculation
         c = u * (dt / dx)
 
-        ! 移流計算(MP並列化) 境界条件: 周期境界, 差分スキーム: 一次風上差分
+        ! Advection calculation (MP parallelization) Boundary condition: Periodic boundary, Difference scheme: First-order upwind difference
         if (u >= 0.0) then
             q_new(1) = q(1) - c * (q(1) - q(nx))
             !$omp parallel
@@ -46,4 +46,3 @@ contains
         end if
     end subroutine advec_upwind_step
 end module sample_1d_advection_module
-

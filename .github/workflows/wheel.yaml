@@ -21,22 +21,41 @@ jobs:
         with:
           python-version: ${{ matrix.py }}
 
-      - name: Upgrade pip & install build deps
+      # Fortranコンパイラのセットアップ
+      - name: Setup Fortran compiler
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gfortran
+
+      - name: Setup Fortran compiler (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install gfortran
+
+      - name: Setup Fortran compiler (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: fortran-lang/setup-fortran@v1
+        with:
+          compiler: gcc
+
+      # F2PYの依存関係をインストール
+      - name: Install F2PY dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install cibuildwheel==2.16.2
+          pip install numpy meson ninja
 
       - name: Build wheels
-        run: |
-          cibuildwheel --output-dir dist
+        uses: pypa/cibuildwheel@v2.16.2
+        env:
+          CIBW_BUILD: cp${{ matrix.py }}-*
+          CIBW_SKIP: "*-win32 *-manylinux_i686"
+          # Fortranサポートのための環境変数
+          CIBW_BEFORE_BUILD: pip install numpy meson ninja
+          CIBW_ENVIRONMENT_LINUX: "FC=gfortran"
+          CIBW_ENVIRONMENT_MACOS: "FC=gfortran"
+          CIBW_ENVIRONMENT_WINDOWS: "FC=gfortran"
 
-      - name: Upload wheels to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
+      - uses: actions/upload-artifact@v3
         with:
-          files: dist/*
-
-      # --- optional: TestPyPI upload ---
-      # - name: Publish to TestPyPI
-      #   if: startsWith(github.ref, 'refs/tags/')
-      #   ... twine upload ...
+          path: ./wheelhouse/*.whl
