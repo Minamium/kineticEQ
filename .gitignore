@@ -1,3 +1,16 @@
 src/kineticEQ.egg-info/
 __pycache__/
 *.py[cod]
+
+# build artifacts
+build/
+dist/
+*.egg-info/
+kineticEQ/backends/*.so
+kineticEQ/backends/*.pyd
+# CMake
+CMakeBuild/
+CMakeFiles/
+cmake-build-*/
+# Editor / OS artifacts
+*.DS_Store
