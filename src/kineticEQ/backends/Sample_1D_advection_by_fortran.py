@@ -1,7 +1,7 @@
 """CPU OpenMP backend (Fortran) – 1-D upwind advection"""
 from __future__ import annotations
 import numpy as np
-from . import advection1d as _f90              # ← ビルド後の .so
+from .fortran.Sample_1Dadvection import sample_1d_advection_module as _f90 # ビルドしたバイナリをimport
 
 def step(q: np.ndarray, dx: float, dt: float, u: float) -> np.ndarray:
     """一次風上差分 1 ステップ"""

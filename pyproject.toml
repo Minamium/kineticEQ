@@ -12,6 +12,9 @@ dependencies = [
   "scipy"
 ]
 
+[project.optional-dependencies]
+viz = ["matplotlib", "plotly>=5"]
+
 [build-system]
 requires = ["scikit-build-core>=0.7", "numpy"]
 build-backend = "scikit_build_core.build"
