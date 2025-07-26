@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
 project(kineticEQ LANGUAGES Fortran C)
 
+include(ScikitBuildCore)
+
 # --- Python / NumPy 情報取得 -------------------------------------------
 find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 
