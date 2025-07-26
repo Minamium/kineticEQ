@@ -1,16 +1,13 @@
 cmake_minimum_required(VERSION 3.18)
 project(kineticEQ LANGUAGES Fortran C)
 
-# ❶ scikit-build-core を検出し、CMAKE_MODULE_PATH をセット
-find_package(scikit_build_core CONFIG REQUIRED)
+# ❶ scikit-build-core のマクロをロード
+include(skbuild_core)                      # ← これが正しい
 
-# ❷ マクロを読み込む  ※ここは 'skbuild'
-include(skbuild)
+# ❷ （必要なら）OpenMP
+find_package(OpenMP)                       # !$omp を書いてないなら削除でOK
 
-# ❸ （OpenMP を使う場合だけ）
-find_package(OpenMP)
-
-# ❹ Fortran → f2py 拡張
+# ❸ Fortran → f2py 拡張
 skbuild_add_f2py_extension(advection1d
   MODULE_NAME advection1d
   SOURCES
