@@ -1,4 +1,3 @@
-
 import torch
 import numpy as np
 import math
@@ -44,7 +43,7 @@ class BGK1DBase:
 
                  # 陰解法パラメータ
                  picard_iter=10,
-                 picard_tol=1e-8,
+                 picard_tol=1e-4,
 
                  # ハイパーパラメータ
                  tau_tilde=1.0,
@@ -66,7 +65,7 @@ class BGK1DBase:
                  n_right=1.0, u_right=0.0, T_right=1.0,
 
                  # 精度
-                 dtype='float32',
+                 dtype='float64',
 
                  # GPU設定
                  device='cuda',
@@ -124,7 +123,7 @@ class BGK1DBase:
             import os, sysconfig
             from pathlib import Path
             os.makedirs('build', exist_ok=True)
-            src_dir = Path(__file__).resolve().parent
+            src_dir = Path(__file__).resolve().parent / "backends" / "gtsv"
             self._cusolver = load(
                 name='gtsv_batch',
                 sources=[str(src_dir/'gtsv_binding.cpp'),
