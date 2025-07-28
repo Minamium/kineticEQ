@@ -1,25 +1,25 @@
 """
 kineticEQ backends module
 -------------------------
-Fortranバックエンドによる高速計算機能を提供
+High-performance Fortran backend for numerical computations
 """
 
 try:
     from .Sample_1D_advection_by_fortran import step, is_available, get_info
     __all__ = ["step", "is_available", "get_info"]
     
-    # バックエンドの状態を確認
+    # Check backend status
     if is_available():
-        print("[kineticEQ.backends] Fortranバックエンドが利用可能です")
+        print("[kineticEQ.backends] Fortran backend is available")
     else:
-        print("[kineticEQ.backends] 警告: Fortranバックエンドが利用できません")
+        print("[kineticEQ.backends] Warning: Fortran backend is not available")
         
 except ImportError as e:
-    print(f"[kineticEQ.backends] Fortranバックエンドのインポートに失敗: {e}")
+    print(f"[kineticEQ.backends] Failed to import Fortran backend: {e}")
     
-    # フォールバック関数を定義
+    # Define fallback functions
     def step(*args, **kwargs):
-        raise RuntimeError("Fortranバックエンドが利用できません。ビルドエラーを確認してください。")
+        raise RuntimeError("Fortran backend is not available. Check build errors.")
     
     def is_available():
         return False

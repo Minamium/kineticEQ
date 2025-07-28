@@ -1,238 +1,141 @@
 """
-Runtime-built Fortran backend (OpenMP)
--------------------------------------
-初回 import 時に f2py でビルドし、build/ に .so をキャッシュ。
+Runtime Fortran backend for 1D advection
 """
-from __future__ import annotations
-import hashlib, importlib.util, os, subprocess, sys
-from pathlib import Path
-import numpy as np
+import hashlib
+import importlib.util
+import os
+import subprocess
 import tempfile
 import shutil
+from pathlib import Path
+import numpy as np
 
 HERE = Path(__file__).resolve().parent
-SRC  = HERE / "fortran" / "Sample_1Dadvection" / "Sample_1D_advection.f90"
-BUILD_DIR = HERE.parent.parent.parent.parent / "build"  # kineticEQ/build
-BUILD_DIR = BUILD_DIR.resolve()
+SRC = HERE / "fortran" / "Sample_1Dadvection" / "Sample_1D_advection.f90"
+BUILD_DIR = HERE.parent.parent.parent.parent / "build"
 BUILD_DIR.mkdir(exist_ok=True)
 
-def _get_openmp_settings():
-    """OpenMP設定を取得"""
-    # 環境変数でOpenMPの有効/無効を制御
-    enable_openmp = os.getenv("KINEQ_ENABLE_OPENMP", "true").lower() in ("true", "1", "yes")
-    
+def _get_flags():
+    """Get compiler flags"""
+    enable_openmp = os.getenv("KINEQ_ENABLE_OPENMP", "false").lower() in ("true", "1")
     if enable_openmp:
-        flags = os.getenv("KINEQ_FFLAGS", "-O3 -fopenmp")
-        link_flags = ["-lgomp"] if "-fopenmp" in flags else []
-        return flags, link_flags, True
+        return os.getenv("KINEQ_FFLAGS", "-O3 -fopenmp"), ["-lgomp"]
     else:
-        flags = os.getenv("KINEQ_FFLAGS", "-O3")
-        return flags, [], False
+        return os.getenv("KINEQ_FFLAGS", "-O3"), []
 
-# — ハッシュ（ソース + フラグ）で一意に
-def _tag() -> str:
-    """ソースファイルとコンパイルフラグから一意のハッシュを生成"""
-    if not SRC.exists():
-        raise FileNotFoundError(f"Fortranソースファイルが見つかりません: {SRC}")
+def _build_hash():
+    """Generate unique hash from source and flags"""
+    flags, _ = _get_flags()
+    content = SRC.read_bytes() + flags.encode()
+    return hashlib.sha1(content).hexdigest()[:12]
+
+def _build_module():
+    """Build Fortran module with F2PY"""
+    tag = _build_hash()
+    flags, link_flags = _get_flags()
     
-    txt = SRC.read_bytes()
-    flags, _, _ = _get_openmp_settings()
-    return hashlib.sha1(txt + flags.encode()).hexdigest()[:12]
-
-def _build() -> Path:
-    """F2PYを使用してFortranモジュールをビルド"""
-    try:
-        tag = _tag()
-        flags, link_flags, openmp_enabled = _get_openmp_settings()
+    # Check existing build
+    so_files = list(BUILD_DIR.glob(f"advection1d_{tag}*.so"))
+    if so_files and not os.getenv("KINEQ_FORCE_REBUILD"):
+        return so_files[0]
+    
+    print(f"[kineticEQ] Building Fortran backend...")
+    
+    # Build in temporary directory
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        tmp_src = tmpdir / "Sample_1D_advection.f90"
+        shutil.copy2(SRC, tmp_src)
         
-        # 既存のビルドをチェック（パターンマッチング）
-        existing_files = list(BUILD_DIR.glob(f"advection1d_{tag}*.so"))
-        if existing_files and not os.getenv("KINEQ_FORCE_REBUILD"):
-            so_path = existing_files[0]
-            print(f"[kineticEQ] 既存のFortranバックエンドを使用: {so_path.name}")
-            return so_path
-
-        # 一時ディレクトリでビルド（mesonの問題を回避）
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-            temp_src = temp_path / "Sample_1D_advection.f90"
-            
-            # ソースファイルをコピー
-            shutil.copy2(SRC, temp_src)
-            
-            # F2PYコマンド（OpenMP設定に応じて構築）
-            cmd = [
-                sys.executable, "-m", "numpy.f2py",
-                "-c", str(temp_src),
-                "-m", "advection1d",
-                f"--f90exec={os.getenv('FC', 'gfortran')}",
-                f"--f90flags={flags}"
-            ]
-            
-            # OpenMP有効時はリンクフラグを追加
+        # F2PY command
+        cmd = [
+            "python", "-m", "numpy.f2py", "-c", str(tmp_src),
+            "-m", "advection1d", "--f90exec=gfortran",
+            f"--f90flags={flags}"
+        ]
+        if link_flags:
             cmd.extend(link_flags)
-            
-            openmp_status = "有効" if openmp_enabled else "無効"
-            print(f"[kineticEQ] Fortranバックエンドをビルド中... (OpenMP: {openmp_status})")
-            print(f"[kineticEQ] 一時ディレクトリ: {temp_dir}")
-            print(f"[kineticEQ] コマンド: {' '.join(cmd)}")
-            
-            # 一時ディレクトリで実行
-            original_cwd = os.getcwd()
-            try:
-                os.chdir(temp_path)
-                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                
-                print(f"[kineticEQ] F2PY終了コード: {result.returncode}")
-                if result.stdout:
-                    print(f"[kineticEQ] STDOUT: {result.stdout[:500]}...")
-                if result.stderr:
-                    print(f"[kineticEQ] STDERR: {result.stderr[:500]}...")
-                
-                if result.returncode != 0:
-                    # OpenMP有効時にエラーが発生した場合、OpenMPなしで再試行
-                    if openmp_enabled:
-                        print(f"[kineticEQ] OpenMP有効でビルド失敗。OpenMPなしで再試行...")
-                        os.environ["KINEQ_ENABLE_OPENMP"] = "false"
-                        return _build()  # 再帰呼び出し
-                    else:
-                        raise RuntimeError(f"F2PYビルドが失敗しました (exit code: {result.returncode})")
-                
-                # 生成されたファイルを検索
-                so_patterns = [
-                    "advection1d*.so",
-                    "advection1d*.pyd",
-                    "*.so"  # より広範囲に検索
-                ]
-                
-                found_files = []
-                for pattern in so_patterns:
-                    found_files.extend(temp_path.glob(pattern))
-                
-                if not found_files:
-                    # 一時ディレクトリの内容を表示
-                    all_files = list(temp_path.glob("*"))
-                    print(f"[kineticEQ] 一時ディレクトリの内容: {[f.name for f in all_files]}")
-                    raise RuntimeError(f"ビルド後に.soファイルが見つかりません")
-                
-                # 最新のファイルを選択
-                so_path_temp = max(found_files, key=lambda p: p.stat().st_mtime)
-                print(f"[kineticEQ] 生成されたファイル: {so_path_temp.name}")
-                
-                # ビルドディレクトリにコピー
-                target_name = f"advection1d_{tag}{so_path_temp.suffix}"
-                target_path = BUILD_DIR / target_name
-                shutil.copy2(so_path_temp, target_path)
-                
-                print(f"[kineticEQ] ビルド完了: {target_path}")
-                return target_path
-                
-            finally:
-                os.chdir(original_cwd)
         
-    except Exception as e:
-        print(f"[kineticEQ] Fortranバックエンドのビルドに失敗: {e}")
-        raise
+        result = subprocess.run(cmd, cwd=tmpdir, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            raise RuntimeError(f"F2PY build failed: {result.stderr}")
+        
+        # Copy built module
+        built_files = list(tmpdir.glob("advection1d*.so"))
+        if not built_files:
+            raise RuntimeError("No .so file generated")
+        
+        target = BUILD_DIR / f"advection1d_{tag}.so"
+        shutil.copy2(built_files[0], target)
+        print(f"[kineticEQ] Build completed: {target.name}")
+        return target
 
-# — 動的 import with エラーハンドリング
+def _load_module():
+    """Load the built Fortran module"""
+    so_file = _build_module()
+    spec = importlib.util.spec_from_file_location("advection1d", so_file)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+# Initialize module
 try:
-    _so = _build()
-    _spec = importlib.util.spec_from_file_location("advection1d", _so)
-    if _spec is None or _spec.loader is None:
-        raise ImportError(f"モジュールスペックの作成に失敗: {_so}")
+    _module = _load_module()
+    _func = None
     
-    _mod = importlib.util.module_from_spec(_spec)
-    _spec.loader.exec_module(_mod)
-    
-    # モジュール構造を確認・デバッグ
-    available_attrs = [attr for attr in dir(_mod) if not attr.startswith('_')]
-    print(f"[kineticEQ] 利用可能なモジュール属性: {available_attrs}")
-    
-    # 期待されるモジュール名をチェック
-    expected_modules = [
-        'sample_1d_advection_main_module',
-        'sample_1d_advection_step_module'
-    ]
-    
-    found_module = None
-    for mod_name in expected_modules:
-        if hasattr(_mod, mod_name):
-            found_module = getattr(_mod, mod_name)
-            print(f"[kineticEQ] 使用するモジュール: {mod_name}")
+    # Find the correct function
+    for attr_name in dir(_module):
+        attr = getattr(_module, attr_name)
+        if hasattr(attr, 'advec_upwind'):
+            _func = attr.advec_upwind
             break
     
-    if found_module is None:
-        raise AttributeError(f"期待されるモジュールが見つかりません。利用可能: {available_attrs}")
-    
-    _main_module = found_module
-    
-    # 関数シグネチャを確認
-    if hasattr(_main_module, 'advec_upwind'):
-        func = _main_module.advec_upwind
-        print(f"[kineticEQ] 関数シグネチャ: {func.__doc__}")
-    
-    print(f"[kineticEQ] Fortranバックエンドのロードが完了")
+    if _func is None:
+        raise AttributeError("Function advec_upwind not found")
+        
+    print("[kineticEQ] Fortran backend loaded successfully")
     
 except Exception as e:
-    print(f"[kineticEQ] Fortranバックエンドの初期化に失敗: {e}")
-    _mod = None
-    _main_module = None
+    print(f"[kineticEQ] Failed to initialize Fortran backend: {e}")
+    _module = None
+    _func = None
 
-# — 公開 API
+# Public API
 def step(q: np.ndarray, dt: float, dx: float, u: float, nt: int = 1) -> np.ndarray:
-    """一次風上差分を nt ステップ進める（周期境界）
+    """1D upwind advection for nt steps
     
     Args:
-        q: 初期濃度分布 [nx]
-        dt: 時間刻み
-        dx: 空間刻み
-        u: 移流速度
-        nt: 時間ステップ数
+        q: Initial concentration [nx]
+        dt: Time step
+        dx: Spatial step
+        u: Advection velocity
+        nt: Number of time steps
         
     Returns:
-        最終濃度分布 [nx]
+        Final concentration [nx]
     """
-    if _mod is None or _main_module is None:
-        raise RuntimeError("Fortranバックエンドが利用できません。ビルドエラーを確認してください。")
+    if _func is None:
+        raise RuntimeError("Fortran backend not available")
     
-    # 入力検証
-    q = np.ascontiguousarray(q, dtype=np.float64)
-    if q.ndim != 1:
-        raise ValueError(f"qは1次元配列である必要があります。受信: {q.shape}")
-    
-    nx = q.size
-    if nx < 2:
-        raise ValueError(f"格子点数は2以上である必要があります。受信: {nx}")
-    
-    # Fortranサブルーチンを呼び出し
-    # F2PYの正しい引数順序: (nt, dt, dx, u, q_init)
-    try:
-        func = _main_module.advec_upwind
-        q_final = func(nt, dt, dx, u, q)
-        return q_final
-        
-    except Exception as e:
-        raise RuntimeError(f"Fortran計算中にエラーが発生: {e}")
+    q = np.asarray(q, dtype=np.float64)
+    return _func(nt, dt, dx, u, q)
 
 def is_available() -> bool:
-    """Fortranバックエンドが利用可能かチェック"""
-    return _mod is not None and _main_module is not None
+    """Check if Fortran backend is available"""
+    return _func is not None
 
 def get_info() -> dict:
-    """バックエンド情報を取得"""
-    _, _, openmp_enabled = _get_openmp_settings()
-    flags, _, _ = _get_openmp_settings()
-    
-    backend_name = "Fortran (F2PY + OpenMP)" if openmp_enabled else "Fortran (F2PY)"
+    """Get backend information"""
+    flags, _ = _get_flags()
+    openmp_enabled = "openmp" in flags.lower()
     
     return {
-        "backend": backend_name,
+        "backend": f"Fortran (F2PY{' + OpenMP' if openmp_enabled else ''})",
         "available": is_available(),
         "source_file": str(SRC),
         "build_dir": str(BUILD_DIR),
-        "compiler": os.getenv('FC', 'gfortran'),
+        "compiler": "gfortran",
         "flags": flags,
-        "module_loaded": _mod is not None,
-        "main_module_loaded": _main_module is not None,
         "openmp_enabled": openmp_enabled
     }
