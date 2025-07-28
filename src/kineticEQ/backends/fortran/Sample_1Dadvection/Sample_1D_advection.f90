@@ -14,8 +14,8 @@ contains
         ! 引数の属性設定
         real, intent(in) :: dt, dx, u
         integer, intent(in) :: nx
-        real, intent(in) :: q(:)
-        real, intent(out) :: q_new(:)
+        real, intent(in) :: q(nx)
+        real, intent(out) :: q_new(nx)
 
         ! ユーティリティ変数宣言
         integer :: i
