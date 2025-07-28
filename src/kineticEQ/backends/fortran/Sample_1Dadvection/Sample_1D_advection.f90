@@ -1,5 +1,5 @@
 ! Sample fortran extension
-! 1D advection equation simulator for HPC cpu node 
+! 1D advection equation simulator
 ! Using OpenMP for parallelization
 
 ! 移流計算1ステップ
