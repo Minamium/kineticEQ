@@ -63,11 +63,11 @@ contains
         ! 引数の属性設定
         integer, intent(in) :: nt, nx
         real, intent(in) :: dt, dx, u
-        real, intent(in) :: q_init(:)
-        real, intent(out) :: q_final(:)
+        real, intent(in) :: q_init(nx)
+        real, intent(out) :: q_final(nx)
 
         ! 濃度関数配列のメモリ確保
-        real, allocatable :: q(:), q_new(:)
+        real, allocatable :: q(nx), q_new(nx)
         allocate(q(nx), q_new(nx))
 
         ! 初期条件設定
