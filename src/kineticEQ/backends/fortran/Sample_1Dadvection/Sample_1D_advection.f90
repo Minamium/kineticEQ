@@ -1,10 +1,11 @@
 ! Sample fortran extension
-! 1D advection equation simulator
+! 1D advection equation simulator for HPC cpu node 
 ! Using OpenMP for parallelization
 
 ! 移流計算1ステップ
 module sample_1d_advection_step_module
     implicit none
+    integer, parameter :: dp = kind(1.0d0)  ! double precision
     
 contains
     ! モジュール内のサブルーチン定義
@@ -12,20 +13,20 @@ contains
         implicit none
 
         ! 引数の属性設定
-        real, intent(in) :: dt, dx, u
+        real(dp), intent(in) :: dt, dx, u
         integer, intent(in) :: nx
-        real, intent(in) :: q(nx)
-        real, intent(out) :: q_new(nx)
+        real(dp), intent(in) :: q(nx)
+        real(dp), intent(out) :: q_new(nx)
 
         ! ユーティリティ変数宣言
         integer :: i
-        real :: c
+        real(dp) :: c
 
         ! CFLnumの計算
         c = u * (dt / dx)
 
         ! 移流計算(MP並列化) 境界条件: 周期境界, 差分スキーム: 一次風上差分
-        if (u >= 0.0) then
+        if (u >= 0.0d0) then
             q_new(1) = q(1) - c * (q(1) - q(nx))
             !$omp parallel
             !$omp do private(i)
@@ -53,6 +54,7 @@ end module sample_1d_advection_step_module
 ! 移流メインモジュール
 module sample_1d_advection_main_module
     implicit none
+    integer, parameter :: dp = kind(1.0d0)  ! double precision
     use sample_1d_advection_step_module
 
 contains
@@ -62,12 +64,12 @@ contains
 
         ! 引数の属性設定
         integer, intent(in) :: nt, nx
-        real, intent(in) :: dt, dx, u
-        real, intent(in) :: q_init(nx)
-        real, intent(out) :: q_final(nx)
+        real(dp), intent(in) :: dt, dx, u
+        real(dp), intent(in) :: q_init(nx)
+        real(dp), intent(out) :: q_final(nx)
 
         ! 濃度関数配列のメモリ確保
-        real, allocatable :: q(nx), q_new(nx)
+        real(dp), allocatable :: q(:), q_new(:)
         allocate(q(nx), q_new(nx))
 
         ! 初期条件設定
@@ -89,8 +91,3 @@ contains
         deallocate(q, q_new)
     end subroutine advec_upwind
 end module sample_1d_advection_main_module
-
-
-
-
-    
