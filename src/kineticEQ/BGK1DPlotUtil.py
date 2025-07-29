@@ -2,6 +2,12 @@
 # Local端末で実行する可視化関数群 #
 ##############################
 
+import torch
+import numpy as np
+import math
+from scipy.interpolate import interp1d
+from typing import Any, Union
+
 # 可視化関数群
 class BGK1DPlotMixin:
     """可視化, 解析用の関数群"""
