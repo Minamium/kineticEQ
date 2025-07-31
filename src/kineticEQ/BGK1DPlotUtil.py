@@ -8,6 +8,9 @@ import math
 from scipy.interpolate import interp1d
 from typing import Any, Union
 
+# BGK1Dbaseクラスを継承するためのimport
+from .BGK1Dsim import BGK1D
+
 # 可視化関数群
 class BGK1DPlotMixin:
     """可視化, 解析用の関数群"""
@@ -742,4 +745,6 @@ class BGK1DPlotMixin:
             print(f" - {f} ({os.path.getsize(f)/(1024**2):.2f} MB)")
         return files
 
-
+class BGK1DPlot(BGK1D, BGK1DPlotMixin):
+    """BGK1D + プロット機能の統合クラス"""
+    pass
