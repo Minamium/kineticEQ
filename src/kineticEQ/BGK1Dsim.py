@@ -168,7 +168,7 @@ class BGK1D:
     def run_benchmark(self, 
                       benc_type="spatial", 
                       grid_list=[16, 32, 64, 128, 256, 512, 1024]):
-        print("--- Benchmark Start ---")
+        print(f"--- Benchmark Start, benc_type: {benc_type} ---")
 
         # 結果保存用辞書
         self.benchmark_results = {
@@ -179,6 +179,8 @@ class BGK1D:
             self._run_benchmark_space(grid_list)
         elif benc_type == "velocity":
             self._run_benchmark_velocity(grid_list)
+        elif benc_type == "time":
+            self._run_benchmark_time(grid_list, grid_list)
         else:
             raise ValueError(f"Unknown benchmark type: {benc_type}")
 
@@ -222,6 +224,27 @@ class BGK1D:
                 'dv': self.dv,
                 'dx': self.dx  
             }
+
+    # 実行時間ベンチマーク
+    def _run_benchmark_time(self, nx_list, nv_list):
+        # 実行中の計算デバイス名の取得
+        device_name = torch.cuda.get_device_name(self.device) if self.device.type == 'cuda' else str(self.device)
+        self.benchmark_results['device_name'] = device_name
+        
+        # 結果保存用辞書を初期化
+        self.benchmark_results['timing_results'] = {}
+
+        # grid_listに従って実行時間ベンチマークのグリッドテストを実行
+        for nx in nx_list:
+            for nv in nv_list:
+                grid_key = f"{nx}x{nv}"
+                print(f"--- Test Grid: {grid_key} ---")
+
+                # グリッドテストベンチマークの実行と結果保存
+                timing_result = self._runbench_time(nx, nv)
+                self.benchmark_results['timing_results'][grid_key] = timing_result
+
+        return self.benchmark_results
 
     # 空間分割数ベンチマーク用シミュレーションメソッド
     def _runbench_spatial(self, nx_num):
@@ -290,6 +313,75 @@ class BGK1D:
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
                 pbar.update(1)
+
+    # 実行時間ベンチマーク用シミュレーションメソッド
+    def _runbench_time(self, nx_num, nv_num):
+        import time
+        
+        self.nx = nx_num
+        self.nv = nv_num
+
+        self.Array_allocation()
+        self.set_initial_condition()
+        self.apply_boundary_condition()
+
+        # CUDA時間測定の準備
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize()
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+
+        # CPU時間測定開始
+        cpu_start_time = time.time()
+        
+        # GPU時間測定開始
+        if self.device.type == 'cuda':
+            start_event.record()
+
+        # プログレスバーを初期化
+        with get_progress_bar(self.use_tqdm,total=self.nt, desc="Progress", 
+                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+
+            for step in range(self.nt):
+                if self.solver == "explicit":
+                    self._explicit_update()
+                elif self.solver == "implicit":
+                    if self.implicit_solver == "cuSOLVER":
+                        self._implicit_cusolver_update()
+                    elif self.implicit_solver == "tdma":
+                        self._implicit_TDMA_update()
+                    elif self.implicit_solver == "full":
+                        self._implicit_update()
+                    else:
+                        raise ValueError(f"Unknown implicit solver: {self.implicit_solver}")
+                # 配列交換
+                self.f, self.f_new = self.f_new, self.f
+                pbar.update(1)
+
+        # 時間測定終了
+        cpu_total_time = time.time() - cpu_start_time
+        
+        # 結果をまとめる
+        timing_result = {
+            'nx': nx_num,
+            'nv': nv_num,
+            'total_grid_points': nx_num * nv_num,
+            'device': str(self.device),
+            'total_steps': self.nt,
+            'cpu_total_time_sec': cpu_total_time,
+        }
+        
+        # CUDA時間も記録
+        if self.device.type == 'cuda':
+            end_event.record()
+            torch.cuda.synchronize()
+            gpu_total_time_ms = start_event.elapsed_time(end_event)
+            timing_result.update({
+                'gpu_total_time_ms': gpu_total_time_ms,
+                'gpu_total_time_sec': gpu_total_time_ms / 1000,
+            })
+        
+        return timing_result
 
     #配列確保メソッド
     def Array_allocation(self):
