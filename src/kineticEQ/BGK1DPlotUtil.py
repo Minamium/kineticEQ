@@ -252,7 +252,7 @@ class BGK1DPlotMixin:
         
         # CPU時間ヒートマップ
         im1 = axes[0].imshow(cpu_step_time_matrix, cmap='viridis', aspect='auto')
-        axes[0].set_title(f'CPU Time per Step (ms) - {cpu_name}')
+        axes[0].set_title(f'Wall-clock Time per Step (ms) - {cpu_name}')
         axes[0].set_xlabel('nv (Velocity Grid Points)')
         axes[0].set_ylabel('nx (Spatial Grid Points)')
         axes[0].set_xticks(range(len(nv_sorted)))
