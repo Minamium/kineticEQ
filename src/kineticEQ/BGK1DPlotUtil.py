@@ -62,7 +62,6 @@ class BGK1DPlotMixin:
         ax4.set_title('Temperature Distribution')
         ax4.grid(True, alpha=0.3)
 
-        plt.tight_layout()
         plt.show()
 
         # 統計情報表示
@@ -128,8 +127,6 @@ class BGK1DPlotMixin:
                 ax4.set_title('Temperature')
                 ax4.set_ylim([0, T_max])
                 ax4.grid(True, alpha=0.3)
-
-                plt.tight_layout()
 
                 # PNG画像として保存（修正版）
                 buf = io.BytesIO()
@@ -324,8 +321,8 @@ class BGK1DPlotMixin:
                                       ha="center", va="center", color="white", fontsize=text_fontsize)
             plt.colorbar(im3, ax=axes[ax_idx], label='ΔT (ms)')
         
-        plt.tight_layout()
-        
+        # plt.tight_layout()  # constrained_layout=True を使用しているため tight_layout は不要
+
         if save_fig:
             base_name = 'timing_benchmark_heatmap'
             plt.savefig(base_name + '.png', dpi=300, bbox_inches='tight')
@@ -440,7 +437,7 @@ class BGK1DPlotMixin:
             ax.grid(True, alpha=0.3)
 
         fig1.legend(legend_handles, legend_labels, bbox_to_anchor=(1.02, 1), loc="upper left")
-        plt.tight_layout()
+        # plt.tight_layout()  # constrained_layout=True を使用しているため tight_layout は不要
         fig1.savefig(fname_moment, dpi=300, bbox_inches="tight", pad_inches=0.1, facecolor="white")
         if show_plots:
             plt.show()
@@ -523,7 +520,7 @@ class BGK1DPlotMixin:
                 ax.set_xscale("log")
                 ax.set_yscale("log")
 
-        plt.tight_layout()
+        # plt.tight_layout()  # constrained_layout=True を使用しているため tight_layout は不要
         fig2.savefig(fname_error, dpi=300, bbox_inches="tight", pad_inches=0.1, facecolor="white")
         if show_plots:
             plt.show()
