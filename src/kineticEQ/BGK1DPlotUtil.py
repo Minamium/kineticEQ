@@ -292,7 +292,7 @@ class BGK1DPlotMixin:
         
         # plt.show()  # 重複表示を防ぐためコメントアウト
         
-        return fig
+        #return fig
 
     # ベンチマーク結果plotメソッド
     def plot_benchmark_results(
