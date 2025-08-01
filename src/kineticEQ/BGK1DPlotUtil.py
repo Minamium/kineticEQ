@@ -199,13 +199,35 @@ class BGK1DPlotMixin:
                     bench_results = data
         elif bench_results is None:
             if not hasattr(self, 'benchmark_results'):
-                raise ValueError("ベンチマーク結果が見つかりません")
+                raise ValueError("Benchmark results not found")
             bench_results = self.benchmark_results
         
         if bench_results.get('bench_type') != 'time':
-            raise ValueError("時間ベンチマーク結果ではありません")
+            raise ValueError("Not a timing benchmark result")
         
         timing_results = bench_results['timing_results']
+        
+        # デバイス情報を取得
+        device_name = bench_results.get('device_name', 'Unknown Device')
+        
+        # CPU名を取得
+        import platform
+        cpu_name = platform.processor()
+        if not cpu_name:
+            try:
+                import cpuinfo
+                cpu_name = cpuinfo.get_cpu_info()['brand_raw']
+            except:
+                try:
+                    with open('/proc/cpuinfo', 'r') as f:
+                        for line in f:
+                            if 'model name' in line:
+                                cpu_name = line.split(':')[1].strip()
+                                break
+                        else:
+                            cpu_name = f"{platform.machine()} CPU"
+                except:
+                    cpu_name = f"{platform.machine()} CPU"
         
         # データの整理
         nx_values = set()
@@ -248,7 +270,7 @@ class BGK1DPlotMixin:
         
         # CPU時間ヒートマップ
         im1 = axes[0].imshow(cpu_step_time_matrix, cmap='viridis', aspect='auto')
-        axes[0].set_title('CPU Time per Step (ms)')
+        axes[0].set_title(f'CPU Time per Step (ms) - {cpu_name}')
         axes[0].set_xlabel('nv (Velocity Grid Points)')
         axes[0].set_ylabel('nx (Spatial Grid Points)')
         axes[0].set_xticks(range(len(nv_sorted)))
@@ -267,7 +289,7 @@ class BGK1DPlotMixin:
         # GPU時間ヒートマップ（利用可能な場合）
         if has_gpu_data and show_gpu_time:
             im2 = axes[1].imshow(gpu_step_time_matrix, cmap='plasma', aspect='auto')
-            axes[1].set_title('GPU Time per Step (ms)')
+            axes[1].set_title(f'GPU Time per Step (ms) - {device_name}')
             axes[1].set_xlabel('nv (Velocity Grid Points)')
             axes[1].set_ylabel('nx (Spatial Grid Points)')
             axes[1].set_xticks(range(len(nv_sorted)))
@@ -443,12 +465,12 @@ class BGK1DPlotMixin:
                     try:
                         val = error_dict[key][norm][var]
                         if val <= 0 or np.isnan(val) or np.isinf(val):
-                            warnings.warn(f"無効なエラー値をスキップ: {var} {norm} grid={key} error={val}")
+                            warnings.warn(f"Invalid error value skipped: {var} {norm} grid={key} error={val}")
                             continue
                         errors.append(val)
                         counts.append(grid_counts[i])
                     except (KeyError, TypeError):
-                        warnings.warn(f"エラー取得失敗: {var} {norm} grid={key}")
+                        warnings.warn(f"Error retrieval failed: {var} {norm} grid={key}")
                         continue
 
                 if len(errors) < 2:
