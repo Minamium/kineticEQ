@@ -359,39 +359,55 @@ class BGK1D:
 
         # CUDA時間測定の準備
         if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
             torch.cuda.synchronize()
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
 
-        # CPU時間測定開始
-        cpu_start_time = time.time()
+        # Warm-up: 初回JITコンパイルとメモリ確保のオーバーヘッドを除去
+        warmup_steps = min(5, self.nt // 4)  # 最大5ステップ、全体の1/4まで
+        for step in range(warmup_steps):
+            if self.solver == "explicit":
+                self._explicit_update()
+            elif self.solver == "implicit":
+                if self.implicit_solver == "cuSOLVER":
+                    self._implicit_cusolver_update()
+                elif self.implicit_solver == "tdma":
+                    self._implicit_TDMA_update()
+                elif self.implicit_solver == "full":
+                    self._implicit_update()
+            # 配列交換
+            self.f, self.f_new = self.f_new, self.f
+        
+        # 本計測開始
+        cpu_start_time = time.perf_counter()
         
         # GPU時間測定開始
         if self.device.type == 'cuda':
             start_event.record()
 
-        # プログレスバーを初期化
-        with get_progress_bar(self.use_tqdm,total=self.nt, desc="Progress", 
-                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+        # ベンチマーク用ループ（プログレスバー無し）
+        for step in range(self.nt):
+            if self.solver == "explicit":
+                self._explicit_update()
+            elif self.solver == "implicit":
+                if self.implicit_solver == "cuSOLVER":
+                    self._implicit_cusolver_update()
+                elif self.implicit_solver == "tdma":
+                    self._implicit_TDMA_update()
+                elif self.implicit_solver == "full":
+                    self._implicit_update()
+                else:
+                    raise ValueError(f"Unknown implicit solver: {self.implicit_solver}")
+            # 配列交換
+            self.f, self.f_new = self.f_new, self.f
 
-            for step in range(self.nt):
-                if self.solver == "explicit":
-                    self._explicit_update()
-                elif self.solver == "implicit":
-                    if self.implicit_solver == "cuSOLVER":
-                        self._implicit_cusolver_update()
-                    elif self.implicit_solver == "tdma":
-                        self._implicit_TDMA_update()
-                    elif self.implicit_solver == "full":
-                        self._implicit_update()
-                    else:
-                        raise ValueError(f"Unknown implicit solver: {self.implicit_solver}")
-                # 配列交換
-                self.f, self.f_new = self.f_new, self.f
-                pbar.update(1)
-
-        # 時間測定終了
-        cpu_total_time = time.time() - cpu_start_time
+        # GPU完了を待ってから時間測定終了
+        if self.device.type == 'cuda':
+            end_event.record()
+            torch.cuda.synchronize()  # GPU完了を保証
+        
+        cpu_total_time = time.perf_counter() - cpu_start_time
         
         # 結果をまとめる
         timing_result = {
@@ -400,13 +416,12 @@ class BGK1D:
             'total_grid_points': nx_num * nv_num,
             'device': str(self.device),
             'total_steps': self.nt,
-            'cpu_total_time_sec': cpu_total_time,
+            'warmup_steps': warmup_steps,
+            'cpu_total_time_sec': cpu_total_time,  # GPU計算を包含した壁時計時間
         }
         
-        # CUDA時間も記録
+        # CUDA時間も記録（純粋なGPU計算時間）
         if self.device.type == 'cuda':
-            end_event.record()
-            torch.cuda.synchronize()
             gpu_total_time_ms = start_event.elapsed_time(end_event)
             timing_result.update({
                 'gpu_total_time_ms': gpu_total_time_ms,
