@@ -167,7 +167,8 @@ class BGK1D:
     # ベンチマークメソッド
     def run_benchmark(self, 
                       benc_type="spatial", 
-                      grid_list=[16, 32, 64, 128, 256, 512, 1024]):
+                      grid_list=[16, 32, 64, 128, 256, 512, 1024],
+                      nv_list=[64, 128, 256]):
         print(f"--- Benchmark Start, benc_type: {benc_type} ---")
 
         # 結果保存用辞書
@@ -180,7 +181,7 @@ class BGK1D:
         elif benc_type == "velocity":
             self._run_benchmark_velocity(grid_list)
         elif benc_type == "time":
-            self._run_benchmark_time(grid_list, grid_list)
+            self._run_benchmark_time(grid_list, nv_list)
         else:
             raise ValueError(f"Unknown benchmark type: {benc_type}")
 
