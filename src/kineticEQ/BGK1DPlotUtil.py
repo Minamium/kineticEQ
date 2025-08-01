@@ -168,7 +168,8 @@ class BGK1DPlotMixin:
     def plot_timing_benchmark(self, bench_results: dict | None = None, 
                              filename: str | None = None,
                              save_fig: bool = True,
-                             show_gpu_time: bool = True):
+                             show_gpu_time: bool = True,
+                             show_overhead: bool = True):
         """実行時間ベンチマーク結果を可視化
         
         Parameters
@@ -181,10 +182,13 @@ class BGK1DPlotMixin:
             図を保存するかどうか
         show_gpu_time : bool
             GPU時間も表示するかどうか（利用可能な場合）
+        show_overhead : bool
+            オーバーヘッドΔTも表示するかどうか（利用可能な場合）
         """
         import matplotlib.pyplot as plt
         import numpy as np
         import pickle
+        import torch
         
         # matplotlib言語設定を英語に
         plt.rcParams['font.family'] = 'DejaVu Sans'
@@ -243,9 +247,14 @@ class BGK1DPlotMixin:
                         has_gpu_data = True
         
         # 図の作成
-        fig_width = 12 if (has_gpu_data and show_gpu_time) else 8
-        fig, axes = plt.subplots(1, 2 if (has_gpu_data and show_gpu_time) else 1, 
-                                figsize=(fig_width, 6))
+        subplot_num = 1
+        if has_gpu_data and show_gpu_time:
+            subplot_num += 1
+        if has_gpu_data and show_overhead and torch.cuda.is_available():
+            subplot_num += 1
+
+        fig_width = 4 * subplot_num
+        fig, axes = plt.subplots(1, subplot_num, figsize=(fig_width, 6))
         
         if not isinstance(axes, np.ndarray):
             axes = [axes]
@@ -268,35 +277,46 @@ class BGK1DPlotMixin:
         
         plt.colorbar(im1, ax=axes[0], label='Time (ms)')
         
-        # GPU時間ヒートマップ（利用可能な場合）
+        ax_idx = 1
         if has_gpu_data and show_gpu_time:
-            im2 = axes[1].imshow(gpu_step_time_matrix, cmap='plasma', aspect='auto')
-            axes[1].set_title(f'GPU Time per Step (ms) - {device_name}')
-            axes[1].set_xlabel('nv (Velocity Grid Points)')
-            axes[1].set_ylabel('nx (Spatial Grid Points)')
-            axes[1].set_xticks(range(len(nv_sorted)))
-            axes[1].set_xticklabels(nv_sorted)
-            axes[1].set_yticks(range(len(nx_sorted)))
-            axes[1].set_yticklabels(nx_sorted)
-            
-            # 値をテキストで表示
+            im2 = axes[ax_idx].imshow(gpu_step_time_matrix, cmap='plasma', aspect='auto')
+            axes[ax_idx].set_title(f'GPU Time per Step (ms) - {device_name}')
+            axes[ax_idx].set_xlabel('nv (Velocity Grid Points)')
+            axes[ax_idx].set_ylabel('nx (Spatial Grid Points)')
+            axes[ax_idx].set_xticks(range(len(nv_sorted)))
+            axes[ax_idx].set_xticklabels(nv_sorted)
+            axes[ax_idx].set_yticks(range(len(nx_sorted)))
+            axes[ax_idx].set_yticklabels(nx_sorted)
             for i in range(len(nx_sorted)):
                 for j in range(len(nv_sorted)):
-                    text = axes[1].text(j, i, f'{gpu_step_time_matrix[i, j]:.2f}',
+                    axes[ax_idx].text(j, i, f'{gpu_step_time_matrix[i, j]:.2f}',
                                       ha="center", va="center", color="white", fontsize=8)
-            
-            plt.colorbar(im2, ax=axes[1], label='Time (ms)')
+            plt.colorbar(im2, ax=axes[ax_idx], label='Time (ms)')
+            ax_idx += 1
+
+        # オーバーヘッド ΔT ヒートマップ
+        if has_gpu_data and show_overhead and torch.cuda.is_available():
+            diff_matrix = cpu_step_time_matrix - gpu_step_time_matrix
+            im3 = axes[ax_idx].imshow(diff_matrix, cmap='magma', aspect='auto')
+            axes[ax_idx].set_title('ΔT (CPU - GPU) per Step (ms)')
+            axes[ax_idx].set_xlabel('nv (Velocity Grid Points)')
+            axes[ax_idx].set_ylabel('nx (Spatial Grid Points)')
+            axes[ax_idx].set_xticks(range(len(nv_sorted)))
+            axes[ax_idx].set_xticklabels(nv_sorted)
+            axes[ax_idx].set_yticks(range(len(nx_sorted)))
+            axes[ax_idx].set_yticklabels(nx_sorted)
+            for i in range(len(nx_sorted)):
+                for j in range(len(nv_sorted)):
+                    axes[ax_idx].text(j, i, f'{diff_matrix[i, j]:.2f}',
+                                      ha="center", va="center", color="white", fontsize=8)
+            plt.colorbar(im3, ax=axes[ax_idx], label='ΔT (ms)')
         
         plt.tight_layout()
         
         if save_fig:
-            fig_name = 'timing_benchmark_heatmap.png'
-            plt.savefig(fig_name, dpi=300, bbox_inches='tight')
-            print(f"Figure saved: {fig_name}")
-        
-        # plt.show()  # 重複表示を防ぐためコメントアウト
-        
-        #return fig
+            base_name = 'timing_benchmark_heatmap'
+            plt.savefig(base_name + '.png', dpi=300, bbox_inches='tight')
+            print(f"Figure saved: {base_name + '.png'}")
 
     # ベンチマーク結果plotメソッド
     def plot_benchmark_results(
