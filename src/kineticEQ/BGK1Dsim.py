@@ -233,22 +233,33 @@ class BGK1D:
         
         # CPU名を取得
         import platform
-        cpu_name = platform.processor()
+        cpu_name = None
+        
+        # 方法1: /proc/cpuinfo から取得（Linux）
+        try:
+            with open('/proc/cpuinfo', 'r') as f:
+                for line in f:
+                    if 'model name' in line:
+                        cpu_name = line.split(':')[1].strip()
+                        break
+        except:
+            pass
+        
+        # 方法2: cpuinfo ライブラリを使用
         if not cpu_name:
             try:
                 import cpuinfo
                 cpu_name = cpuinfo.get_cpu_info()['brand_raw']
             except:
-                try:
-                    with open('/proc/cpuinfo', 'r') as f:
-                        for line in f:
-                            if 'model name' in line:
-                                cpu_name = line.split(':')[1].strip()
-                                break
-                        else:
-                            cpu_name = f"{platform.machine()} CPU"
-                except:
-                    cpu_name = f"{platform.machine()} CPU"
+                pass
+        
+        # 方法3: platform.processor()
+        if not cpu_name:
+            cpu_name = platform.processor()
+        
+        # フォールバック: アーキテクチャ名
+        if not cpu_name:
+            cpu_name = f"{platform.machine()} CPU"
         
         self.benchmark_results['cpu_name'] = cpu_name
         
