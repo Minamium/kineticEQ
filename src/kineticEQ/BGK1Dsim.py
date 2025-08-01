@@ -231,6 +231,27 @@ class BGK1D:
         device_name = torch.cuda.get_device_name(self.device) if self.device.type == 'cuda' else str(self.device)
         self.benchmark_results['device_name'] = device_name
         
+        # CPU名を取得
+        import platform
+        cpu_name = platform.processor()
+        if not cpu_name:
+            try:
+                import cpuinfo
+                cpu_name = cpuinfo.get_cpu_info()['brand_raw']
+            except:
+                try:
+                    with open('/proc/cpuinfo', 'r') as f:
+                        for line in f:
+                            if 'model name' in line:
+                                cpu_name = line.split(':')[1].strip()
+                                break
+                        else:
+                            cpu_name = f"{platform.machine()} CPU"
+                except:
+                    cpu_name = f"{platform.machine()} CPU"
+        
+        self.benchmark_results['cpu_name'] = cpu_name
+        
         # 結果保存用辞書を初期化
         self.benchmark_results['timing_results'] = {}
 

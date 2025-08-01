@@ -207,27 +207,9 @@ class BGK1DPlotMixin:
         
         timing_results = bench_results['timing_results']
         
-        # デバイス情報を取得
+        # デバイス情報を取得（ベンチマーク結果から）
         device_name = bench_results.get('device_name', 'Unknown Device')
-        
-        # CPU名を取得
-        import platform
-        cpu_name = platform.processor()
-        if not cpu_name:
-            try:
-                import cpuinfo
-                cpu_name = cpuinfo.get_cpu_info()['brand_raw']
-            except:
-                try:
-                    with open('/proc/cpuinfo', 'r') as f:
-                        for line in f:
-                            if 'model name' in line:
-                                cpu_name = line.split(':')[1].strip()
-                                break
-                        else:
-                            cpu_name = f"{platform.machine()} CPU"
-                except:
-                    cpu_name = f"{platform.machine()} CPU"
+        cpu_name = bench_results.get('cpu_name', 'Unknown CPU')
         
         # データの整理
         nx_values = set()
