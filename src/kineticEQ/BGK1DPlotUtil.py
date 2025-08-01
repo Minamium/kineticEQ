@@ -290,7 +290,7 @@ class BGK1DPlotMixin:
             plt.savefig(fig_name, dpi=300, bbox_inches='tight')
             print(f"Figure saved: {fig_name}")
         
-        plt.show()
+        # plt.show()  # 重複表示を防ぐためコメントアウト
         
         return fig
 
