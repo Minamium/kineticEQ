@@ -678,6 +678,130 @@ class BGK1DPlotMixin:
             if show_plots:
                 fig.show()
 
+    # 実行時間ベンチマーク可視化メソッド
+    def plot_timing_benchmark(self, bench_results: dict | None = None, 
+                             filename: str | None = None,
+                             save_fig: bool = True,
+                             show_gpu_time: bool = True):
+        """実行時間ベンチマーク結果を可視化
+        
+        Parameters
+        ----------
+        bench_results : dict | None
+            ベンチマーク結果辞書。Noneの場合はself.benchmark_resultsを使用
+        filename : str | None
+            pklファイルから読み込む場合のファイル名
+        save_fig : bool
+            図を保存するかどうか
+        show_gpu_time : bool
+            GPU時間も表示するかどうか（利用可能な場合）
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import pickle
+        
+        # データの取得
+        if filename is not None:
+            with open(filename, 'rb') as f:
+                data = pickle.load(f)
+                if 'results' in data:
+                    bench_results = data['results']
+                else:
+                    bench_results = data
+        elif bench_results is None:
+            if not hasattr(self, 'benchmark_results'):
+                raise ValueError("ベンチマーク結果が見つかりません")
+            bench_results = self.benchmark_results
+        
+        if bench_results.get('bench_type') != 'time':
+            raise ValueError("時間ベンチマーク結果ではありません")
+        
+        timing_results = bench_results['timing_results']
+        
+        # データの整理
+        nx_values = set()
+        nv_values = set()
+        
+        for grid_key in timing_results.keys():
+            nx, nv = map(int, grid_key.split('x'))
+            nx_values.add(nx)
+            nv_values.add(nv)
+        
+        nx_sorted = sorted(nx_values)
+        nv_sorted = sorted(nv_values)
+        
+        # CPU時間のヒートマップデータ作成
+        cpu_time_matrix = np.zeros((len(nx_sorted), len(nv_sorted)))
+        gpu_time_matrix = np.zeros((len(nx_sorted), len(nv_sorted)))
+        has_gpu_data = False
+        
+        for i, nx in enumerate(nx_sorted):
+            for j, nv in enumerate(nv_sorted):
+                grid_key = f"{nx}x{nv}"
+                if grid_key in timing_results:
+                    result = timing_results[grid_key]
+                    cpu_time_matrix[i, j] = result['cpu_total_time_sec']
+                    
+                    if 'gpu_total_time_sec' in result:
+                        gpu_time_matrix[i, j] = result['gpu_total_time_sec']
+                        has_gpu_data = True
+        
+        # 図の作成
+        fig_width = 12 if (has_gpu_data and show_gpu_time) else 8
+        fig, axes = plt.subplots(1, 2 if (has_gpu_data and show_gpu_time) else 1, 
+                                figsize=(fig_width, 6))
+        
+        if not isinstance(axes, np.ndarray):
+            axes = [axes]
+        
+        # CPU時間ヒートマップ
+        im1 = axes[0].imshow(cpu_time_matrix, cmap='viridis', aspect='auto')
+        axes[0].set_title('CPU実行時間 (秒)')
+        axes[0].set_xlabel('nv (速度格子数)')
+        axes[0].set_ylabel('nx (空間格子数)')
+        axes[0].set_xticks(range(len(nv_sorted)))
+        axes[0].set_xticklabels(nv_sorted)
+        axes[0].set_yticks(range(len(nx_sorted)))
+        axes[0].set_yticklabels(nx_sorted)
+        
+        # 値をテキストで表示
+        for i in range(len(nx_sorted)):
+            for j in range(len(nv_sorted)):
+                text = axes[0].text(j, i, f'{cpu_time_matrix[i, j]:.3f}',
+                                  ha="center", va="center", color="white", fontsize=8)
+        
+        plt.colorbar(im1, ax=axes[0])
+        
+        # GPU時間ヒートマップ（利用可能な場合）
+        if has_gpu_data and show_gpu_time:
+            im2 = axes[1].imshow(gpu_time_matrix, cmap='plasma', aspect='auto')
+            axes[1].set_title('GPU実行時間 (秒)')
+            axes[1].set_xlabel('nv (速度格子数)')
+            axes[1].set_ylabel('nx (空間格子数)')
+            axes[1].set_xticks(range(len(nv_sorted)))
+            axes[1].set_xticklabels(nv_sorted)
+            axes[1].set_yticks(range(len(nx_sorted)))
+            axes[1].set_yticklabels(nx_sorted)
+            
+            # 値をテキストで表示
+            for i in range(len(nx_sorted)):
+                for j in range(len(nv_sorted)):
+                    text = axes[1].text(j, i, f'{gpu_time_matrix[i, j]:.3f}',
+                                      ha="center", va="center", color="white", fontsize=8)
+            
+            plt.colorbar(im2, ax=axes[1])
+        
+        plt.tight_layout()
+        
+        if save_fig:
+            fig_name = 'timing_benchmark_heatmap.png'
+            plt.savefig(fig_name, dpi=300, bbox_inches='tight')
+            print(f"図を保存: {fig_name}")
+        
+        plt.show()
+        
+        return fig
+
     # ベンチマーク結果の保存・読み込みユーティリティ
     def save_benchmark_results(self, bench_results: dict | None = None, filename: str = "benchmark_results.pkl") -> str:
         """ベンチマーク結果 dict を pickle 形式で保存
