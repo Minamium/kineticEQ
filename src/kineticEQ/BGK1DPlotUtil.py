@@ -279,11 +279,18 @@ class BGK1DPlotMixin:
         axes[0].set_yticks(range(len(nx_sorted)))
         axes[0].set_yticklabels(nx_sorted)
         
-        # 値をテキストで表示
+        # 値ごとに背景輝度を判定して文字色を自動変更（可読性向上）
+        def _get_contrast_color(val: float, im):
+            rgba = im.cmap(im.norm(val))
+            # 相対輝度 (ITU-R BT.601)
+            lum = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
+            return 'black' if lum > 0.5 else 'white'
+        
         for i in range(len(nx_sorted)):
             for j in range(len(nv_sorted)):
-                text = axes[0].text(j, i, f'{cpu_step_time_matrix[i, j]:.2f}',
-                                  ha="center", va="center", color="white", fontsize=text_fontsize)
+                color = _get_contrast_color(cpu_step_time_matrix[i, j], im1)
+                axes[0].text(j, i, f'{cpu_step_time_matrix[i, j]:.2f}',
+                              ha="center", va="center", color=color, fontsize=text_fontsize)
         
         plt.colorbar(im1, ax=axes[0], label='Time (ms)')
         
@@ -299,8 +306,9 @@ class BGK1DPlotMixin:
             axes[ax_idx].set_yticklabels(nx_sorted)
             for i in range(len(nx_sorted)):
                 for j in range(len(nv_sorted)):
+                    color = _get_contrast_color(gpu_step_time_matrix[i, j], im2)
                     axes[ax_idx].text(j, i, f'{gpu_step_time_matrix[i, j]:.2f}',
-                                      ha="center", va="center", color="white", fontsize=text_fontsize)
+                                      ha="center", va="center", color=color, fontsize=text_fontsize)
             plt.colorbar(im2, ax=axes[ax_idx], label='Time (ms)')
             ax_idx += 1
 
@@ -317,8 +325,9 @@ class BGK1DPlotMixin:
             axes[ax_idx].set_yticklabels(nx_sorted)
             for i in range(len(nx_sorted)):
                 for j in range(len(nv_sorted)):
+                    color = _get_contrast_color(diff_matrix[i, j], im3)
                     axes[ax_idx].text(j, i, f'{diff_matrix[i, j]:.2f}',
-                                      ha="center", va="center", color="white", fontsize=text_fontsize)
+                                      ha="center", va="center", color=color, fontsize=text_fontsize)
             plt.colorbar(im3, ax=axes[ax_idx], label='ΔT (ms)')
         
         # plt.tight_layout()  # constrained_layout=True を使用しているため tight_layout は不要
