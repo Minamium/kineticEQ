@@ -169,7 +169,9 @@ class BGK1DPlotMixin:
                              filename: str | None = None,
                              save_fig: bool = True,
                              show_gpu_time: bool = True,
-                             show_overhead: bool = True):
+                             show_overhead: bool = True,
+                             figsize: tuple[float, float] | None = None,
+                             text_fontsize: int = 8):
         """実行時間ベンチマーク結果を可視化
         
         Parameters
@@ -184,6 +186,10 @@ class BGK1DPlotMixin:
             GPU時間も表示するかどうか（利用可能な場合）
         show_overhead : bool
             オーバーヘッドΔTも表示するかどうか（利用可能な場合）
+        figsize : tuple(float, float) | None
+            図全体のサイズ (幅, 高さ) [inch]。None なら自動決定。
+        text_fontsize : int
+            各セルに描画する数値テキストのフォントサイズ。
         """
         import matplotlib.pyplot as plt
         import numpy as np
@@ -253,8 +259,15 @@ class BGK1DPlotMixin:
         if has_gpu_data and show_overhead and torch.cuda.is_available():
             subplot_num += 1
 
-        fig_width = 4 * subplot_num
-        fig, axes = plt.subplots(1, subplot_num, figsize=(fig_width, 6))
+        # figure sizeを自動またはユーザ指定で設定
+        if figsize is None:
+            fig_width = 4 * subplot_num
+            fig_height = 6
+            figsize = (fig_width, fig_height)
+
+        fig, axes = plt.subplots(1, subplot_num, figsize=figsize, constrained_layout=True)
+        # サブプロット間の水平間隔を少し空ける
+        fig.subplots_adjust(wspace=0.25)
         
         if not isinstance(axes, np.ndarray):
             axes = [axes]
@@ -273,7 +286,7 @@ class BGK1DPlotMixin:
         for i in range(len(nx_sorted)):
             for j in range(len(nv_sorted)):
                 text = axes[0].text(j, i, f'{cpu_step_time_matrix[i, j]:.2f}',
-                                  ha="center", va="center", color="white", fontsize=8)
+                                  ha="center", va="center", color="white", fontsize=text_fontsize)
         
         plt.colorbar(im1, ax=axes[0], label='Time (ms)')
         
@@ -290,7 +303,7 @@ class BGK1DPlotMixin:
             for i in range(len(nx_sorted)):
                 for j in range(len(nv_sorted)):
                     axes[ax_idx].text(j, i, f'{gpu_step_time_matrix[i, j]:.2f}',
-                                      ha="center", va="center", color="white", fontsize=8)
+                                      ha="center", va="center", color="white", fontsize=text_fontsize)
             plt.colorbar(im2, ax=axes[ax_idx], label='Time (ms)')
             ax_idx += 1
 
@@ -308,7 +321,7 @@ class BGK1DPlotMixin:
             for i in range(len(nx_sorted)):
                 for j in range(len(nv_sorted)):
                     axes[ax_idx].text(j, i, f'{diff_matrix[i, j]:.2f}',
-                                      ha="center", va="center", color="white", fontsize=8)
+                                      ha="center", va="center", color="white", fontsize=text_fontsize)
             plt.colorbar(im3, ax=axes[ax_idx], label='ΔT (ms)')
         
         plt.tight_layout()
