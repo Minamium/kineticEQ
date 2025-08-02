@@ -10,6 +10,7 @@ from typing import Any, Union
 
 # BGK1Dbaseクラスを継承するためのimport
 from .BGK1Dsim import BGK1D
+from .BGK1D_old import BGK1D_old
 
 # 可視化関数群
 class BGK1DPlotMixin:
