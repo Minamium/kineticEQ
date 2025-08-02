@@ -456,9 +456,16 @@ class BGK1D:
             device=self.device,
         )
          
+        # ---- 移流項計算用キャッシュ ----
+        self._pos_mask = (self.v > 0)                       # (nv,)
+        self._neg_mask = ~self._pos_mask                    # (nv,)
+        # -v/dx を前計算しておくと stream = coeff * df だけで済む
+        self._v_coeff = -self.v / self.dx                   # (nv,)
+         
         #print("Allocated successfully")
 
     # モーメント計算メソッド
+    @torch.no_grad()
     def calculate_moments(self, f=None):
         # 引数がなければ、現在の分布関数を使用
         if f is None:
@@ -491,6 +498,7 @@ class BGK1D:
         return n, u, T
 
     # マックスウェル分布関数計算メソッド
+    @torch.no_grad()
     def Maxwellian(self, n: torch.Tensor, u: torch.Tensor, T: torch.Tensor):
         """マックスウェル分布 f_M を高速計算 (FP64 前提)
 
@@ -771,19 +779,49 @@ class BGK1D:
         return z + 1, residual
 
     #移流項計算メソッド
-    def _compute_streaming(self, f=None):
+    @torch.no_grad()
+    def _compute_streaming(self, f: torch.Tensor | None = None):
+        """Upwind streaming term ∂f/∂x を高速計算.
+
+        前後セル差分を `torch.diff` で取得し、事前計算した係数
+        `self._v_coeff = -v/dx` を掛けて一度でフラックスを作成する。
+        その後、正負の速度に応じてフラックスをセルに割り当てる。
+        メモリアロケーションを最小化し、ブロードキャストを回避.
+        """
+
         # 引数がなければ、現在の分布関数を使用
-        if f is None:
-            f = self.f
+        # メモリ効率が悪い
+        #if f is None:
+        #    f = self.f
 
         # v の符号マスク
-        pos = self.v > 0   # (nv,)
-        neg = ~pos
+        #pos = self.v > 0   # (nv,)
+        #neg = ~pos
         # 前向き・後向き差分
-        df_forward  = f[1:, :] - f[:-1, :]
-        streaming   = torch.zeros_like(f, dtype=self.dtype, device=self.device)
-        streaming[1:,  pos] = - self.v[pos] * df_forward[:,  pos] / self.dx
-        streaming[:-1, neg] = - self.v[neg] * df_forward[:,  neg] / self.dx
+        #df_forward  = f[1:, :] - f[:-1, :]
+        #streaming   = torch.zeros_like(f, dtype=self.dtype, device=self.device)
+        #streaming[1:,  pos] = - self.v[pos] * df_forward[:,  pos] / self.dx
+        #streaming[:-1, neg] = - self.v[neg] * df_forward[:,  neg] / self.dx
+        #return streaming
+
+        if f is None:
+            f = self.f  # (nx, nv)
+
+        # forward difference along x (size nx-1, nv)
+        df = torch.diff(f, dim=0)
+
+        # flux = (-v/dx) * df   (nx-1, nv)
+        flux = df * self._v_coeff  # broadcast over rows
+
+        # 出力テンソルを用意（境界は 0）
+        streaming = torch.zeros_like(f)
+
+        # 正速度: 対象セルは i>=1
+        streaming[1:,  self._pos_mask] = flux[:, self._pos_mask]
+
+        # 負速度: 対象セルは i<=nx-2 (=-1 シフト)
+        streaming[:-1, self._neg_mask] = flux[:, self._neg_mask]
+
         return streaming
 
     #安定性条件チェックメソッド(CFL条件)
