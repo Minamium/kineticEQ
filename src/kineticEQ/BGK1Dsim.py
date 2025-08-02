@@ -446,7 +446,16 @@ class BGK1D:
         # 座標系配列確保
         self.x = torch.linspace(0, self.Lx, self.nx, dtype=self.dtype, device=self.device)
         self.v = torch.linspace(-self.v_max, self.v_max, self.nv, dtype=self.dtype, device=self.device)
-
+        
+        # ---- キャッシュ: 変化しないテンソルを保存 (FP64 前提) ----
+        # 列ベクトル化した速度グリッドと 1/sqrt(2π)
+        self._v_col = self.v[None, :]                       # shape (1, nv)
+        self._inv_sqrt_2pi = torch.tensor(
+            1.0 / math.sqrt(2.0 * math.pi),
+            dtype=self.dtype,
+            device=self.device,
+        )
+         
         #print("Allocated successfully")
 
     # モーメント計算メソッド
@@ -482,11 +491,33 @@ class BGK1D:
         return n, u, T
 
     # マックスウェル分布関数計算メソッド
-    def Maxwellian(self, n, u, T):
-        # マックスウェル分布関数を計算
-        coeff = n / torch.sqrt(2 * torch.pi * T)
-        exponet = -(self.v[None, :] - u[:, None])**2 / (2 * T[:, None])
-        return coeff[:, None] * torch.exp(exponet)
+    def Maxwellian(self, n: torch.Tensor, u: torch.Tensor, T: torch.Tensor):
+        """マックスウェル分布 f_M を高速計算 (FP64 前提)
+
+        Parameters
+        ----------
+        n, u, T : (nx,) torch.Tensor
+            密度, 流速, 温度 (いずれも self.dtype, self.device)
+
+        Returns
+        -------
+        f_M : (nx, nv) torch.Tensor
+            Maxwellian 分布
+        """
+
+        # 係数部  n / sqrt(2π T)
+        coeff = (n * self._inv_sqrt_2pi) / torch.sqrt(T)      # (nx,)
+
+        # 指数部  exp( -(v-u)^2 / (2T) )
+        invT  = 0.5 / T                                       # (nx,)
+        diff  = self._v_col - u[:, None]                      # (nx, nv), view+broadcast
+
+        exponent = diff.mul(diff)                             # (nx, nv): (v-u)^2
+        exponent.mul_(-invT[:, None])                         # -(v-u)^2 / (2T)
+        torch.exp(exponent, out=exponent)                     # exp(·) in-place
+
+        exponent.mul_(coeff[:, None])                         # f = coeff * exp
+        return exponent
 
     # 初期条件設定メソッド
     def set_initial_condition(self):
