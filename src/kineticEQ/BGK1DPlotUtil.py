@@ -921,3 +921,7 @@ class BGK1DPlotMixin:
 class BGK1DPlot(BGK1D, BGK1DPlotMixin):
     """BGK1D + プロット機能の統合クラス"""
     pass
+
+class BGK1DPlot_old(BGK1D_old, BGK1DPlotMixin):
+    """BGK1D_old + プロット機能の統合クラス"""
+    pass
