@@ -465,7 +465,8 @@ class BGK1D:
 
         # torch.einsumを使用した高速化 
         dv = self.dv
-        vv = torch.stack((self.v, self.v * self.v))
+        ones = torch.ones_like(self.v)
+        vv = torch.stack((ones, self.v * self.v))  # shape (2, nv)
 
         # s0, s2 を同時に
         s02 = f @ vv.T
