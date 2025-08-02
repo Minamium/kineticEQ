@@ -459,24 +459,24 @@ class BGK1D:
         # 物理空間分割点をインデックスとしたモーメント配列を作成
 
         # 愚直な実装, sumを三回呼ぶためメモリ帯域浪費が激しい
-        #n = torch.sum(f, dim=1) * self.dv
-        #u = torch.sum(f * self.v[None, : ], dim=1) * self.dv / n
-        #T = torch.sum(f * (self.v[None, : ] - u[:, None])**2, dim=1) * self.dv / n
+        n = torch.sum(f, dim=1) * self.dv
+        u = torch.sum(f * self.v[None, : ], dim=1) * self.dv / n
+        T = torch.sum(f * (self.v[None, : ] - u[:, None])**2, dim=1) * self.dv / n
 
         # torch.einsumを使用した高速化 
-        dv = self.dv
-        vv = torch.stack((self.v, self.v * self.v))
+        #dv = self.dv
+        #vv = torch.stack((self.v, self.v * self.v))
 
         # s0, s2 を同時に
-        s02 = f @ vv.T
-        s02.mul_(dv)
+        #s02 = f @ vv.T
+        #s02.mul_(dv)
 
-        n  = s02[:, 0]
-        s2 = s02[:, 1]
+        #n  = s02[:, 0]
+        #s2 = s02[:, 1]
 
-        s1 = (f @ self.v) * dv
-        u  = s1 / n
-        T  = s2 / n - u * u
+        #s1 = (f @ self.v) * dv
+        #u  = s1 / n
+        #T  = s2 / n - u * u
 
         return n, u, T
 
