@@ -505,6 +505,12 @@ class BGK1D:
             Maxwellian 分布
         """
 
+        # マックスウェル分布関数を計算(old実装)
+        # メモリ帯域効率が悪い
+        #coeff = n / torch.sqrt(2 * torch.pi * T)
+        #exponet = -(self.v[None, :] - u[:, None])**2 / (2 * T[:, None])
+        #return coeff[:, None] * torch.exp(exponet)
+
         # 係数部  n / sqrt(2π T)
         coeff = (n * self._inv_sqrt_2pi) / torch.sqrt(T)      # (nx,)
 
