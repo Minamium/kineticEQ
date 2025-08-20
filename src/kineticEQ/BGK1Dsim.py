@@ -1080,3 +1080,13 @@ class BGK1D:
 
         return error_dict
 
+    def _explicit_update_cuda_backend(self):
+        # カーネル呼び出し（境界は後で上書き）
+        self._explicit_cuda.explicit_step(
+            self.f, self.f_new, self.v,
+            float(self.dv), float(self.dt), float(self.dx),
+            float(self.tau_tilde), float(self._inv_sqrt_2pi.item()), int(self._k0)
+        )
+        # 境界固定（極小オーバーヘッド）
+        self.f_new[0, :].copy_(self.f[0, :])
+        self.f_new[-1, :].copy_(self.f[-1, :])
