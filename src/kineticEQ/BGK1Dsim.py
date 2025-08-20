@@ -135,6 +135,20 @@ class BGK1D:
                 verbose=True
             )
 
+        # torch.compileの実行
+        if hasattr(torch, "compile") and self.solver == "explicit":
+            try:
+                # 実行時に JIT/AOT で融合を狙う
+                self._explicit_update_fused = torch.compile(self._explicit_update_fused_impl)
+                print("--- torch.compile is available, using fused update ---")
+            except Exception:
+                # 失敗したら生の実装を使う
+                self._explicit_update_fused = self._explicit_update_fused_impl
+                print("--- torch.compile is available, BUT FAILED TO COMPILE, using row fused update ---")
+        else:
+            self._explicit_update_fused = self._explicit_update_fused_impl
+            print("--- torch.compile is not available, using row fused update ---")
+
         # 初期化完了通知
         print(f"initiaze complete:")
         print(f"  solver: {self.solver}")
@@ -145,7 +159,9 @@ class BGK1D:
         print(f"  velocity: nv={self.nv}, dv={self.dv:.4f}, v_max={self.v_max}")
         print(f"  time: nt={self.nt}, dt={self.dt:.4f}, T_total={self.T_total}")
         print(f"  dtype: {self.dtype}")
-        print(f"  device: {self.device}")
+        print(f"  device: {self.device}, GPU name: {torch.cuda.get_device_name(0)}")
+
+        
 
     #シミュレーションメソッド
     def run_simulation(self):
@@ -461,6 +477,23 @@ class BGK1D:
         self._neg_mask = ~self._pos_mask                    # (nv,)
         # -v/dx を前計算しておくと stream = coeff * df だけで済む
         self._v_coeff = -self.v / self.dx                   # (nv,)
+
+        # ---- ここから追加：陽解法の融合版で使うワーク（事前確保・再利用）----
+        # (nv,3) 連続: [1, v, v^2] —— モーメントを1パスで取るため
+        self._vv3 = torch.stack((
+            torch.ones_like(self.v),
+            self.v,
+            self.v * self.v
+        ), dim=1).contiguous()
+
+        # 差分とフラックスの作業領域（毎回割り当てをしない）
+        self._df   = torch.empty((self.nx - 1, self.nv), dtype=self.dtype, device=self.device)
+        self._flux = torch.empty_like(self._df)
+
+        # v>=0 と v<0 を分ける閾インデックス（ブールマスクを避ける）
+        self._k0 = int(torch.searchsorted(
+            self.v, torch.tensor(0.0, dtype=self.dtype, device=self.device)
+        ))
          
         #print("Allocated successfully")
 
@@ -847,7 +880,8 @@ class BGK1D:
 
             for step in range(self.nt):
                 # 時間発展ステップ
-                self._explicit_update()
+                # self._explicit_update()
+                self._explicit_update_fused()
 
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
@@ -1011,3 +1045,51 @@ class BGK1D:
             }
 
         return error_dict
+
+    # 陽解法の処理融合試験実装関数
+    def _explicit_update_fused_impl(self):
+        """陽解法1ステップ（移流・モーメント・Maxwell・衝突・合成を1関数で）
+        数値スキームは元と同じ。I/O と割当を最小化。
+        """
+        f  = self.f
+        fn = self.f_new
+        dt = self.dt
+        dv = self.dv
+        k0 = self._k0
+
+        # === 1) モーメント（[nx,nv] @ [nv,3] → [nx,3] で1パスに統合） ===
+        s  = f @ self._vv3               # (nx,3)
+        n  = s[:, 0] * dv
+        s1 = s[:, 1] * dv
+        s2 = s[:, 2] * dv
+        u  = s1 / n
+        T  = s2 / n - u * u
+
+        # === 2) 衝突項 ===
+        tau  = self.tau_tilde / (n * torch.sqrt(T))
+        fM   = self.Maxwellian(n, u, T)            # (nx,nv)
+        coll = (fM - f) / tau[:, None]             # (nx,nv)
+
+        # === 3) 移流（差分→フラックスをワークに in-place で作る） ===
+        df = self._df
+        df.copy_(f[1:, :])                         # df = f[1:] - f[:-1]
+        df.sub_(f[:-1, :])
+
+        flux = self._flux
+        flux.copy_(df)
+        flux.mul_(self._v_coeff)                   # (= -v/dx) を掛ける
+
+        # === 4) 合成更新：streaming テンソルは作らず f_new に直接加算 ===
+        fn.copy_(f)                                # ベースは現ステップの f
+
+        # v >= 0 → i >= 1 が対象
+        fn[1:,  k0:] .add_( dt * ( flux[:,  k0:] + coll[1:,  k0:] ) )
+        # v < 0  → i <= nx-2 が対象
+        fn[:-1, :k0] .add_( dt * ( flux[:, :k0]   + coll[:-1, :k0] ) )
+
+        # 境界固定（上の加算で境界を触っていても最終的に上書きする）
+        fn[0,  :] = f[0,  :]
+        fn[-1, :] = f[-1, :]
+
+        # 返り値は使わないが、torch.compile が in-place と読み取れるように None を返す
+        return None
