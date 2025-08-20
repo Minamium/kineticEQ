@@ -135,6 +135,32 @@ class BGK1D:
                 verbose=True
             )
 
+        # --- CUDA fused explicit backend (optional) ---
+        self._explicit_cuda = None
+        if self.solver == 'explicit' and self.device.type == 'cuda':
+            try:
+                from torch.utils.cpp_extension import load
+                import os, sysconfig
+                from pathlib import Path
+                os.makedirs('build', exist_ok=True)
+                src_dir = Path(__file__).resolve().parent / "backends" / "explicit_fused"
+                # A100/3070 両対応にするなら環境変数でアーキを指定:
+                # os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0;8.6"
+                self._explicit_cuda = load(
+                    name='explicit_fused',
+                    sources=[str(src_dir/'explicit_binding.cpp'),
+                             str(src_dir/'explicit_kernel.cu')],
+                    extra_cflags=['-O3'],
+                    extra_cuda_cflags=['-O3'],  # FP64なので -use_fast_math は付けない
+                    extra_include_paths=[sysconfig.get_paths()['include']],
+                    build_directory='build',
+                    verbose=False
+                )
+                print('--- fused CUDA backend loaded ---')
+            except Exception as e:
+                print('--- fused CUDA backend UNAVAILABLE, fallback to torch.compile ---')
+                self._explicit_cuda = None
+
         # torch.compileの実行
         if hasattr(torch, "compile") and self.solver == "explicit":
             try:
@@ -886,7 +912,10 @@ class BGK1D:
             for step in range(self.nt):
                 # 時間発展ステップ
                 # self._explicit_update()
-                self._explicit_update_fused()
+                if self._explicit_cuda is not None:
+                    self._explicit_update_cuda_backend()
+                else:
+                    self._explicit_update_fused()
 
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
@@ -1115,3 +1144,15 @@ class BGK1D:
         torch.exp(out, out=out)                                    # exp(·)
         out.mul_(coeff[:, None])                                   # 係数掛け
         return out
+
+
+    def _explicit_update_cuda_backend(self):
+        # カーネル呼び出し（境界は後で上書き）
+        self._explicit_cuda.explicit_step(
+            self.f, self.f_new, self.v,
+            float(self.dv), float(self.dt), float(self.dx),
+            float(self.tau_tilde), float(self._inv_sqrt_2pi.item()), int(self._k0)
+        )
+        # 境界固定（極小オーバーヘッド）
+        self.f_new[0, :].copy_(self.f[0, :])
+        self.f_new[-1, :].copy_(self.f[-1, :])
