@@ -146,6 +146,7 @@ class BGK1D:
                 src_dir = Path(__file__).resolve().parent / "backends" / "explicit_fused"
                 # A100/3070 両対応にするなら環境変数でアーキを指定:
                 # os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0;8.6"
+                os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.6")
                 self._explicit_cuda = load(
                     name='explicit_fused',
                     sources=[str(src_dir/'explicit_binding.cpp'),
