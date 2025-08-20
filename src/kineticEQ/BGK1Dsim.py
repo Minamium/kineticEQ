@@ -414,7 +414,10 @@ class BGK1D:
         for step in range(warmup_steps):
             if self.solver == "explicit":
                 # self._explicit_update()
-                self._explicit_update_fused()
+                if self._explicit_cuda is not None:
+                    self._explicit_update_cuda_backend()
+                else:
+                    self._explicit_update_fused()
             elif self.solver == "implicit":
                 if self.implicit_solver == "cuSOLVER":
                     self._implicit_cusolver_update()
@@ -436,7 +439,10 @@ class BGK1D:
         for step in range(self.nt):
             if self.solver == "explicit":
                 # self._explicit_update()
-                self._explicit_update_fused()
+                if self._explicit_cuda is not None:
+                    self._explicit_update_cuda_backend()
+                else:
+                    self._explicit_update_fused()
             elif self.solver == "implicit":
                 if self.implicit_solver == "cuSOLVER":
                     self._implicit_cusolver_update()
