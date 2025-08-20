@@ -385,7 +385,8 @@ class BGK1D:
         warmup_steps = min(5, self.nt // 4)  # 最大5ステップ、全体の1/4まで
         for step in range(warmup_steps):
             if self.solver == "explicit":
-                self._explicit_update()
+                # self._explicit_update()
+                self._explicit_update_fused_fused()
             elif self.solver == "implicit":
                 if self.implicit_solver == "cuSOLVER":
                     self._implicit_cusolver_update()
@@ -406,7 +407,8 @@ class BGK1D:
         # ベンチマーク用ループ（プログレスバー無し）
         for step in range(self.nt):
             if self.solver == "explicit":
-                self._explicit_update()
+                # self._explicit_update()
+                self._explicit_update_fused_fused()
             elif self.solver == "implicit":
                 if self.implicit_solver == "cuSOLVER":
                     self._implicit_cusolver_update()
