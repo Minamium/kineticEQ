@@ -164,20 +164,6 @@ class BGK1D:
             traceback.print_exc()
             print('--- fused CUDA backend loaded ---')
 
-        # torch.compileの実行
-        if hasattr(torch, "compile") and self.solver == "explicit":
-            try:
-                # 実行時に JIT/AOT で融合を狙う
-                self._explicit_update_fused = torch.compile(self._explicit_update_fused_impl)
-                print("--- torch.compile is available, using fused update ---")
-            except Exception:
-                # 失敗したら生の実装を使う
-                self._explicit_update_fused = self._explicit_update_fused_impl
-                print("--- torch.compile is available, BUT FAILED TO COMPILE, using row fused update ---")
-        else:
-            self._explicit_update_fused = self._explicit_update_fused_impl
-            print("--- torch.compile is not available, using row fused update ---")
-
         # 初期化完了通知
         print(f"initiaze complete:")
         print(f"  solver: {self.solver}")
@@ -344,7 +330,10 @@ class BGK1D:
 
             for step in range(self.nt):
                 if self.solver == "explicit":
-                    self._explicit_update()
+                    if self.explicit_solver == 'backend':
+                        self._explicit_update_cuda_backend()
+                    else:
+                        self._explicit_update()
                 elif self.solver == "implicit":
                     if self.implicit_solver == "cuSOLVER":
                         self._implicit_cusolver_update()
@@ -378,7 +367,10 @@ class BGK1D:
 
             for step in range(self.nt):
                 if self.solver == "explicit":
-                    self._explicit_update()
+                    if self.explicit_solver == 'backend':
+                        self._explicit_update_cuda_backend()
+                    else:
+                        self._explicit_update()
                 elif self.solver == "implicit":
                     if self.implicit_solver == "cuSOLVER":
                         self._implicit_cusolver_update()
@@ -418,7 +410,7 @@ class BGK1D:
                 if self.explicit_solver == 'backend':
                     self._explicit_update_cuda_backend()
                 else:
-                    self._explicit_update_fused()
+                    self._explicit_update()
             elif self.solver == "implicit":
                 if self.implicit_solver == "cuSOLVER":
                     self._implicit_cusolver_update()
@@ -443,7 +435,7 @@ class BGK1D:
                 if self.explicit_solver == 'backend':
                     self._explicit_update_cuda_backend()
                 else:
-                    self._explicit_update_fused()
+                    self._explicit_update()
             elif self.solver == "implicit":
                 if self.implicit_solver == "cuSOLVER":
                     self._implicit_cusolver_update()
@@ -920,11 +912,10 @@ class BGK1D:
 
             for step in range(self.nt):
                 # 時間発展ステップ
-                # self._explicit_update()
                 if self.explicit_solver == 'backend':
                     self._explicit_update_cuda_backend()
                 else:
-                    self._explicit_update_fused()
+                    self._explicit_update()
 
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
@@ -1089,79 +1080,3 @@ class BGK1D:
 
         return error_dict
 
-    # 陽解法の処理融合試験実装関数
-    def _explicit_update_fused_impl(self):
-        f, fn = self.f, self.f_new
-        dt, dv = self.dt, self.dv
-        k0 = self._k0
-
-        # === 1) モーメント：out を再利用 ===
-        s = torch.mm(f, self._vv3, out=self._s)   # (nx,3)
-        n  = s[:, 0] * dv
-        s1 = s[:, 1] * dv
-        s2 = s[:, 2] * dv
-        u  = s1 / n
-        T  = s2 / n - u * u
-
-        # === 2) τ と 1/τ を先に作る（ベクトル） ===
-        tau = self.tau_tilde / (n * torch.sqrt(T))
-        inv_tau = torch.reciprocal(tau)           # (nx,)
-
-        # === 3) 移流：ワークに in-place ===
-        df = self._df
-        df.copy_(f[1:, :]); df.sub_(f[:-1, :])
-
-        flux = self._flux
-        flux.copy_(df); flux.mul_(self._v_coeff)  # (= -v/dx)
-
-        # === 4) f_new へ「移流」だけ先に加算（streaming テンソルを作らない）===
-        fn.copy_(f)
-        fn[1:,  k0:].add_( dt * flux[:,  k0:] )
-        fn[:-1, :k0].add_( dt * flux[:, :k0]   )
-
-        # === 5) 衝突：_work を再利用して f_M を作成→(f_M - f)*(1/τ) を in-place で作る ===
-        buf = self._work
-        self.Maxwellian_out(buf, n, u, T)         # buf = f_M
-        buf.sub_(f)                                # buf = f_M - f
-        buf.mul_(inv_tau[:, None])                 # buf = (f_M - f)/τ
-
-        # === 6) 衝突の加算（境界を除く行にだけ）===
-        fn[1:,  k0:].add_( dt * buf[1:,  k0:] )
-        fn[:-1, :k0].add_( dt * buf[:-1, :k0] )
-
-        # 境界固定
-        fn[0,  :] = f[0,  :]
-        fn[-1, :] = f[-1, :]
-        return None
-
-    # マクスウェル分布計算メソッドの処理融合試験実装関数
-    @torch.no_grad()
-    def Maxwellian_out(self, out: torch.Tensor,
-                       n: torch.Tensor, u: torch.Tensor, T: torch.Tensor):
-        """out ← f_M(n,u,T) を in-place で構築（割当ゼロ）"""
-        # 係数: n / sqrt(2π T)  （rsqrt を使う）
-        inv_sqrt_T = torch.rsqrt(T)
-        coeff = (n * self._inv_sqrt_2pi) * inv_sqrt_T              # (nx,)
-
-        # 指数部: exp( -(v-u)^2 / (2T) ) = exp( -0.5 * (v-u)^2 / T )
-        invT = 0.5 * torch.reciprocal(T)                           # (nx,)
-
-        # out = (v - u)  （ブロードキャスト＋ out に直接）
-        torch.sub(self._v_col, u[:, None], out=out)                # out = v - u
-        out.mul_(out)                                              # (v-u)^2
-        out.mul_(-invT[:, None])                                   # -(v-u)^2/(2T)
-        torch.exp(out, out=out)                                    # exp(·)
-        out.mul_(coeff[:, None])                                   # 係数掛け
-        return out
-
-
-    def _explicit_update_cuda_backend(self):
-        # カーネル呼び出し（境界は後で上書き）
-        self._explicit_cuda.explicit_step(
-            self.f, self.f_new, self.v,
-            float(self.dv), float(self.dt), float(self.dx),
-            float(self.tau_tilde), float(self._inv_sqrt_2pi.item()), int(self._k0)
-        )
-        # 境界固定（極小オーバーヘッド）
-        self.f_new[0, :].copy_(self.f[0, :])
-        self.f_new[-1, :].copy_(self.f[-1, :])
