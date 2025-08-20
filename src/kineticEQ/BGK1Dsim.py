@@ -38,6 +38,9 @@ class BGK1D:
                  # 解法選択
                  solver='explicit',
 
+                 # 陽解法ソルバー
+                 explicit_solver='backend',
+
                  # 三重対角行列ソルバー
                  implicit_solver='cuSOLVER',
 
@@ -76,6 +79,7 @@ class BGK1D:
         # パラメータ保存
         self.solver = solver
         self.implicit_solver = implicit_solver
+        self.explicit_solver = explicit_solver
         self.picard_iter = picard_iter
         self.picard_tol = picard_tol
         self.tau_tilde = tau_tilde
@@ -137,31 +141,28 @@ class BGK1D:
 
         # --- CUDA fused explicit backend (optional) ---
         self._explicit_cuda = None
-        if self.solver == 'explicit' and self.device.type == 'cuda':
-            try:
-                from torch.utils.cpp_extension import load
-                import traceback, os, sysconfig
-                from pathlib import Path
-                os.makedirs('build', exist_ok=True)
-                src_dir = Path(__file__).resolve().parent / "backends" / "explicit_fused"
-                # A100/3070 両対応にするなら環境変数でアーキを指定:
-                # os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0;8.6"
-                os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.6")
-                self._explicit_cuda = load(
-                    name='explicit_fused',
-                    sources=[str(src_dir/'explicit_binding.cpp'),
-                             str(src_dir/'explicit_kernel.cu')],
-                    extra_cflags=['-O3'],
-                    extra_cuda_cflags=['-O3'],  # FP64なので -use_fast_math は付けない
-                    extra_include_paths=[sysconfig.get_paths()['include']],
-                    build_directory='build',
-                    verbose=True
-                )
-                print('--- fused CUDA backend loaded ---')
-            except Exception as e:
-                print('--- fused CUDA backend UNAVAILABLE, fallback to torch.compile ---')
-                traceback.print_exc() 
-                self._explicit_cuda = None
+        if self.solver == 'explicit' and self.explicit_solver == 'backend':
+            print("--- compile CUDA fused explicit backend ---")
+            from torch.utils.cpp_extension import load
+            import traceback, os, sysconfig
+            from pathlib import Path
+            os.makedirs('build', exist_ok=True)
+            src_dir = Path(__file__).resolve().parent / "backends" / "explicit_fused"
+            # A100/3070 両対応にするなら環境変数でアーキを指定:
+            # os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0;8.6"
+            os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.6")
+            self._explicit_cuda = load(
+                name='explicit_fused',
+                sources=[str(src_dir/'explicit_binding.cpp'),
+                         str(src_dir/'explicit_kernel.cu')],
+                extra_cflags=['-O3'],
+                extra_cuda_cflags=['-O3'],  # FP64なので -use_fast_math は付けない
+                extra_include_paths=[sysconfig.get_paths()['include']],
+                build_directory='build',
+                verbose=True
+            )
+            traceback.print_exc()
+            print('--- fused CUDA backend loaded ---')
 
         # torch.compileの実行
         if hasattr(torch, "compile") and self.solver == "explicit":
@@ -414,7 +415,7 @@ class BGK1D:
         for step in range(warmup_steps):
             if self.solver == "explicit":
                 # self._explicit_update()
-                if self._explicit_cuda is not None:
+                if self.explicit_solver == 'backend':
                     self._explicit_update_cuda_backend()
                 else:
                     self._explicit_update_fused()
@@ -439,7 +440,7 @@ class BGK1D:
         for step in range(self.nt):
             if self.solver == "explicit":
                 # self._explicit_update()
-                if self._explicit_cuda is not None:
+                if self.explicit_solver == 'backend':
                     self._explicit_update_cuda_backend()
                 else:
                     self._explicit_update_fused()
@@ -920,7 +921,7 @@ class BGK1D:
             for step in range(self.nt):
                 # 時間発展ステップ
                 # self._explicit_update()
-                if self._explicit_cuda is not None:
+                if self.explicit_solver == 'backend':
                     self._explicit_update_cuda_backend()
                 else:
                     self._explicit_update_fused()
