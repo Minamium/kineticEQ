@@ -74,3 +74,7 @@ sim = BGK1D({
 
 sim.run_simulation()
 '''
+
+
+# 実装メモ
+

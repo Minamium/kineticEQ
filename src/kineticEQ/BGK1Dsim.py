@@ -490,6 +490,9 @@ class BGK1D:
         self._df   = torch.empty((self.nx - 1, self.nv), dtype=self.dtype, device=self.device)
         self._flux = torch.empty_like(self._df)
 
+        self._s    = torch.empty((self.nx, 3), dtype=self.dtype, device=self.device)     
+        self._work = torch.empty((self.nx, self.nv), dtype=self.dtype, device=self.device)  
+
         # v>=0 と v<0 を分ける閾インデックス（ブールマスクを避ける）
         self._k0 = int(torch.searchsorted(
             self.v, torch.tensor(0.0, dtype=self.dtype, device=self.device)
@@ -1048,48 +1051,65 @@ class BGK1D:
 
     # 陽解法の処理融合試験実装関数
     def _explicit_update_fused_impl(self):
-        """陽解法1ステップ（移流・モーメント・Maxwell・衝突・合成を1関数で）
-        数値スキームは元と同じ。I/O と割当を最小化。
-        """
-        f  = self.f
-        fn = self.f_new
-        dt = self.dt
-        dv = self.dv
+        f, fn = self.f, self.f_new
+        dt, dv = self.dt, self.dv
         k0 = self._k0
 
-        # === 1) モーメント（[nx,nv] @ [nv,3] → [nx,3] で1パスに統合） ===
-        s  = f @ self._vv3               # (nx,3)
+        # === 1) モーメント：out を再利用 ===
+        s = torch.mm(f, self._vv3, out=self._s)   # (nx,3)
         n  = s[:, 0] * dv
         s1 = s[:, 1] * dv
         s2 = s[:, 2] * dv
         u  = s1 / n
         T  = s2 / n - u * u
 
-        # === 2) 衝突項 ===
-        tau  = self.tau_tilde / (n * torch.sqrt(T))
-        fM   = self.Maxwellian(n, u, T)            # (nx,nv)
-        coll = (fM - f) / tau[:, None]             # (nx,nv)
+        # === 2) τ と 1/τ を先に作る（ベクトル） ===
+        tau = self.tau_tilde / (n * torch.sqrt(T))
+        inv_tau = torch.reciprocal(tau)           # (nx,)
 
-        # === 3) 移流（差分→フラックスをワークに in-place で作る） ===
+        # === 3) 移流：ワークに in-place ===
         df = self._df
-        df.copy_(f[1:, :])                         # df = f[1:] - f[:-1]
-        df.sub_(f[:-1, :])
+        df.copy_(f[1:, :]); df.sub_(f[:-1, :])
 
         flux = self._flux
-        flux.copy_(df)
-        flux.mul_(self._v_coeff)                   # (= -v/dx) を掛ける
+        flux.copy_(df); flux.mul_(self._v_coeff)  # (= -v/dx)
 
-        # === 4) 合成更新：streaming テンソルは作らず f_new に直接加算 ===
-        fn.copy_(f)                                # ベースは現ステップの f
+        # === 4) f_new へ「移流」だけ先に加算（streaming テンソルを作らない）===
+        fn.copy_(f)
+        fn[1:,  k0:].add_( dt * flux[:,  k0:] )
+        fn[:-1, :k0].add_( dt * flux[:, :k0]   )
 
-        # v >= 0 → i >= 1 が対象
-        fn[1:,  k0:] .add_( dt * ( flux[:,  k0:] + coll[1:,  k0:] ) )
-        # v < 0  → i <= nx-2 が対象
-        fn[:-1, :k0] .add_( dt * ( flux[:, :k0]   + coll[:-1, :k0] ) )
+        # === 5) 衝突：_work を再利用して f_M を作成→(f_M - f)*(1/τ) を in-place で作る ===
+        buf = self._work
+        self.Maxwellian_out(buf, n, u, T)         # buf = f_M
+        buf.sub_(f)                                # buf = f_M - f
+        buf.mul_(inv_tau[:, None])                 # buf = (f_M - f)/τ
 
-        # 境界固定（上の加算で境界を触っていても最終的に上書きする）
+        # === 6) 衝突の加算（境界を除く行にだけ）===
+        fn[1:,  k0:].add_( dt * buf[1:,  k0:] )
+        fn[:-1, :k0].add_( dt * buf[:-1, :k0] )
+
+        # 境界固定
         fn[0,  :] = f[0,  :]
         fn[-1, :] = f[-1, :]
-
-        # 返り値は使わないが、torch.compile が in-place と読み取れるように None を返す
         return None
+
+    # マクスウェル分布計算メソッドの処理融合試験実装関数
+    @torch.no_grad()
+    def Maxwellian_out(self, out: torch.Tensor,
+                       n: torch.Tensor, u: torch.Tensor, T: torch.Tensor):
+        """out ← f_M(n,u,T) を in-place で構築（割当ゼロ）"""
+        # 係数: n / sqrt(2π T)  （rsqrt を使う）
+        inv_sqrt_T = torch.rsqrt(T)
+        coeff = (n * self._inv_sqrt_2pi) * inv_sqrt_T              # (nx,)
+
+        # 指数部: exp( -(v-u)^2 / (2T) ) = exp( -0.5 * (v-u)^2 / T )
+        invT = 0.5 * torch.reciprocal(T)                           # (nx,)
+
+        # out = (v - u)  （ブロードキャスト＋ out に直接）
+        torch.sub(self._v_col, u[:, None], out=out)                # out = v - u
+        out.mul_(out)                                              # (v-u)^2
+        out.mul_(-invT[:, None])                                   # -(v-u)^2/(2T)
+        torch.exp(out, out=out)                                    # exp(·)
+        out.mul_(coeff[:, None])                                   # 係数掛け
+        return out
