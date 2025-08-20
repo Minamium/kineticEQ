@@ -140,7 +140,7 @@ class BGK1D:
         if self.solver == 'explicit' and self.device.type == 'cuda':
             try:
                 from torch.utils.cpp_extension import load
-                import os, sysconfig
+                import traceback, os, sysconfig
                 from pathlib import Path
                 os.makedirs('build', exist_ok=True)
                 src_dir = Path(__file__).resolve().parent / "backends" / "explicit_fused"
@@ -154,11 +154,12 @@ class BGK1D:
                     extra_cuda_cflags=['-O3'],  # FP64なので -use_fast_math は付けない
                     extra_include_paths=[sysconfig.get_paths()['include']],
                     build_directory='build',
-                    verbose=False
+                    verbose=True
                 )
                 print('--- fused CUDA backend loaded ---')
             except Exception as e:
                 print('--- fused CUDA backend UNAVAILABLE, fallback to torch.compile ---')
+                traceback.print_exc() 
                 self._explicit_cuda = None
 
         # torch.compileの実行
