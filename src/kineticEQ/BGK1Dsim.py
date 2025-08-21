@@ -188,28 +188,6 @@ class BGK1D:
             traceback.print_exc()
             print('--- fused CUDA backend loaded ---')
 
-        # --- compile CUDA imp_picard (single cooperative kernel) ---
-        # __init__ 内（implicit_solver=='imp_picard' のブロックで）
-        if self.solver == "implicit" and self.implicit_solver == "imp_picard":
-            from torch.utils.cpp_extension import load
-            import traceback, os, sysconfig
-            from pathlib import Path
-            src_dir = Path(__file__).resolve().parent / "backends" / "imp_picard"
-            os.makedirs('build', exist_ok=True)
-            os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.6")
-            self._imp_picard = load(
-                name='imp_picard',
-                sources=[str(src_dir/'imp_picard_binding.cpp'),
-                         str(src_dir/'imp_picard_kernels.cu')],
-                extra_cflags=['-O3'],
-                extra_cuda_cflags=['-O3'],
-                extra_include_paths=[sysconfig.get_paths()['include']],
-                extra_ldflags=[],
-                build_directory='build',
-                verbose=True
-            )
-            traceback.print_exc()
-
         # 初期化完了通知
         print(f"initiaze complete:")
         print(f"  solver: {self.solver}")
@@ -882,9 +860,8 @@ class BGK1D:
             for step in range(self.nt):
                 # 時間発展ステップ
                 #Picard_iter, residual = self._implicit_cusolver_update()
-                #Picard_iter, residual = self._implicit_update_cuda_backend()
-                Picard_iter, residual = self._implicit_update_cuda_picard()
-
+                Picard_iter, residual = self._implicit_update_cuda_backend()
+                
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
 
@@ -1072,59 +1049,6 @@ class BGK1D:
         latest = self._fz if swapped_last else self._fn_tmp
         self.f_new.copy_(latest)
         # 念のため境界は前状態を維持（latest の境界は _fz と同じだが、方針の明確化）
-        self.f_new[0, :].copy_(self.f[0, :])
-        self.f_new[-1, :].copy_(self.f[-1, :])
-
-        return (z + 1), residual_val
-
-    # 陰解法（imp_picard 単一カーネル版）
-    # 1 ステップ更新（backend: imp_picard）
-    def _implicit_update_cuda_picard(self):
-        if self._imp_picard is None:
-            raise RuntimeError("imp_picard backend is not loaded. Set implicit_solver='imp_picard'.")
-
-        # 初期候補：前ステップ
-        self._fz.copy_(self.f)
-        swapped_last = False
-        residual_val = float('inf')
-
-        for z in range(self.picard_iter):
-            # (a,b,c,B) 構築（内部 i=1..nx-2）
-            self._imp_picard.build_system(
-                self.f, self._fz, self.v,
-                float(self.dv), float(self.dt), float(self.dx),
-                float(self.tau_tilde), float(self._inv_sqrt_2pi.item()),
-                self._dl, self._dd, self._du, self._B,
-                self._n, self._u, self._T
-            )
-
-            # cuSOLVER batched gtsv（返り値: (nv, n_inner)）
-            solution = self._cusolver.gtsv_strided(
-                self._dl.contiguous(),
-                self._dd.contiguous(),
-                self._du.contiguous(),
-                self._B.contiguous()
-            )
-
-            # 書き戻し＋残差（L∞）を GPU で集約
-            self._imp_picard.writeback_and_residual(
-                self._fz, solution.contiguous(), self._fn_tmp, self._res_buf
-            )
-            residual = float(self._res_buf.item())
-            residual_val = residual
-
-            if residual <= self.picard_tol:
-                swapped_last = False
-                break
-
-            # 次反復へ
-            self._fz, self._fn_tmp = self._fn_tmp, self._fz
-            swapped_last = True
-
-        # 直近 swap で最新候補の位置が変わる
-        latest = self._fz if swapped_last else self._fn_tmp
-        self.f_new.copy_(latest)
-        # 念のため境界は前状態を維持
         self.f_new[0, :].copy_(self.f[0, :])
         self.f_new[-1, :].copy_(self.f[-1, :])
 
