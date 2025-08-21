@@ -42,7 +42,7 @@ class BGK1D:
                  explicit_solver='backend',
 
                  # 陰解法ソルバー
-                 implicit_solver='backend',
+                 implicit_solver='imp_picard',
 
                  # 陰解法パラメータ
                  picard_iter=10,
@@ -186,6 +186,32 @@ class BGK1D:
             )
             traceback.print_exc()
             print('--- fused CUDA backend loaded ---')
+
+        # ---- implicit picard (single-kernel cooperative) ----
+        self._imp_picard = None
+        if self.solver == "implicit" and self.implicit_solver == "imp_picard":
+            print("--- compile CUDA imp_picard (single cooperative kernel) ---")
+            from torch.utils.cpp_extension import load
+            import traceback, os, sysconfig
+            from pathlib import Path
+            os.makedirs('build', exist_ok=True)
+            src_dir = Path(__file__).resolve().parent / "backends" / "imp_picard"
+            # cooperative groups には rdc が必要
+            os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.6")
+            self._imp_picard = load(
+                name='imp_picard',
+                sources=[str(src_dir/'imp_picard_binding.cpp'),
+                         str(src_dir/'imp_picard_kernels.cu')],
+                extra_cflags=['-O3'],
+                extra_cuda_cflags=['-O3', '-rdc=true'],
+                extra_include_paths=[sysconfig.get_paths()['include']],
+                # cooperative launch 用デバイスランタイム
+                extra_ldflags=['-lcudadevrt'],
+                build_directory='build',
+                verbose=True
+            )
+            traceback.print_exc()
+
 
 
         # 初期化完了通知
@@ -857,7 +883,8 @@ class BGK1D:
             for step in range(self.nt):
                 # 時間発展ステップ
                 #Picard_iter, residual = self._implicit_cusolver_update()
-                Picard_iter, residual = self._implicit_update_cuda_backend()
+                #Picard_iter, residual = self._implicit_update_cuda_backend()
+                Picard_iter, residual = self._implicit_update_cuda_picard()
 
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
@@ -1050,3 +1077,20 @@ class BGK1D:
         self.f_new[-1, :].copy_(self.f[-1, :])
 
         return (z + 1), residual_val
+
+    # ---- new: single-kernel Picard backend ----
+    def _implicit_update_cuda_picard(self):
+        if self._imp_picard is None:
+            raise RuntimeError("imp_picard backend is not loaded. Set implicit_solver='imp_picard'.")
+
+        # 1カーネルで Picard を完了し、f_new に最終解が入る
+        iters, residual = self._imp_picard.picard_step(
+            self.f, self.f_new, self.v,
+            float(self.dv), float(self.dt), float(self.dx),
+            float(self.tau_tilde), float(self._inv_sqrt_2pi.item()),
+            int(self.picard_iter), float(self.picard_tol)
+        )
+        # 念のため境界は前状態を維持（カーネル内でも維持している）
+        self.f_new[0, :].copy_(self.f[0, :])
+        self.f_new[-1, :].copy_(self.f[-1, :])
+        return int(iters), float(residual)
