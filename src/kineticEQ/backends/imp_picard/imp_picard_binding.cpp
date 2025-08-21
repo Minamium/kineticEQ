@@ -1,104 +1,105 @@
-// src/kineticEQ/backends/imp_picard/imp_picard_binding.cpp
 #include <torch/extension.h>
-#include <cuda_runtime.h>
-#include <cooperative_groups.h>
-
-// PyTorch stream API（環境により at::cuda ではなく c10::cuda）
-#include <ATen/cuda/CUDAContext.h>     // getCurrentCUDAStream
+#include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAStream.h>
-
+#include <cuda_runtime.h>
 #include <stdexcept>
+#include <tuple>
 #include <sstream>
 
-template <typename T>
-__global__ void picard_coop_kernel(
-    const T* f_in, T* fA, T* fB, const T* v,
-    int nx, int nv, T dv, T dt, T dx, T tau_tilde, T inv_sqrt_2pi,
-    int picard_iter, T picard_tol,
-    T* s0, T* s1, T* s2, T* n_arr, T* u_arr, T* T_arr,
-    int* iters_out, T* resid_out);
+// kernel 本体（cu 側で定義）
+namespace imp_picard {
+void launch_picard_double(
+    const double* f, double* fn, const double* v,
+    int nx, int nv,
+    double dv, double dt, double dx,
+    double tau_tilde, double inv_sqrt_2pi,
+    int max_iters, double tol,
+    // workspaces (preallocated)
+    double* dl, double* dd, double* du, double* B,
+    double* n_arr, double* u_arr, double* T_arr,
+    double* s0_arr, double* s1_arr, double* s2_arr,
+    double* res_dev, int* iters_dev,
+    cudaStream_t stream);
+}
 
-static void check_coop_supported() {
-    int dev = 0;
-    cudaGetDevice(&dev);
-    cudaDeviceProp prop{};
-    cudaGetDeviceProperties(&prop, dev);
-    if (!prop.cooperativeLaunch) {
-        throw std::runtime_error("This GPU does not support cooperative launch.");
+// ユーティリティ：CUDA エラーを例外化
+static inline void checkCuda(cudaError_t err, const char* msg) {
+    if (err != cudaSuccess) {
+        std::ostringstream oss;
+        oss << msg << " : " << cudaGetErrorString(err);
+        throw std::runtime_error(oss.str());
     }
 }
 
-std::tuple<int,double> imp_picard_step_double(
-    torch::Tensor f_in,   // (nx,nv) contiguous, cuda, float64
-    torch::Tensor f_out,  // (nx,nv) contiguous, cuda, float64
-    torch::Tensor v,      // (nv)
+// Python から呼ぶエントリ
+std::tuple<int,double> picard_step_double(
+    at::Tensor f,        // (nx, nv) in
+    at::Tensor fn,       // (nx, nv) out
+    at::Tensor v,        // (nv)
     double dv, double dt, double dx,
     double tau_tilde, double inv_sqrt_2pi,
-    int picard_iter, double picard_tol)
+    int max_iters, double tol)
 {
-    TORCH_CHECK(f_in.is_cuda() && f_out.is_cuda() && v.is_cuda(), "tensors must be CUDA");
-    TORCH_CHECK(f_in.dtype() == torch::kFloat64 && f_out.dtype() == torch::kFloat64 && v.dtype() == torch::kFloat64, "dtype must be float64");
-    TORCH_CHECK(f_in.is_contiguous() && f_out.is_contiguous() && v.is_contiguous(), "tensors must be contiguous");
+    TORCH_CHECK(f.dtype() == at::kDouble && fn.dtype() == at::kDouble && v.dtype() == at::kDouble,
+                "imp_picard: only float64 supported");
+    TORCH_CHECK(f.is_cuda() && fn.is_cuda() && v.is_cuda(), "imp_picard: tensors must be CUDA");
+    TORCH_CHECK(f.is_contiguous() && fn.is_contiguous() && v.is_contiguous(), "imp_picard: tensors must be contiguous");
 
-    const int nx = f_in.size(0);
-    const int nv = f_in.size(1);
-    TORCH_CHECK(v.size(0) == nv, "v shape mismatch");
+    const int nx = (int)f.size(0);
+    const int nv = (int)f.size(1);
+    TORCH_CHECK((int)v.numel() == nv, "imp_picard: v.size mismatch");
 
-    check_coop_supported();
+    // cooperative launch サポート確認
+    int dev = 0, coop = 0, sms = 0;
+    checkCuda(cudaGetDevice(&dev), "cudaGetDevice failed");
+    checkCuda(cudaDeviceGetAttribute(&coop, cudaDevAttrCooperativeLaunch, dev), "get coop attr failed");
+    TORCH_CHECK(coop, "Device does not support cooperative launch");
 
-    // ping-pong: fA = f_in copy, fB = f_out
-    auto fA = torch::empty_like(f_in);
-    fA.copy_(f_in);
-    auto fB = f_out;
+    checkCuda(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev), "get SM count failed");
 
-    // moment buffers
-    auto s0   = torch::zeros({nx}, f_in.options());
-    auto s1   = torch::zeros({nx}, f_in.options());
-    auto s2   = torch::zeros({nx}, f_in.options());
-    auto n_ar = torch::empty({nx}, f_in.options());
-    auto u_ar = torch::empty({nx}, f_in.options());
-    auto T_ar = torch::empty({nx}, f_in.options());
+    auto opts = f.options();
 
-    auto iters_d = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(f_in.device()));
-    auto resid_d = torch::zeros({1}, f_in.options());
+    // --- workspaces を 1 回分確保（グローバル） ---
+    const int n_inner = std::max(0, nx - 2);
+    at::Tensor dl = at::empty({nv, n_inner}, opts);
+    at::Tensor dd = at::empty({nv, n_inner}, opts);
+    at::Tensor du = at::empty({nv, n_inner}, opts);
+    at::Tensor  B = at::empty({nv, n_inner}, opts);
 
-    dim3 grid(nv);
-    const int block = 256;
-    const size_t n_inner = (nx >= 2) ? (nx - 2) : 0;
-    const size_t shmem   = sizeof(double) * (n_inner * 4); // dl,dd,du,B
+    at::Tensor n_arr = at::empty({nx}, opts);
+    at::Tensor u_arr = at::empty({nx}, opts);
+    at::Tensor T_arr = at::empty({nx}, opts);
 
-    // cooperative launch
-    void* args[] = {
-        (void*)f_in.data_ptr<double>(),
-        (void*)fA.data_ptr<double>(),
-        (void*)fB.data_ptr<double>(),
-        (void*)v.data_ptr<double>(),
-        (void*)&nx, (void*)&nv,
-        (void*)&dv, (void*)&dt, (void*)&dx,
-        (void*)&tau_tilde, (void*)&inv_sqrt_2pi,
-        (void*)&picard_iter, (void*)&picard_tol,
-        (void*)s0.data_ptr<double>(), (void*)s1.data_ptr<double>(), (void*)s2.data_ptr<double>(),
-        (void*)n_ar.data_ptr<double>(), (void*)u_ar.data_ptr<double>(), (void*)T_ar.data_ptr<double>(),
-        (void*)iters_d.data_ptr<int>(), (void*)resid_d.data_ptr<double>()
-    };
+    // 一時累積（moments 用）
+    at::Tensor s0_arr = at::zeros({nx}, opts);
+    at::Tensor s1_arr = at::zeros({nx}, opts);
+    at::Tensor s2_arr = at::zeros({nx}, opts);
 
-    // ここは c10::cuda API を使用（環境差異に強い）
+    // 残差 / 反復回数（デバイス側）
+    at::Tensor res_dev   = at::full({1}, 0.0, opts);
+    at::Tensor iters_dev = at::zeros({1}, at::TensorOptions().dtype(at::kInt).device(f.device()));
+
+    // ストリーム
     auto stream = c10::cuda::getCurrentCUDAStream();
-    cudaError_t st = cudaLaunchCooperativeKernel(
-        (void*)picard_coop_kernel<double>, grid, dim3(block), args, shmem, stream.stream());
-    TORCH_CHECK(st == cudaSuccess, "cudaLaunchCooperativeKernel failed: ", cudaGetErrorString(st));
-    st = cudaGetLastError();
-    TORCH_CHECK(st == cudaSuccess, "kernel error: ", cudaGetErrorString(st));
 
-    // sync は PyTorch 側の stream 管理に従う（必要なら明示）
-    // AT_CUDA_CHECK(cudaStreamSynchronize(stream.stream()));
+    // カーネル起動（launch_picard_double 内で cooperative 制約に合わせた grid を組む）
+    imp_picard::launch_picard_double(
+        f.data_ptr<double>(), fn.data_ptr<double>(), v.data_ptr<double>(),
+        nx, nv, dv, dt, dx, tau_tilde, inv_sqrt_2pi, max_iters, tol,
+        dl.data_ptr<double>(), dd.data_ptr<double>(), du.data_ptr<double>(), B.data_ptr<double>(),
+        n_arr.data_ptr<double>(), u_arr.data_ptr<double>(), T_arr.data_ptr<double>(),
+        s0_arr.data_ptr<double>(), s1_arr.data_ptr<double>(), s2_arr.data_ptr<double>(),
+        res_dev.data_ptr<double>(), iters_dev.data_ptr<int>(),
+        stream.stream());
 
-    int iters_h  = iters_d.cpu().item<int>();
-    double res_h = resid_d.cpu().item<double>();
-    return {iters_h, res_h};
+    // 同期して結果を取得
+    checkCuda(cudaStreamSynchronize(stream.stream()), "imp_picard kernel sync failed");
+
+    const int    iters = iters_dev.cpu().item<int>();
+    const double resid = res_dev.cpu().item<double>();
+    return {iters, resid};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("picard_step", &imp_picard_step_double,
-          "Implicit BGK Picard fused step (cooperative, double)");
+    m.def("picard_step", &picard_step_double, "Picard (single cooperative kernel, double)");
 }

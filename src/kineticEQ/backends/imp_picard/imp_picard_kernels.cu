@@ -1,196 +1,305 @@
-// src/kineticEQ/backends/imp_picard/imp_picard_kernels.cu
 #include <cuda_runtime.h>
 #include <cooperative_groups.h>
-#include <math.h>
+#include <cmath>
+#include <algorithm>
+#include <stdint.h>
 
 namespace cg = cooperative_groups;
 
-// ---- helpers ----
-template <typename T>
-__device__ __forceinline__ T clamp_pos(T x, T eps) { return (x > eps) ? x : eps; }
+namespace {
 
-template <typename T>
-__device__ __forceinline__ T maxwell_1v(T n, T u, T Tg, T vj, T inv_sqrt_2pi) {
-    T inv_sqrtT = rsqrt(clamp_pos(Tg, T(1e-300)));
-    T coeff = n * inv_sqrt_2pi * inv_sqrtT;
-    T diff  = vj - u;
-    T expo  = -T(0.5) * (diff*diff) / clamp_pos(Tg, T(1e-300));
-    return coeff * exp(expo);
-}
-
-// atomicMax for positive double
-__device__ inline double atomicMaxDouble(double* addr, double val) {
+// double の atomicMax（L∞残差用）
+__device__ inline void atomicMaxDouble(double* addr, double val) {
+#if __CUDA_ARCH__ >= 800
+    // Ampere 以降は atomicMax(double) が使える GPU もあるが、移植性のため CAS 実装に統一
+#endif
     unsigned long long* ull = reinterpret_cast<unsigned long long*>(addr);
-    unsigned long long old  = *ull, assumed;
+    unsigned long long old = *ull, assumed;
+    double old_val;
     do {
+        old_val = __longlong_as_double(old);
+        if (old_val >= val) break;
         assumed = old;
-        double cur = __longlong_as_double(assumed);
-        if (cur >= val) break;
         old = atomicCAS(ull, assumed, __double_as_longlong(val));
     } while (assumed != old);
-    return __longlong_as_double(old);
 }
 
-// 1 block per velocity j
-template <typename T>
-__global__ void picard_coop_kernel(
-    // in/out
-    const T* __restrict__ f_in,   // (nx,nv)
-    T* __restrict__ fA,           // (nx,nv) ping
-    T* __restrict__ fB,           // (nx,nv) pong
-    const T* __restrict__ v,      // (nv)
-    // const
-    int nx, int nv, T dv, T dt, T dx, T tau_tilde, T inv_sqrt_2pi,
-    int picard_iter, T picard_tol,
-    // scratch (global)
-    T* __restrict__ s0, T* __restrict__ s1, T* __restrict__ s2,
-    T* __restrict__ n_arr, T* __restrict__ u_arr, T* __restrict__ T_arr,
-    // outputs
-    int* __restrict__ iters_out, T* __restrict__ resid_out)
+// Maxwellian（1 速度点）
+__device__ inline double maxwell_1v(double n, double u, double T, double vj, double inv_sqrt_2pi) {
+    T = fmax(T, 1e-300);
+    const double inv_sqrtT = rsqrt(T);
+    const double c = n * inv_sqrt_2pi * inv_sqrtT;
+    const double diff = vj - u;
+    const double expo = -0.5 * (diff*diff) / T;
+    return c * exp(expo);
+}
+
+} // anon
+
+// ==== 単一 cooperative カーネル ====
+// gridDim.x は occupancy に合わせて「小さく」起動し、j は grid-stride で回す。
+__global__ void picard_kernel_double(
+    const double* __restrict__ f,  // (nx, nv) in
+    double* __restrict__ fn,       // (nx, nv) out
+    const double* __restrict__ v,  // (nv)
+    int nx, int nv,
+    double dv, double dt, double dx,
+    double tau_tilde, double inv_sqrt_2pi,
+    int max_iters, double tol,
+    // workspaces
+    double* __restrict__ dl, double* __restrict__ dd,
+    double* __restrict__ du, double* __restrict__ B,   // (nv, nx-2)
+    double* __restrict__ n_arr, double* __restrict__ u_arr, double* __restrict__ T_arr, // (nx)
+    double* __restrict__ s0_arr, double* __restrict__ s1_arr, double* __restrict__ s2_arr, // (nx)
+    double* __restrict__ res_dev, int* __restrict__ iters_dev)
 {
     cg::grid_group grid = cg::this_grid();
+    const int n_inner = max(0, nx - 2);
 
-    const int j  = blockIdx.x;
-    if (j >= nv) return;
+    // Picard 初期候補：fz = f（境界も含めて保持）
+    // fn は毎イテレーションで「候補の書き込み先」として使う
+    // まず f を fn にコピー（grid-stride）
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < nx*nv; i += gridDim.x * blockDim.x) {
+        fn[i] = f[i];
+    }
+    grid.sync();
 
-    const T vj   = v[j];
-    const int n_inner = max(nx - 2, 0);
-    const T alpha = (vj > T(0)) ? (dt/dx * vj)     : T(0);
-    const T beta  = (vj < T(0)) ? (dt/dx * (-vj))  : T(0);
-
-    // dynamic shared memory: dl, dd, du, B (length = n_inner)
-    extern __shared__ unsigned char smem_raw[];
-    T* dl = reinterpret_cast<T*>(smem_raw);
-    T* dd = dl + n_inner;
-    T* du = dd + n_inner;
-    T*  B = du + n_inner;
-
-    // ping-pong ptr
-    T* fz = fA;
-    T* fn = fB;
-
-    T last_res = 0;
+    // 反復
+    double residual = 0.0;
     int iters = 0;
 
-    for (int z = 0; z < picard_iter; ++z) {
-        // 0) clear s0,s1,s2 by grid-stride
-        for (int i = threadIdx.x + blockIdx.x; i < nx; i += blockDim.x * gridDim.x) {
-            s0[i] = T(0); s1[i] = T(0); s2[i] = T(0);
+    for (int z = 0; z < max_iters; ++z) {
+        // --- moments s0/s1/s2 を 0 クリア（grid-stride over i）---
+        for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < nx; i += gridDim.x * blockDim.x) {
+            s0_arr[i] = 0.0;
+            s1_arr[i] = 0.0;
+            s2_arr[i] = 0.0;
         }
         grid.sync();
 
-        // 1) accumulate moments from fz
-        for (int i = threadIdx.x; i < nx; i += blockDim.x) {
-            T fij = fz[i*nv + j];
-            atomicAdd(&s0[i], fij);
-            atomicAdd(&s1[i], fij * vj);
-            atomicAdd(&s2[i], fij * vj * vj);
-        }
-        grid.sync();
+        // --- s0/s1/s2 の蓄積（grid-stride over j, 各 i は atomicAdd）---
+        for (int j = blockIdx.x; j < nv; j += gridDim.x) {
+            const double vj = v[j];
+            const double vj2 = vj*vj;
 
-        // 2) compute n,u,T
-        for (int i = threadIdx.x + blockIdx.x; i < nx; i += blockDim.x * gridDim.x) {
-            T n   = s0[i] * dv;
-            T s1d = s1[i] * dv;
-            T s2d = s2[i] * dv;
-            T u   = s1d / clamp_pos(n, T(1e-300));
-            T Tg  = s2d / clamp_pos(n, T(1e-300)) - u*u;
-            if (!(Tg > T(0))) Tg = T(1e-300);
-            n_arr[i] = n; u_arr[i] = u; T_arr[i] = Tg;
-        }
-        grid.sync();
-
-        // 3) boundary (keep previous)
-        const T fL = f_in[0*nv + j];
-        const T fR = f_in[(nx-1)*nv + j];
-
-        // 4) build tri-diagonal and RHS for this j
-        for (int k = threadIdx.x; k < n_inner; k += blockDim.x) {
-            const int i = k + 1;
-            const T n   = n_arr[i];
-            const T u   = u_arr[i];
-            const T Tg  = T_arr[i];
-            const T inv_tau = (n * sqrt(Tg)) / tau_tilde; // 1/tau
-
-            dd[k] = T(1) + alpha + beta + dt * inv_tau;
-            dl[k] = -alpha;
-            du[k] = -beta;
-
-            const T fij = fz[i*nv + j];
-            const T fM  = maxwell_1v<T>(n, u, Tg, vj, inv_sqrt_2pi);
-            T rhs = fij + dt * inv_tau * fM;
-            if (k == 0)           rhs += alpha * fL;
-            if (k == n_inner-1)   rhs += beta  * fR;
-            B[k] = rhs;
-        }
-        __syncthreads();
-
-        // 5) Thomas
-        if (threadIdx.x == 0) {
-            for (int k = 1; k < n_inner; ++k) {
-                T m = dl[k] / dd[k-1];
-                dd[k] -= m * du[k-1];
-                B[k]  -= m * B[k-1];
+            // i を thread でストライド
+            for (int i_local = threadIdx.x; i_local < nx; i_local += blockDim.x) {
+                const double fij = fn[i_local*nv + j];
+                atomicAdd(&s0_arr[i_local], fij);
+                atomicAdd(&s1_arr[i_local], fij * vj);
+                atomicAdd(&s2_arr[i_local], fij * vj2);
             }
-            if (n_inner > 0) {
-                B[n_inner-1] /= dd[n_inner-1];
-                for (int k = n_inner - 2; k >= 0; --k) {
-                    B[k] = (B[k] - du[k] * B[k+1]) / dd[k];
+        }
+        grid.sync();
+
+        // --- n, u, T の完成（grid-stride over i）---
+        for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < nx; i += gridDim.x * blockDim.x) {
+            const double n = s0_arr[i] * dv;
+            const double m1 = s1_arr[i] * dv;
+            const double m2 = s2_arr[i] * dv;
+            const double u  = m1 / n;
+            double T = m2 / n - u*u;
+            if (!(T > 0.0)) T = 1e-300;
+
+            n_arr[i] = n; u_arr[i] = u; T_arr[i] = T;
+        }
+        grid.sync();
+
+        // --- 三重対角(Bも) 構築 & Thomas で内部セル解く（grid-stride over j）---
+        for (int j = blockIdx.x; j < nv; j += gridDim.x) {
+            if (n_inner <= 0) continue;
+
+            const double vj = v[j];
+            const double alpha = (dt/dx) * fmax(vj, 0.0);
+            const double beta  = (dt/dx) * fmax(-vj, 0.0);
+
+            double* dl_j = dl + j * n_inner;
+            double* dd_j = dd + j * n_inner;
+            double* du_j = du + j * n_inner;
+            double*  B_j =  B + j * n_inner;
+
+            // 構築（並列化しにくいので 1 thread が k を回す）
+            if (threadIdx.x == 0) {
+                for (int k = 0; k < n_inner; ++k) {
+                    const int i = k + 1;
+
+                    const double inv_tau = (n_arr[i] * sqrt(T_arr[i])) / tau_tilde;
+                    dl_j[k] = (k == 0         ? 0.0 : beta);  // 上対角の符号は式の定義に合わせる
+                    du_j[k] = (k == n_inner-1 ? 0.0 : alpha);
+                    dd_j[k] = 1.0 + alpha + beta + dt * inv_tau;
+
+                    // 右辺 B： f^k + (dt/tau) fM  + 境界の upwind 寄与
+                    const double fij_old = fn[i*nv + j];  // ここでは直前候補 fn を f^k として使う
+                    const double fM = maxwell_1v(n_arr[i], u_arr[i], T_arr[i], vj, inv_sqrt_2pi);
+
+                    double rhs = fij_old + dt * inv_tau * fM;
+
+                    // 境界寄与（セル値は触らない方針。境界の「前状態」を参照）
+                    const double fL = fn[0*nv + j];
+                    const double fR = fn[(nx-1)*nv + j];
+                    if (k == 0)          rhs += alpha * fL;
+                    if (k == n_inner-1)  rhs += beta  * fR;
+
+                    B_j[k] = rhs;
+                }
+
+                // Thomas forward/backward
+                for (int k = 1; k < n_inner; ++k) {
+                    const double m = dl_j[k] / dd_j[k-1];
+                    dd_j[k] -= m * du_j[k-1];
+                    B_j[k]  -= m * B_j[k-1];
+                }
+                B_j[n_inner-1] /= dd_j[n_inner-1];
+                for (int k = n_inner-2; k >= 0; --k) {
+                    B_j[k] = (B_j[k] - du_j[k]*B_j[k+1]) / dd_j[k];
+                }
+
+                // 書き戻しは後段でまとめて（残差評価のため）
+            }
+        }
+        grid.sync();
+
+        // --- 書き戻し & 残差（内部セルのみ L∞）---
+        //   fn を新解、旧解は（この段では）fn にまだ残っていないので f_old を読みたい。
+        //   直前反復の解は fn にあるため、まず差分を測ってから fn を上書きする。
+        double local_max = 0.0;
+
+        for (int j = blockIdx.x; j < nv; j += gridDim.x) {
+            if (n_inner <= 0) continue;
+            double*  B_j =  B + j * n_inner;
+
+            for (int k = threadIdx.x; k < n_inner; k += blockDim.x) {
+                const int i = k + 1;  // 内部セル
+                const double oldv = fn[i*nv + j];
+                const double newv = B_j[k];
+                const double diff = fabs(newv - oldv);
+                if (diff > local_max) local_max = diff;
+            }
+        }
+
+        // CTA 内最大
+        __shared__ double s_max;
+        double x = local_max;
+        // block 内 reduce
+        for (int offset = warpSize/2; offset > 0; offset >>= 1)
+            x = fmax(x, __shfl_down_sync(0xffffffff, x, offset));
+        if ((threadIdx.x & (warpSize - 1)) == 0) atomicMaxDouble(&s_max, x);
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            atomicMaxDouble(res_dev, s_max);
+            s_max = 0.0;
+        }
+        grid.sync();
+
+        // 収束チェック
+        residual = *res_dev;
+        if (residual <= tol) {
+            // 解を fn に確定書き込み
+            for (int j = blockIdx.x; j < nv; j += gridDim.x) {
+                if (n_inner <= 0) continue;
+                double*  B_j =  B + j * n_inner;
+                for (int k = threadIdx.x; k < n_inner; k += blockDim.x) {
+                    const int i = k + 1;
+                    fn[i*nv + j] = B_j[k];
                 }
             }
-        }
-        __syncthreads();
-
-        // 6) writeback + local residual
-        T local_max = 0;
-        for (int k = threadIdx.x; k < n_inner; k += blockDim.x) {
-            const int i = k + 1;
-            const T oldv = fz[i*nv + j];
-            const T newv = B[k];
-            fn[i*nv + j] = newv;
-            T diff = fabs(newv - oldv);
-            if (diff > local_max) local_max = diff;
-        }
-        if (threadIdx.x == 0) {
-            fn[0*nv + j]      = f_in[0*nv + j];
-            fn[(nx-1)*nv + j] = f_in[(nx-1)*nv + j];
+            grid.sync();
+            iters = z + 1;
+            break;
         }
 
-        // global max residual
-        atomicMaxDouble(reinterpret_cast<double*>(resid_out), (double)local_max);
-        __syncthreads();
-        grid.sync();
-
-        if (blockIdx.x == 0 && threadIdx.x == 0) {
-            last_res = *resid_out;
-            *resid_out = 0.0; // reset for next iter
+        // 非収束：解を確定して次反復へ（fn ← B）
+        for (int j = blockIdx.x; j < nv; j += gridDim.x) {
+            if (n_inner <= 0) continue;
+            double*  B_j =  B + j * n_inner;
+            for (int k = threadIdx.x; k < n_inner; k += blockDim.x) {
+                const int i = k + 1;
+                fn[i*nv + j] = B_j[k];
+            }
         }
         grid.sync();
 
-        ++iters;
-
-        // stop?
-        __shared__ int s_done;
-        if (threadIdx.x == 0) s_done = (blockIdx.x == 0 && last_res <= picard_tol) ? 1 : 0;
-        __syncthreads();
+        // 次反復のために残差を 0 初期化
+        if (blockIdx.x * blockDim.x + threadIdx.x == 0) {
+            *res_dev = 0.0;
+        }
         grid.sync();
-        if (s_done) break;
 
-        // swap
-        T* tmp = fz; fz = fn; fn = tmp;
-        grid.sync();
+        iters = z + 1;
     }
 
-    // return results
-    if (blockIdx.x == 0 && threadIdx.x == 0) {
-        *iters_out = iters;
-        *resid_out = last_res; // ← 最終残差を書き戻す（重要）
+    // 最終：境界は「前状態を維持」の方針（fn の境界は f と同じ）
+    // 何もする必要なし。
+
+    // 反復回数と残差を保存
+    if (blockIdx.x * blockDim.x + threadIdx.x == 0) {
+        *iters_dev = iters;
+        // res_dev はすでに最終値
     }
 }
 
-// 明示的実体化
-template __global__ void picard_coop_kernel<double>(
-    const double*, double*, double*, const double*,
-    int,int,double,double,double,double,double,int,double,
-    double*,double*,double*, double*,double*,double*,
-    int*, double*);
+// occupancy を見て「載るだけ」起動する
+} // namespace
+
+namespace imp_picard {
+
+void launch_picard_double(
+    const double* f, double* fn, const double* v,
+    int nx, int nv,
+    double dv, double dt, double dx,
+    double tau_tilde, double inv_sqrt_2pi,
+    int max_iters, double tol,
+    double* dl, double* dd, double* du, double* B,
+    double* n_arr, double* u_arr, double* T_arr,
+    double* s0_arr, double* s1_arr, double* s2_arr,
+    double* res_dev, int* iters_dev,
+    cudaStream_t stream)
+{
+    // block サイズは 256 をデフォルト
+    const int block = 256;
+
+    // cooperative occupancy を見積もる
+    int dev = 0;
+    cudaGetDevice(&dev);
+    int sms = 0;
+    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+
+    int maxBlocksPerSm = 0;
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &maxBlocksPerSm, picard_kernel_double, block, 0 /*shared*/);
+
+    int maxCoopBlocks = std::max(1, sms * maxBlocksPerSm);
+
+    // grid は「常駐可能な最大」に制限。j は grid-stride で処理するので nv と独立。
+    dim3 grid(std::min(std::max(1, maxCoopBlocks),  /*保守的に*/ std::max(1, sms)));
+
+    void* args[] = {
+        (void*)&f, (void*)&fn, (void*)&v,
+        (void*)&nx, (void*)&nv,
+        (void*)&dv, (void*)&dt, (void*)&dx,
+        (void*)&tau_tilde, (void*)&inv_sqrt_2pi,
+        (void*)&max_iters, (void*)&tol,
+        (void*)&dl, (void*)&dd, (void*)&du, (void*)&B,
+        (void*)&n_arr, (void*)&u_arr, (void*)&T_arr,
+        (void*)&s0_arr, (void*)&s1_arr, (void*)&s2_arr,
+        (void*)&res_dev, (void*)&iters_dev
+    };
+
+    // cooperative 起動
+    cudaError_t st = cudaLaunchCooperativeKernel(
+        (void*)picard_kernel_double, grid, dim3(block), args, 0, stream);
+
+    if (st == cudaErrorCooperativeLaunchTooLarge) {
+        // さらに減らして再挑戦（1 CTA/SM の超保守）
+        cudaGetLastError(); // clear
+        dim3 grid2(std::max(1, sms));
+        st = cudaLaunchCooperativeKernel(
+            (void*)picard_kernel_double, grid2, dim3(block), args, 0, stream);
+    }
+    if (st != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaLaunchCooperativeKernel failed: ") +
+                                 cudaGetErrorString(st));
+    }
+}
+
+} // namespace imp_picard
