@@ -1,11 +1,10 @@
 #include <cuda_runtime.h>
 #include <cmath>
 #include <algorithm>
-#include <assert.h>
 
 namespace implicit_fused {
 
-// ============ small helpers ============
+// ------------ utilities ---------------
 template <typename T>
 __device__ __forceinline__ T clamp_pos(T x, T eps) {
     return (x > eps) ? x : eps;
@@ -13,26 +12,26 @@ __device__ __forceinline__ T clamp_pos(T x, T eps) {
 
 template <typename T>
 __device__ __forceinline__ T maxwell_1v(T n, T u, T Tgas, T vj, T inv_sqrt_2pi) {
-    // fM = n / sqrt(2π T) * exp(-(v-u)^2/(2T))
-    T Tpos = clamp_pos(Tgas, T(1e-300));
-    T inv_sqrtT = rsqrt(Tpos);
+    // f_M = n / sqrt(2π T) * exp(-(v-u)^2/(2T))
+    T Tg = clamp_pos(Tgas, (T)1e-300);
+    T inv_sqrtT = rsqrt(Tg);
     T coeff = n * inv_sqrt_2pi * inv_sqrtT;
     T diff  = vj - u;
-    T expo  = -T(0.5) * (diff*diff) / Tpos;
+    T expo  = -T(0.5) * (diff*diff) / Tg;
     return coeff * exp(expo);
 }
 
-// ============ (1) moments: 1 block / x-row ============
+// --------------- moments: 1 block per x ----------------
 template <typename T>
 __global__ void moments_kernel(
-    const T* __restrict__ f,   // (nx, nv)
-    const T* __restrict__ v,   // (nv)
+    const T* __restrict__ fz,   // (nx*nv), row-major: i*nv + j
+    const T* __restrict__ v,    // (nv)
     int nx, int nv, T dv,
-    T* __restrict__ n_out,     // (nx)
-    T* __restrict__ u_out,     // (nx)
-    T* __restrict__ T_out)     // (nx)
+    T* __restrict__ n_out,
+    T* __restrict__ u_out,
+    T* __restrict__ T_out)
 {
-    const int i = blockIdx.x;
+    int i = blockIdx.x;
     if (i >= nx) return;
 
     extern __shared__ unsigned char smem_raw[];
@@ -42,7 +41,7 @@ __global__ void moments_kernel(
 
     T p0 = T(0), p1 = T(0), p2 = T(0);
     for (int j = threadIdx.x; j < nv; j += blockDim.x) {
-        T fij = f[i*nv + j];
+        T fij = fz[i*nv + j];
         T vj  = v[j];
         p0 += fij;
         p1 += fij * vj;
@@ -66,103 +65,91 @@ __global__ void moments_kernel(
         T n  = s0[0] * dv;
         T s1d= s1[0] * dv;
         T s2d= s2[0] * dv;
-        T u  = s1d / n;
-        T Tg = s2d / n - u*u;
+
+        T u   = s1d / n;
+        T Tg  = s2d / n - u*u;
         if (!(Tg > T(0))) Tg = T(1e-300);
+
         n_out[i] = n;
         u_out[i] = u;
         T_out[i] = Tg;
     }
 }
 
-// ============ (2) boundary Maxwell fL,fR over v ============
+// --------------- build (dl,dd,du,B): 1 block per v ----------------
+// 内部未知数: i=1..nx-2 → k=i-1, k=0..n_inner-1
+// 符号は提示式に厳密に合わせる：
+//   dl (=subdiag) = -alpha_j (k>0 のみ; k=0 は 0)
+//   du (=superdiag)= -beta_j  (k<n_inner-1 のみ; 末端は 0)
+//   dd (=diag)     = 1 + alpha_j + beta_j + dt/τ_i
+//   B              = f_prev[i,j] + dt/τ_i * fM_i,j
+// 境界寄与：
+//   B[k=0]         += alpha_j * fM(i=0,j)      // v_j>0 側（左境界）
+//   B[k=n_inner-1] += beta_j  * fM(i=nx-1,j)   // v_j<0 側（右境界）
 template <typename T>
-__global__ void boundary_maxwell_kernel(
-    const T* __restrict__ v, int nv, T inv_sqrt_2pi,
-    T nL, T uL, T TL, T nR, T uR, T TR,
-    T* __restrict__ fL, T* __restrict__ fR)  // (nv), (nv)
-{
-    TL = clamp_pos(TL, T(1e-300));
-    TR = clamp_pos(TR, T(1e-300));
-    T inv_sqrtTL = rsqrt(TL);
-    T inv_sqrtTR = rsqrt(TR);
-    T coeffL = nL * inv_sqrt_2pi * inv_sqrtTL;
-    T coeffR = nR * inv_sqrt_2pi * inv_sqrtTR;
-    for (int j = blockIdx.x * blockDim.x + threadIdx.x; j < nv; j += blockDim.x * gridDim.x) {
-        T vj = v[j];
-        T eL = exp(-T(0.5) * (vj-uL)*(vj-uL) / TL);
-        T eR = exp(-T(0.5) * (vj-uR)*(vj-uR) / TR);
-        fL[j] = coeffL * eL;
-        fR[j] = coeffR * eR;
-    }
-}
-
-// ============ (3) build tri-diagonal (dl,dd,du) and RHS B ============
-// 1 block / velocity j で、内部セル k = 0..n_inner-1 を担当
-template <typename T>
-__global__ void build_tridiag_rhs_kernel(
-    const T* __restrict__ f,    // (nx, nv) : Picard 候補 f_z
-    const T* __restrict__ v,    // (nv)
-    const T* __restrict__ n,    // (nx)
-    const T* __restrict__ u,    // (nx)
-    const T* __restrict__ Tg,   // (nx)
-    const T* __restrict__ fL,   // (nv)
-    const T* __restrict__ fR,   // (nv)
+__global__ void build_system_fused_kernel(
+    const T* __restrict__ f_prev,   // (nx*nv)
+    const T* __restrict__ fz,       // (nx*nv)
+    const T* __restrict__ v,        // (nv)
+    const T* __restrict__ n,        // (nx)
+    const T* __restrict__ u,        // (nx)
+    const T* __restrict__ Tg,       // (nx)
     int nx, int nv, T dt, T dx, T tau_tilde, T inv_sqrt_2pi,
-    T* __restrict__ dl,         // (nv, n_inner)
-    T* __restrict__ dd,         // (nv, n_inner)
-    T* __restrict__ du,         // (nv, n_inner)
-    T* __restrict__ B)          // (nv, n_inner)
+    T* __restrict__ dl,             // (nv, n_inner)
+    T* __restrict__ dd,             // (nv, n_inner)
+    T* __restrict__ du,             // (nv, n_inner)
+    T* __restrict__ B)              // (nv, n_inner)
 {
-    const int j = blockIdx.x;
+    int j = blockIdx.x;
     if (j >= nv) return;
 
     const int n_inner = nx - 2;
     const T vj = v[j];
 
-    const T a_coeff = -dt/dx * fmax(vj,  T(0));   // 下対角(≤0)
-    const T c_coeff = -dt/dx * fmax(-vj, T(0));   // 上対角(≤0)
-    const T minus_a = -a_coeff;                   // = dt/dx*max(v,0)
-    const T minus_c = -c_coeff;                   // = dt/dx*max(-v,0)
+    // α, β（正の係数）
+    const T alpha = (vj > T(0)) ? (dt/dx * vj) : T(0);
+    const T beta  = (vj < T(0)) ? (dt/dx * (-vj)) : T(0);
 
-    T* dl_j = dl + j * n_inner;
-    T* dd_j = dd + j * n_inner;
-    T* du_j = du + j * n_inner;
-    T*  B_j =  B + j * n_inner;
+    // 境界の Maxwell は fz の i=0, nx-1 から（参照式に合わせる）
+    const T fM_L = maxwell_1v<T>(n[0], u[0], Tg[0], vj, inv_sqrt_2pi);
+    const T fM_R = maxwell_1v<T>(n[nx-1], u[nx-1], Tg[nx-1], vj, inv_sqrt_2pi);
 
-    const T fL_j = fL[j];
-    const T fR_j = fR[j];
+    T* dl_j = dl + ((size_t)j) * n_inner;
+    T* dd_j = dd + ((size_t)j) * n_inner;
+    T* du_j = du + ((size_t)j) * n_inner;
+    T*  B_j =  B + ((size_t)j) * n_inner;
 
     for (int k = threadIdx.x; k < n_inner; k += blockDim.x) {
-        const int i = k + 1; // interior cell index [1..nx-2]
+        const int i = k + 1; // interior i = 1..nx-2
 
-        const T sqrtT  = sqrt(Tg[i]);
-        const T inv_tau = (n[i] * sqrtT) / tau_tilde;  // = 1/τ(i)
+        const T inv_tau = (n[i] * sqrt(clamp_pos(Tg[i], (T)1e-300))) / tau_tilde;
 
         // 対角
-        dd_j[k] = T(1) + minus_a + minus_c + dt * inv_tau;
-        // 下・上
-        dl_j[k] = (k==0) ? T(0) : a_coeff;
-        du_j[k] = (k==n_inner-1) ? T(0) : c_coeff;
+        dd_j[k] = T(1) + alpha + beta + dt * inv_tau;
 
-        // Maxwell(i,j)
-        const T fM = maxwell_1v<T>(n[i], u[i], Tg[i], vj, inv_sqrt_2pi);
+        // 下対角（subdiag）
+        dl_j[k] = (k==0) ? T(0) : (-alpha);
 
-        // RHS
-        const T fij = f[i*nv + j];
-        T rhs = fij + dt * inv_tau * fM;
+        // 上対角（superdiag）
+        du_j[k] = (k==n_inner-1) ? T(0) : (-beta);
 
-        // 境界からの寄与（Upwind）
-        if (k == 0)         rhs += (dt/dx) * fmax(vj,  T(0)) * fL_j;
-        if (k == n_inner-1) rhs += (dt/dx) * fmax(-vj, T(0)) * fR_j;
+        // 右辺（f は “前ステップ” f_prev）
+        const T fij_prev = f_prev[i*nv + j];
+        const T fM_ij = maxwell_1v<T>(n[i], u[i], Tg[i], vj, inv_sqrt_2pi);
+        T rhs = fij_prev + dt * inv_tau * fM_ij;
+
+        // 境界由来の移流寄与（参照式）
+        if (k == 0)          rhs += alpha * fM_L;
+        if (k == n_inner-1)  rhs += beta  * fM_R;
 
         B_j[k] = rhs;
     }
 }
 
-// ================= launchers =================
+
+// ================== launchers ==================
 void launch_moments_double(
-    const double* f, const double* v,
+    const double* fz, const double* v,
     int nx, int nv, double dv,
     double* n, double* u, double* T,
     cudaStream_t stream)
@@ -170,36 +157,24 @@ void launch_moments_double(
     const int block = 256;
     dim3 grid(nx);
     size_t shmem = sizeof(double) * block * 3;
-    moments_kernel<double><<<grid, block, shmem, stream>>>(f, v, nx, nv, dv, n, u, T);
+    moments_kernel<double><<<grid, block, shmem, stream>>>(
+        fz, v, nx, nv, dv, n, u, T);
 }
 
-void launch_boundary_maxwell_double(
-    const double* v, int nv, double inv_sqrt_2pi,
-    double nL, double uL, double TL,
-    double nR, double uR, double TR,
-    double* fL, double* fR,
-    cudaStream_t stream)
-{
-    int block = 256;
-    int grid = (nv + block - 1) / block;
-    boundary_maxwell_kernel<double><<<grid, block, 0, stream>>>(
-        v, nv, inv_sqrt_2pi, nL, uL, TL, nR, uR, TR, fL, fR);
-}
-
-void launch_build_tridiag_rhs_double(
-    const double* f, const double* v,
+void launch_build_system_fused_double(
+    const double* f_prev, const double* fz, const double* v,
     const double* n, const double* u, const double* T,
-    const double* fL, const double* fR,
-    int nx, int nv, double dt, double dx, double tau_tilde, double inv_sqrt_2pi,
+    int nx, int nv, double dt, double dx,
+    double tau_tilde, double inv_sqrt_2pi,
     double* dl, double* dd, double* du, double* B,
     cudaStream_t stream)
 {
     const int block = 256;
     dim3 grid(nv);
-    build_tridiag_rhs_kernel<double><<<grid, block, 0, stream>>>(
-        f, v, n, u, T, fL, fR, nx, nv, dt, dx, tau_tilde, inv_sqrt_2pi,
-        dl, dd, du, B
-    );
+    build_system_fused_kernel<double><<<grid, block, 0, stream>>>(
+        f_prev, fz, v, n, u, T,
+        nx, nv, dt, dx, tau_tilde, inv_sqrt_2pi,
+        dl, dd, du, B);
 }
 
 } // namespace implicit_fused

@@ -1012,11 +1012,9 @@ class BGK1D:
         for z in range(self.picard_iter):
             # (a,b,c,B) を一括構築（Maxwellの境界寄与も旧実装と同等）
             self._implicit_cuda.build_system_fused(
-                self._fz, self.v,
+                self.f, self._fz, self.v,
                 float(self.dv), float(self.dt), float(self.dx),
                 float(self.tau_tilde), float(self._inv_sqrt_2pi.item()),
-                float(self.n_left),  float(self.u_left),  float(self.T_left),
-                float(self.n_right), float(self.u_right), float(self.T_right),
                 self._dl, self._dd, self._du, self._B
             )
 
@@ -1032,8 +1030,8 @@ class BGK1D:
             self._fn_tmp.copy_(self._fz)
             self._fn_tmp[1:-1, :].copy_(solution.T)
 
-            # 残差（内部セルのみ）
-            residual = torch.max(torch.abs(self._fn_tmp[1:-1, :] - self._fz[1:-1, :]))
+            # 残差
+            residual = torch.max(torch.abs(self._fn_tmp - self._fz))
             residual_val = float(residual)
 
             if residual <= self.picard_tol:
