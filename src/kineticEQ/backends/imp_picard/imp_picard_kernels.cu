@@ -1,10 +1,12 @@
 // imp_picard_kernels.cu
 #include <cuda_runtime.h>
 #include <cooperative_groups.h>
+#include <math.h>
 namespace cg = cooperative_groups;
 
 extern "C" {
 
+// ---- atomicMax for double -------------------------------------------------
 __device__ inline double atomicMaxDouble(double* addr, double val) {
     unsigned long long* ull = reinterpret_cast<unsigned long long*>(addr);
     unsigned long long old = *ull, assumed;
@@ -18,6 +20,7 @@ __device__ inline double atomicMaxDouble(double* addr, double val) {
     return __longlong_as_double(old);
 }
 
+// ---- Maxwellian -----------------------------------------------------------
 __device__ inline double maxwell(double n, double u, double T, double vj, double inv_sqrt_2pi){
     double coeff = (n * inv_sqrt_2pi) / sqrt(T);
     double t = vj - u;
@@ -25,7 +28,7 @@ __device__ inline double maxwell(double n, double u, double T, double vj, double
     return coeff * ex;
 }
 
-// Thomas in-place (length = n)
+// ---- Thomas solver (in-place), size = n -----------------------------------
 __device__ inline void thomas_inplace(double* dl, double* dd, double* du, double* B, int n){
     // forward
     for (int i=1; i<n; ++i){
@@ -40,8 +43,9 @@ __device__ inline void thomas_inplace(double* dl, double* dd, double* du, double
     }
 }
 
+// ---- Single cooperative kernel --------------------------------------------
 __global__ void picard_kernel_double(
-    const double* __restrict__ f, double* __restrict__ fn, const double* __restrict__ v,
+    const double* __restrict__ f,  double* __restrict__ fn, const double* __restrict__ v,
     int nx, int nv,
     double dv, double dt, double dx,
     double tau_tilde, double inv_sqrt_2pi,
@@ -52,30 +56,32 @@ __global__ void picard_kernel_double(
     double* __restrict__ res_dev, int* __restrict__ iters_dev)
 {
     cg::grid_group grid = cg::this_grid();
-    const int tid   = threadIdx.x + blockIdx.x * blockDim.x;
-    const int tdim  = blockDim.x * gridDim.x;
+
+    const int tid  = threadIdx.x + blockIdx.x * blockDim.x;
+    const int tdim = blockDim.x * gridDim.x;
 
     const int n_inner = max(nx - 2, 0);
     if (nx <= 0 || nv <= 0 || n_inner <= 0){
         if (tid==0){ *res_dev = 0.0; *iters_dev = 0; }
-        return;
+        return; // 全スレッド同一条件なので安全
     }
 
-    // 初期候補: read_ptr=f, write_ptr=fn
+    // ピカード反復で使う入力/出力ポインタ
     const double* read_ptr  = f;
     double*       write_ptr = fn;
 
     if (tid==0){ *res_dev = 0.0; *iters_dev = 0; }
 
-    // ===== Picard loop =====
+    // ========================= Picard loop ==================================
     for (int it=0; it<max_iters; ++it){
-        // s0,s1,s2 をゼロ化
+
+        // s0,s1,s2 のクリア
         for (int i = tid; i < nx; i += tdim){
             s0_arr[i] = 0.0; s1_arr[i] = 0.0; s2_arr[i] = 0.0;
         }
         grid.sync();
 
-        // 瞬時モーメント集計（原始的: 原子加算）
+        // モーメント（素直に atomicAdd）
         for (int j = tid; j < nv; j += tdim){
             const double vj = v[j];
             for (int i=0; i<nx; ++i){
@@ -87,24 +93,19 @@ __global__ void picard_kernel_double(
         }
         grid.sync();
 
-        // n,u,T 作成
+        // n, u, T 作成
         for (int i = tid; i < nx; i += tdim){
             double n  = s0_arr[i];
             double u  = (n>0.0) ? (s1_arr[i]/n) : 0.0;
             double T  = (n>0.0) ? (s2_arr[i]/n - u*u) : 1.0;
             if (T < 1e-20) T = 1e-20;
-            n_arr[i] = n; u_arr[i]=u; T_arr[i]=T;
+            n_arr[i] = n; u_arr[i] = u; T_arr[i] = T;
         }
         grid.sync();
 
-        // 境界の Maxwell
-        // (固定： write_ptr の 0, nx-1 は前ステップ f を保持)
-        // 右辺境界寄与用に fL,fR を生成（都度）
-        // ここでは配列を持たず、必要な j で都度 maxwell を使う
-
-        // 係数と RHS 構築（j を並列化、各 j で i=1..nx-2 をシリアル）
+        // 係数と RHS 構築（各 j を並列）
         for (int j = tid; j < nv; j += tdim){
-            const double vj  = v[j];
+            const double vj = v[j];
             const double alpha = (dt/dx) * (vj>0.0 ? vj : 0.0);
             const double beta  = (dt/dx) * ((-vj)>0.0 ? (-vj) : 0.0);
 
@@ -113,42 +114,36 @@ __global__ void picard_kernel_double(
             double* duj = &du[j*n_inner];
             double* Bj  = &B [j*n_inner];
 
-            // 下上対角の端をゼロ
             if (n_inner >= 1){
-                dlj[0]          = 0.0;
-                duj[n_inner-1]  = 0.0;
+                dlj[0]         = 0.0;            // 未使用要素を明示ゼロ
+                duj[n_inner-1] = 0.0;
             }
-            // 各行
             for (int k=0; k<n_inner; ++k){
                 const int i = k + 1; // 物理セル 1..nx-2
 
-                double n = n_arr[i];
-                double u = u_arr[i];
-                double T = T_arr[i];
+                double n  = n_arr[i];
+                double u  = u_arr[i];
+                double T  = T_arr[i];
                 double tau = tau_tilde / (n * sqrt(T));
 
                 // 主対角
                 ddj[k] = 1.0 + alpha + beta + (dt/tau);
-                // 下・上対角（行インデックスずれに注意）
-                if (k>=1)    dlj[k] = -alpha;
-                if (k<=n_inner-2) duj[k] = -beta;
 
-                // RHS: f^k + (dt/τ) fM
-                double fM = maxwell(n, u, T, vj, inv_sqrt_2pi);
-                double rhs = read_ptr[i*nv + j];   // ←時間レベル k の既知 f
-                rhs += (dt/tau) * fM;
+                // 下・上対角
+                if (k>=1)            dlj[k] = -alpha;
+                if (k<=n_inner-2)    duj[k] = -beta;
 
-                // 境界からの流入
+                // 右辺: f^k + (dt/τ) fM
+                double fM  = maxwell(n, u, T, vj, inv_sqrt_2pi);
+                double rhs = read_ptr[i*nv + j] + (dt/tau) * fM;
+
+                // 境界の流入
                 if (k==0 && vj>0.0){
-                    // 左境界 i=0 の Maxwell
-                    double nL=n_arr[0], uL=u_arr[0], TL=T_arr[0];
-                    double fL = maxwell(nL,uL,TL,vj,inv_sqrt_2pi);
+                    double fL = maxwell(n_arr[0], u_arr[0], T_arr[0], vj, inv_sqrt_2pi);
                     rhs += (dt/dx) * vj * fL;
                 }
                 if (k==n_inner-1 && vj<0.0){
-                    // 右境界 i=nx-1 の Maxwell
-                    double nR=n_arr[nx-1], uR=u_arr[nx-1], TR=T_arr[nx-1];
-                    double fR = maxwell(nR,uR,TR,vj,inv_sqrt_2pi);
+                    double fR = maxwell(n_arr[nx-1], u_arr[nx-1], T_arr[nx-1], vj, inv_sqrt_2pi);
                     rhs += (dt/dx) * (-vj) * fR;
                 }
                 Bj[k] = rhs;
@@ -156,13 +151,14 @@ __global__ void picard_kernel_double(
         }
         grid.sync();
 
-        // 各 j を1スレッドでトーマス解法（競合なし）
+        // トーマス（各 j を 1 スレッドで処理）
         for (int j = tid; j < nv; j += tdim){
-            thomas_inplace(&dl[j*n_inner], &dd[j*n_inner], &du[j*n_inner], &B[j*n_inner], n_inner);
+            thomas_inplace(&dl[j*n_inner], &dd[j*n_inner],
+                           &du[j*n_inner], &B[j*n_inner], n_inner);
         }
         grid.sync();
 
-        // 書き戻し (内部セルのみ)
+        // 書き戻し（内部セル）
         for (int j = tid; j < nv; j += tdim){
             for (int k=0; k<n_inner; ++k){
                 const int i = k + 1;
@@ -171,15 +167,14 @@ __global__ void picard_kernel_double(
         }
         grid.sync();
 
-        // 境界はそのまま（read_ptr == f か fn のいずれでも同じセル値を維持）
+        // 境界は維持
         for (int j = tid; j < nv; j += tdim){
             write_ptr[0*nv + j]      = read_ptr[0*nv + j];
             write_ptr[(nx-1)*nv + j] = read_ptr[(nx-1)*nv + j];
         }
         grid.sync();
 
-        // 残差 L∞
-        // まずブロック内で最大を取り、global に atomicMaxDouble
+        // 残差 L∞ = max |write - read|
         __shared__ double smax[256];
         double local_max = 0.0;
         for (int idx = tid; idx < nx*nv; idx += tdim){
@@ -189,7 +184,6 @@ __global__ void picard_kernel_double(
         int lane = threadIdx.x;
         smax[lane] = local_max;
         __syncthreads();
-        // block reduce
         for (int off = blockDim.x/2; off>0; off/=2){
             if (lane < off) smax[lane] = fmax(smax[lane], smax[lane+off]);
             __syncthreads();
@@ -197,31 +191,24 @@ __global__ void picard_kernel_double(
         if (lane==0) atomicMaxDouble(res_dev, smax[0]);
         grid.sync();
 
-        if (tid==0){
-            *iters_dev = it+1;
-        }
+        if (tid==0) *iters_dev = it + 1;
         grid.sync();
 
-        // 収束判定（全ブロック同一分岐）
-        bool converged = false;
-        if (tid==0) converged = (*res_dev <= tol);
-        // 全グリッドへブロードキャスト相当
-        converged = cg::sync(grid, converged);
-
+        // ★ 収束判定（全スレッドが同じ条件を独自に評価）
+        bool converged = (*res_dev <= tol);
+        grid.sync();
         if (converged) break;
 
-        // 次反復へ: ポインタスワップ
-        if (tid==0){
-            *res_dev = 0.0; // 次回に向けてクリア
-        }
+        // 次反復準備
+        if (tid==0) *res_dev = 0.0; // クリア
         grid.sync();
 
-        const double* tmp_r = read_ptr;
+        const double* tmp = read_ptr;
         read_ptr  = write_ptr;
-        write_ptr = (double*)tmp_r;
+        write_ptr = (double*)tmp;
 
         grid.sync();
-    } // picard loop
+    } // end Picard loop
 }
 
 } // extern "C"
