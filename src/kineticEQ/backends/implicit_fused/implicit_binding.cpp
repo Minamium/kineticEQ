@@ -1,249 +1,208 @@
-// implicit_kernels.cu
+// implicit_binding.cpp
+#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
-#include <cmath>
-#include <algorithm>
+#include <cusparse.h>
+#include <tuple>
+#include <stdexcept>
+#include <string>
 
 namespace implicit_fused {
-
-// ====================== helpers ======================
-template <typename T>
-__device__ __forceinline__ T clamp_pos(T x, T eps) {
-    return (x > eps) ? x : eps;
-}
-
-template <typename T>
-__device__ __forceinline__ T maxwell_1v(T n, T u, T Tgas, T vj, T inv_sqrt_2pi) {
-    // fM = n / sqrt(2π T) * exp(-(v-u)^2/(2T))
-    T Tpos = clamp_pos(Tgas, T(1e-300));
-    T inv_sqrtT = rsqrt(Tpos);
-    T coeff = n * inv_sqrt_2pi * inv_sqrtT;
-    T diff  = vj - u;
-    T expo  = -T(0.5) * (diff*diff) / Tpos;
-    return coeff * exp(expo);
-}
-
-// ====================== moments: one block per row (x) ======================
-template <typename T>
-__global__ void moments_kernel(
-    const T* __restrict__ f,  // (nx*nv)
-    const T* __restrict__ v,  // (nv)
-    int nx, int nv, T dv,
-    T* __restrict__ n_out,    // (nx)
-    T* __restrict__ u_out,    // (nx)
-    T* __restrict__ T_out)    // (nx)
-{
-    const int i = blockIdx.x;
-    if (i >= nx) return;
-
-    extern __shared__ unsigned char smem_raw[];
-    T* s0 = reinterpret_cast<T*>(smem_raw);
-    T* s1 = reinterpret_cast<T*>(smem_raw + sizeof(T)*blockDim.x);
-    T* s2 = reinterpret_cast<T*>(smem_raw + sizeof(T)*blockDim.x*2);
-
-    T p0 = T(0), p1 = T(0), p2 = T(0);
-    for (int j = threadIdx.x; j < nv; j += blockDim.x) {
-        T fij = f[i*nv + j];
-        T vj  = v[j];
-        p0 += fij;
-        p1 += fij * vj;
-        p2 += fij * vj * vj;
-    }
-    s0[threadIdx.x] = p0;
-    s1[threadIdx.x] = p1;
-    s2[threadIdx.x] = p2;
-    __syncthreads();
-
-    for (int off = blockDim.x>>1; off>0; off >>= 1) {
-        if (threadIdx.x < off) {
-            s0[threadIdx.x] += s0[threadIdx.x + off];
-            s1[threadIdx.x] += s1[threadIdx.x + off];
-            s2[threadIdx.x] += s2[threadIdx.x + off];
-        }
-        __syncthreads();
-    }
-
-    if (threadIdx.x == 0) {
-        T n   = s0[0] * dv;
-        T s1d = s1[0] * dv;
-        T s2d = s2[0] * dv;
-        T u   = s1d / n;
-        T Tg  = s2d / n - u*u;
-        if (!(Tg > T(0))) Tg = T(1e-300);
-        n_out[i] = n;
-        u_out[i] = u;
-        T_out[i] = Tg;
-    }
-}
-
-// ====================== boundary maxwell fL/fR (from fixed BC) ======================
-template <typename T>
-__global__ void boundary_maxwell_kernel(
-    const T* __restrict__ v, int nv, T inv_sqrt_2pi,
-    T nL, T uL, T TL, T nR, T uR, T TR,
-    T* __restrict__ fL, T* __restrict__ fR) // (nv)
-{
-    TL = clamp_pos(TL, T(1e-300));
-    TR = clamp_pos(TR, T(1e-300));
-    T inv_sqrtTL = rsqrt(TL);
-    T inv_sqrtTR = rsqrt(TR);
-    T coeffL = nL * inv_sqrt_2pi * inv_sqrtTL;
-    T coeffR = nR * inv_sqrt_2pi * inv_sqrtTR;
-
-    for (int j = blockIdx.x * blockDim.x + threadIdx.x; j < nv; j += blockDim.x * gridDim.x) {
-        T vj = v[j];
-        T eL = exp(-T(0.5) * (vj-uL)*(vj-uL) / TL);
-        T eR = exp(-T(0.5) * (vj-uR)*(vj-uR) / TR);
-        fL[j] = coeffL * eL;
-        fR[j] = coeffR * eR;
-    }
-}
-
-// ====================== build tri-diagonal & RHS: one block per velocity ======================
-// NOTE: RHS uses f_prev (前タイムステップ). n,u,T は現在ピカード反復の f_iter から計算して与える。
-template <typename T>
-__global__ void build_tridiag_rhs_kernel(
-    const T* __restrict__ f_prev, // (nx*nv) ← ここが RHS の f^n
-    const T* __restrict__ v,      // (nv)
-    const T* __restrict__ n,      // (nx)
-    const T* __restrict__ u,      // (nx)
-    const T* __restrict__ Tg,     // (nx)
-    const T* __restrict__ fL,     // (nv)
-    const T* __restrict__ fR,     // (nv)
-    int nx, int nv, T dt, T dx, T tau_tilde, T inv_sqrt_2pi,
-    T* __restrict__ dl,           // (nv, n_inner)
-    T* __restrict__ dd,           // (nv, n_inner)
-    T* __restrict__ du,           // (nv, n_inner)
-    T* __restrict__ B)            // (nv, n_inner) ← cuSOLVER 解で上書きされる
-{
-    const int j = blockIdx.x;
-    if (j >= nv) return;
-
-    const int n_inner = nx - 2;
-    const T vj = v[j];
-    const T ap = -dt/dx * fmax(vj,  T(0));  // 下対角（<=0）
-    const T cp = -dt/dx * fmax(-vj, T(0));  // 上対角（<=0）
-    const T minus_a = -ap; // dt/dx * max(v,0)
-    const T minus_c = -cp; // dt/dx * max(-v,0)
-
-    T* dl_j = dl + j * n_inner;
-    T* dd_j = dd + j * n_inner;
-    T* du_j = du + j * n_inner;
-    T*  B_j =  B + j * n_inner;
-
-    const T fL_j = fL[j];
-    const T fR_j = fR[j];
-
-    for (int k = threadIdx.x; k < n_inner; k += blockDim.x) {
-        const int i = k + 1; // interior cell index [1..nx-2]
-
-        // inv_tau = (n*sqrt(T))/tau_tilde
-        T sqrtT = sqrt(Tg[i]);
-        T inv_tau = (n[i] * sqrtT) / tau_tilde;
-
-        // 三重対角
-        dd_j[k] = T(1) + minus_a + minus_c + dt * inv_tau;
-        dl_j[k] = (k==0)           ? T(0) : ap;
-        du_j[k] = (k==n_inner-1)   ? T(0) : cp;
-
-        // Maxwellian at interior cell (i)
-        T fM = maxwell_1v<T>(n[i], u[i], Tg[i], vj, inv_sqrt_2pi);
-
-        // RHS = f_prev(i,j) + dt*inv_tau*fM + boundary advection terms
-        T fij_prev = f_prev[i*nv + j];
-        T rhs = fij_prev + dt * inv_tau * fM;
-
-        if (k == 0)         rhs += (dt/dx) * fmax(vj,  T(0)) * fL_j;
-        if (k == n_inner-1) rhs += (dt/dx) * fmax(-vj, T(0)) * fR_j;
-
-        B_j[k] = rhs;
-    }
-}
-
-// ====================== writeback interior & residual: one block per velocity ======================
-// B には cuSOLVER で解が上書き済みとする（形状 (nv, n_inner)）。
-// 内部セルだけ fn に書き戻し、残差は max_{i=1..nx-2} |fn(i,j) - f_iter(i,j)| を列毎に計算。
-// 境界セル fn[0,:], fn[-1,:] は一切書かない（Python側で最後に上書きする想定）。
-template <typename T>
-__global__ void writeback_and_residual_kernel(
-    const T* __restrict__ f_iter, // (nx*nv) ← ピカードの直前反復 f^{(k)}
-    const T* __restrict__ B,      // (nv, n_inner) 解
-    int nx, int nv,
-    T* __restrict__ fn,           // (nx*nv) 出力（内部のみ書く）
-    T* __restrict__ res_per_v)    // (nv) 列毎の最大残差
-{
-    const int j = blockIdx.x;
-    if (j >= nv) return;
-    const int n_inner = nx - 2;
-
-    T local_max = T(0);
-
-    if (threadIdx.x == 0) {
-        const T* Bj = B + j * n_inner;
-        for (int k = 0; k < n_inner; ++k) {
-            const int i = k + 1;
-            const T newv = Bj[k];
-            const T oldv = f_iter[i*nv + j];
-            fn[i*nv + j] = newv;               // 内部のみ書き戻す
-            T diff = fabs(newv - oldv);
-            if (diff > local_max) local_max = diff;
-        }
-        res_per_v[j] = local_max;
-    }
-}
-
-// ====================== launchers (double) ======================
 void launch_moments_double(
     const double* f, const double* v,
     int nx, int nv, double dv,
     double* n, double* u, double* T,
-    cudaStream_t stream)
-{
-    const int block = 256;
-    dim3 grid(nx);
-    size_t shmem = sizeof(double) * block * 3;
-    moments_kernel<double><<<grid, block, shmem, stream>>>(
-        f, v, nx, nv, dv, n, u, T);
-}
-
-void launch_boundary_maxwell_double(
-    const double* v, int nv, double inv_sqrt_2pi,
-    double nL, double uL, double TL,
-    double nR, double uR, double TR,
-    double* fL, double* fR,
-    cudaStream_t stream)
-{
-    int block = 256;
-    int grid  = (nv + block - 1) / block;
-    boundary_maxwell_kernel<double><<<grid, block, 0, stream>>>(
-        v, nv, inv_sqrt_2pi, nL, uL, TL, nR, uR, TR, fL, fR);
-}
+    cudaStream_t stream);
 
 void launch_build_tridiag_rhs_double(
     const double* f_prev, const double* v,
     const double* n, const double* u, const double* T,
-    const double* fL, const double* fR,
     int nx, int nv, double dt, double dx, double tau_tilde, double inv_sqrt_2pi,
     double* dl, double* dd, double* du, double* B,
-    cudaStream_t stream)
-{
-    const int block = 256;
-    dim3 grid(nv);
-    build_tridiag_rhs_kernel<double><<<grid, block, 0, stream>>>(
-        f_prev, v, n, u, T, fL, fR,
-        nx, nv, dt, dx, tau_tilde, inv_sqrt_2pi,
-        dl, dd, du, B);
-}
+    cudaStream_t stream);
 
 void launch_writeback_and_residual_double(
     const double* f_iter, const double* B,
     int nx, int nv,
     double* fn, double* res_per_v,
-    cudaStream_t stream)
-{
-    const int block = 32;   // thread 0 使用、軽量でOK
-    dim3 grid(nv);
-    writeback_and_residual_kernel<double><<<grid, block, 0, stream>>>(
-        f_iter, B, nx, nv, fn, res_per_v);
+    cudaStream_t stream);
+} // namespace implicit_fused
+
+// ====================== cuSPARSE helpers ======================
+#define CUSPARSE_CHECK(call) \
+    do { \
+        cusparseStatus_t _status = (call); \
+        if (_status != CUSPARSE_STATUS_SUCCESS) { \
+            throw std::runtime_error(std::string("cuSPARSE error: ") + std::to_string(_status) + \
+                                     " at " __FILE__ ":" + std::to_string(__LINE__)); \
+        } \
+    } while (0)
+
+static void gtsv_strided_batch_double(
+    cusparseHandle_t handle,
+    int n,                  // system size (n_inner)
+    int batchCount,         // nv
+    double* dl,             // (batchCount, n)
+    double* d,              // (batchCount, n)
+    double* du,             // (batchCount, n)
+    double* B               // (batchCount, n), in/out
+){
+    // API: cusparseDgtsv2StridedBatch requires a temporary buffer
+    size_t pBufferSizeInBytes = 0;
+    CUSPARSE_CHECK(cusparseDgtsv2StridedBatch_bufferSizeExt(
+        handle, n, dl, d, du, B, n, batchCount, &pBufferSizeInBytes));
+
+    auto options = at::TensorOptions().dtype(at::kByte).device(at::kCUDA);
+    at::Tensor buffer = at::empty({static_cast<long long>(pBufferSizeInBytes)}, options);
+    void* pBuffer = buffer.data_ptr();
+
+    CUSPARSE_CHECK(cusparseDgtsv2StridedBatch(
+        handle, n, dl, d, du, B, n, batchCount, pBuffer));
 }
 
-} // namespace implicit_fused
+// ====================== main entry ======================
+std::tuple<int,double> implicit_step(
+    at::Tensor f,             // (nx,nv), double, cuda, contiguous
+    at::Tensor fn,            // (nx,nv), double, cuda, contiguous (出力)
+    at::Tensor v,             // (nv),    double, cuda, contiguous
+    double dv, double dt, double dx,
+    double tau_tilde, double inv_sqrt_2pi,
+    int /*k0_unused*/,
+    int picard_iter, double picard_tol
+    // 境界は「触らない」仕様のため、ここでは追加の境界パラメータは受け取らない
+){
+    TORCH_CHECK(f.is_cuda() && fn.is_cuda() && v.is_cuda(), "tensors must be CUDA");
+    TORCH_CHECK(f.dtype() == at::kDouble && fn.dtype() == at::kDouble && v.dtype() == at::kDouble,
+                "dtype must be float64");
+    TORCH_CHECK(f.is_contiguous() && fn.is_contiguous() && v.is_contiguous(),
+                "tensors must be contiguous");
+    TORCH_CHECK(f.dim()==2, "f must be (nx,nv)");
+    TORCH_CHECK(fn.sizes()==f.sizes(), "fn must have same shape as f");
+    TORCH_CHECK(v.dim()==1 && v.size(0)==f.size(1), "v must be (nv,)");
+
+    const int64_t nx64 = f.size(0), nv64 = f.size(1);
+    TORCH_CHECK(nx64 >= 3, "nx must be >= 3 (need interior cells)");
+    const int nx = static_cast<int>(nx64);
+    const int nv = static_cast<int>(nv64);
+    const int n_inner = nx - 2;
+
+    auto optsD = f.options();
+    auto opts1 = f.options().dtype(at::kDouble);
+
+    // work arrays
+    at::Tensor n   = at::empty({nx},     opts1);
+    at::Tensor u   = at::empty({nx},     opts1);
+    at::Tensor T   = at::empty({nx},     opts1);
+    at::Tensor dl  = at::empty({nv, n_inner}, opts1); // 下対角
+    at::Tensor dd  = at::empty({nv, n_inner}, opts1); // 主対角
+    at::Tensor du  = at::empty({nv, n_inner}, opts1); // 上対角
+    at::Tensor B   = at::empty({nv, n_inner}, opts1); // RHS / 解
+    at::Tensor res = at::empty({nv}, opts1);          // 列毎最大残差
+
+    // 交互バッファ（境界は常に f をコピーしておく）
+    at::Tensor work = at::empty_like(f);
+
+    // 境界を含めて、両バッファを f に初期化（内部更新のみを行うので境界は保持される）
+    fn.copy_(f);
+    work.copy_(f);
+
+    // CUDA stream & cuSPARSE handle
+    auto stream = at::cuda::getCurrentCUDAStream();
+    cusparseHandle_t handle = nullptr;
+    CUSPARSE_CHECK(cusparseCreate(&handle));
+    CUSPARSE_CHECK(cusparseSetStream(handle, stream.stream()));
+
+    // device pointers
+    const double* f_prev = f.data_ptr<double>();   // RHS 用に固定（タイムレベル n）
+    const double* v_ptr  = v.data_ptr<double>();
+
+    double* fn_ptr   = fn.data_ptr<double>();
+    double* work_ptr = work.data_ptr<double>();
+
+    // Picard 反復バッファ: p_iter = 現在反復の参照配列, p_out = 次の解を書き込む先
+    const double* p_iter = f_prev; // 初回は f を基準（境界一定）
+    double*       p_out  = fn_ptr; // 初回は fn に書く
+
+    int iters_done = 0;
+    double final_residual = 0.0;
+
+    // 反復ループ
+    for (int it = 0; it < picard_iter; ++it) {
+        // 1) moments from p_iter
+        implicit_fused::launch_moments_double(
+            p_iter, v_ptr, nx, nv, dv,
+            n.data_ptr<double>(), u.data_ptr<double>(), T.data_ptr<double>(),
+            stream.stream());
+
+        // 2) build tri-diagonal and RHS from f_prev (境界流入も f_prev の境界を使用)
+        implicit_fused::launch_build_tridiag_rhs_double(
+            f_prev, v_ptr,
+            n.data_ptr<double>(), u.data_ptr<double>(), T.data_ptr<double>(),
+            nx, nv, dt, dx, tau_tilde, inv_sqrt_2pi,
+            dl.data_ptr<double>(), dd.data_ptr<double>(), du.data_ptr<double>(), B.data_ptr<double>(),
+            stream.stream());
+
+        // 3) batched gtsv solve (in-place on B)
+        gtsv_strided_batch_double(
+            handle, n_inner, nv,
+            dl.data_ptr<double>(),
+            dd.data_ptr<double>(),
+            du.data_ptr<double>(),
+            B.data_ptr<double>()); // overwritten with solution
+
+        // 4) writeback interior & residual (境界は一切触らない)
+        implicit_fused::launch_writeback_and_residual_double(
+            p_iter, B.data_ptr<double>(), nx, nv, p_out, res.data_ptr<double>(),
+            stream.stream());
+
+        // 5) 残差（列最大のさらに最大）
+        //    res: (nv,) → amax
+        auto max_res = std::get<0>(res.max(/*dim=*/0));
+        final_residual = max_res.item<double>();
+        iters_done     = it + 1;
+
+        // 6) 収束判定
+        if (final_residual < picard_tol) {
+            // 結果は p_out 内部セルに入っている。境界は既に f_prev と同じ（初期化済み）。
+            // もし p_out != fn_ptr なら最終結果を fn にコピー（境界も含め全体コピーでOK）
+            if (p_out != fn_ptr) {
+                fn.copy_(work); // p_out==work の場合
+            }
+            break;
+        }
+
+        // 7) 交互（次反復へ）
+        //    p_iter <- p_out, p_out <- もう一方
+        if (p_out == fn_ptr) {
+            p_iter = fn_ptr;
+            p_out  = work_ptr;
+            // 境界を f_prev にしておく（明示的に安全側）
+            // 内部は writeback が上書き、境界は保持。
+            cudaMemcpyAsync(work_ptr, f_prev, sizeof(double)*nx*nv,
+                            cudaMemcpyDeviceToDevice, stream.stream());
+        } else {
+            p_iter = work_ptr;
+            p_out  = fn_ptr;
+            cudaMemcpyAsync(fn_ptr, f_prev, sizeof(double)*nx*nv,
+                            cudaMemcpyDeviceToDevice, stream.stream());
+        }
+    }
+
+    // 反復を使い切って未収束の場合、最終反復結果が p_out にあるとは限らないので整える
+    if (iters_done >= picard_iter && final_residual >= picard_tol) {
+        if (p_iter != fn_ptr) {
+            fn.copy_(work); // p_iter==work の場合の保険
+        }
+    }
+
+    // cuSPARSE 終了
+    CUSPARSE_CHECK(cusparseDestroy(handle));
+
+    // 戻り値: (反復回数, 残差)
+    return std::make_tuple(iters_done, final_residual);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("implicit_step", &implicit_step,
+          "Fused implicit BGK step (double, CUDA, boundaries untouched; RHS uses f-prev boundaries)");
+}
