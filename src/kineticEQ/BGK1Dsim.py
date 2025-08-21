@@ -981,9 +981,11 @@ class BGK1D:
             self.f, self.f_new, self.v,
             float(self.dv), float(self.dt), float(self.dx),
             float(self.tau_tilde), float(self._inv_sqrt_2pi.item()),
-            int(self._k0),                      # API整合用（内部では未使用）
-            int(self.picard_iter), float(self.picard_tol),
-            float(self.n_left), float(self.u_left), float(self.T_left),
-            float(self.n_right), float(self.u_right), float(self.T_right),
+            int(self._k0),                      # 未使用（API整合用）
+            int(self.picard_iter), float(self.picard_tol)
         )
+        # 境界セルは触らない方針なので、最後に前状態で固定しておく
+        self.f_new[0, :].copy_(self.f[0, :])
+        self.f_new[-1, :].copy_(self.f[-1, :])
         return int(iters), float(residual)
+
