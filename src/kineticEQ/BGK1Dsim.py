@@ -1011,18 +1011,21 @@ class BGK1D:
 
         for z in range(self.picard_iter):
             # (a,b,c,B) を一括構築（Maxwellの境界寄与も旧実装と同等）
-            a_batch, b_batch, c_batch, B_batch = self._implicit_cuda.build_system_fused(
+            self._implicit_cuda.build_system_fused(
                 self._fz, self.v,
                 float(self.dv), float(self.dt), float(self.dx),
-                float(self.tau_tilde), float(self._inv_sqrt_2pi.item())
+                float(self.tau_tilde), float(self._inv_sqrt_2pi.item()),
+                float(self.n_left),  float(self.u_left),  float(self.T_left),
+                float(self.n_right), float(self.u_right), float(self.T_right),
+                self._dl, self._dd, self._du, self._B
             )
 
             # 既存 cuSOLVER バインダで一括解法（戻り値 shape: (nv, nx-2)）
             solution = self._cusolver.gtsv_strided(
-                a_batch.contiguous(),
-                b_batch.contiguous(),
-                c_batch.contiguous(),
-                B_batch.contiguous()
+                self._dl.contiguous(),
+                self._dd.contiguous(),
+                self._du.contiguous(),
+                self._B.contiguous()
             )
 
             # 内部セルのみ書き戻し。境界は前状態を維持
