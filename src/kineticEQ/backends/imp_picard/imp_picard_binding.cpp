@@ -1,113 +1,126 @@
 // imp_picard_binding.cpp
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
+#include <string>
 
-using at::Tensor;
-namespace cgpu = at::cuda;
+// .cu 側ラッパ（カーネル起動は .cu 内）
+extern "C" {
+void launch_moments_kernel_double(
+    const double* f, const double* v, int nx, int nv, double dv,
+    double* n_out, double* u_out, double* T_out, cudaStream_t stream);
 
-namespace imp_picard {
-    // kernels
-    __global__ void moments_kernel_double(
-        const double* fz, const double* v, int nx, int nv, double dv,
-        double* n_out, double* u_out, double* T_out);
+void launch_build_system_kernel_double(
+    const double* f_k, const double* v,
+    const double* n_arr, const double* u_arr, const double* T_arr,
+    int nx, int nv, double dt, double dx, double tau_tilde, double inv_sqrt_2pi,
+    double* dl, double* dd, double* du, double* B,
+    cudaStream_t stream);
 
-    __global__ void build_system_kernel_double(
-        const double* fk, const double* v,
-        const double* n_arr, const double* u_arr, const double* T_arr,
-        int nx, int nv, int n_inner,
-        double dt, double dx, double tau_tilde, double inv_sqrt_2pi,
-        double* dl, double* dd, double* du, double* B);
-
-    __global__ void scatter_and_residual_kernel_double(
-        const double* fz, const double* solution,
-        int nx, int nv, int n_inner,
-        double* fn_out, double* res_dev);
+void launch_scatter_and_residual_kernel_double(
+    const double* fz, const double* solution, double* fn_tmp,
+    int nx, int nv, double* res_out, cudaStream_t stream);
 }
 
-// ---- 行列構成（moments + bands/RHS）----
-void build_system_and_moments(
-    Tensor fk, Tensor fz, Tensor v,
+// ========== build_system: moments + band-system ==========
+static void build_system_and_moments(
+    at::Tensor f_k,   // (nx,nv) f^k
+    at::Tensor fz,    // (nx,nv) Picard candidate
+    at::Tensor v,     // (nv,)
     double dv, double dt, double dx,
     double tau_tilde, double inv_sqrt_2pi,
-    Tensor dl, Tensor dd, Tensor du, Tensor B,
-    Tensor n_out, Tensor u_out, Tensor T_out)
-{
-    TORCH_CHECK(fk.is_cuda() && fz.is_cuda() && v.is_cuda(), "inputs must be CUDA");
-    TORCH_CHECK(fk.scalar_type() == at::kDouble, "float64 only");
-    TORCH_CHECK(fk.sizes() == fz.sizes(), "fk and fz must have same shape");
-    TORCH_CHECK(fk.dim()==2 && v.dim()==1, "fk/fz:(nx,nv), v:(nv,)");
+    // outputs
+    at::Tensor dl, at::Tensor dd, at::Tensor du, at::Tensor B, // (nv, nx-2)
+    at::Tensor n_arr, at::Tensor u_arr, at::Tensor T_arr       // (nx,)
+){
+    TORCH_CHECK(f_k.is_cuda() && fz.is_cuda() && v.is_cuda(), "tensors must be CUDA");
+    TORCH_CHECK(f_k.scalar_type() == at::kDouble, "float64 only");
+    TORCH_CHECK(f_k.is_contiguous() && fz.is_contiguous() && v.is_contiguous(),
+                "inputs must be contiguous");
 
-    const int nx = fk.size(0);
-    const int nv = fk.size(1);
-    const int n_inner = std::max(nx - 2, 0);
+    const int64_t nx = f_k.size(0);
+    const int64_t nv = f_k.size(1);
+    TORCH_CHECK(fz.size(0) == nx && fz.size(1) == nv, "fz shape mismatch");
+    TORCH_CHECK(v.dim() == 1 && v.size(0) == nv, "v shape mismatch");
 
-    TORCH_CHECK(dl.sizes() == at::IntArrayRef{nv, n_inner}, "dl shape (nv,nx-2)");
-    TORCH_CHECK(dd.sizes() == at::IntArrayRef{nv, n_inner}, "dd shape (nv,nx-2)");
-    TORCH_CHECK(du.sizes() == at::IntArrayRef{nv, n_inner}, "du shape (nv,nx-2)");
-    TORCH_CHECK(B.sizes()  == at::IntArrayRef{nv, n_inner}, "B  shape (nv,nx-2)");
-    TORCH_CHECK(n_out.numel()==nx && u_out.numel()==nx && T_out.numel()==nx, "moments size nx");
+    const int64_t n_inner = std::max<int64_t>(nx - 2, 0);
+    if (n_inner <= 0) return;
 
-    auto stream = cgpu::getCurrentCUDAStream();
+    TORCH_CHECK(dl.size(0) == nv && dl.size(1) == n_inner, "dl shape (nv,nx-2)");
+    TORCH_CHECK(dd.size(0) == nv && dd.size(1) == n_inner, "dd shape (nv,nx-2)");
+    TORCH_CHECK(du.size(0) == nv && du.size(1) == n_inner, "du shape (nv,nx-2)");
+    TORCH_CHECK(B .size(0) == nv && B .size(1) == n_inner, "B  shape (nv,nx-2)");
 
-    // 1) moments
-    const int tMom = 256;
-    size_t shm = sizeof(double) * tMom * 3;
-    imp_picard::moments_kernel_double<<<nx, tMom, shm, stream>>>(
+    TORCH_CHECK(n_arr.size(0) == nx && u_arr.size(0) == nx && T_arr.size(0) == nx,
+                "moment arrays must be (nx,)");
+
+    auto stream = at::cuda::getCurrentCUDAStream();
+    cudaStream_t s = stream.stream();
+
+    // 1) fz → moments
+    launch_moments_kernel_double(
         fz.data_ptr<double>(), v.data_ptr<double>(),
-        nx, nv, dv,
-        n_out.data_ptr<double>(), u_out.data_ptr<double>(), T_out.data_ptr<double>());
+        (int)nx, (int)nv, dv,
+        n_arr.data_ptr<double>(), u_arr.data_ptr<double>(), T_arr.data_ptr<double>(),
+        s);
+    AT_CUDA_CHECK(cudaGetLastError());
 
-    if (n_inner == 0) return;
-
-    // 2) bands+RHS
-    const int tBand = 128;
-    dim3 grid(nv, (n_inner + tBand - 1) / tBand);
-    imp_picard::build_system_kernel_double<<<grid, tBand, 0, stream>>>(
-        fk.data_ptr<double>(), v.data_ptr<double>(),
-        n_out.data_ptr<double>(), u_out.data_ptr<double>(), T_out.data_ptr<double>(),
-        nx, nv, n_inner, dt, dx, tau_tilde, inv_sqrt_2pi,
-        dl.data_ptr<double>(), dd.data_ptr<double>(),
-        du.data_ptr<double>(), B.data_ptr<double>());
+    // 2) (n,u,T) と f_k から (dl,dd,du,B)
+    launch_build_system_kernel_double(
+        f_k.data_ptr<double>(), v.data_ptr<double>(),
+        n_arr.data_ptr<double>(), u_arr.data_ptr<double>(), T_arr.data_ptr<double>(),
+        (int)nx, (int)nv, dt, dx, tau_tilde, inv_sqrt_2pi,
+        dl.data_ptr<double>(), dd.data_ptr<double>(), du.data_ptr<double>(), B.data_ptr<double>(),
+        s);
+    AT_CUDA_CHECK(cudaGetLastError());
 }
 
-// ---- 書き戻し＋残差 ----
-void writeback_and_residual(
-    Tensor fz, Tensor solution, Tensor fn_out, Tensor res_dev)
-{
-    TORCH_CHECK(fz.is_cuda() && solution.is_cuda() && fn_out.is_cuda() && res_dev.is_cuda(),
+// ========== writeback + residual ==========
+static void writeback_and_residual(
+    at::Tensor fz,         // (nx,nv)
+    at::Tensor solution,   // (nv,n_inner)
+    at::Tensor fn_tmp,     // (nx,nv)
+    at::Tensor res_buf     // (1,)
+){
+    TORCH_CHECK(fz.is_cuda() && solution.is_cuda() && fn_tmp.is_cuda() && res_buf.is_cuda(),
                 "tensors must be CUDA");
-    TORCH_CHECK(fz.scalar_type() == at::kDouble, "float64 only");
-    TORCH_CHECK(res_dev.numel() == 1, "res_dev must be scalar");
+    TORCH_CHECK(fz.scalar_type() == at::kDouble &&
+                solution.scalar_type() == at::kDouble &&
+                fn_tmp.scalar_type() == at::kDouble &&
+                res_buf.scalar_type() == at::kDouble, "float64 only");
 
-    const int nx = fz.size(0);
-    const int nv = fz.size(1);
+    const int nx = (int)fz.size(0);
+    const int nv = (int)fz.size(1);
     const int n_inner = std::max(nx - 2, 0);
-    TORCH_CHECK(solution.sizes() == at::IntArrayRef{nv, n_inner}, "solution shape (nv,nx-2)");
-    TORCH_CHECK(fn_out.sizes() == fz.sizes(), "fn_out must match fz");
 
-    auto stream = cgpu::getCurrentCUDAStream();
-    // res_dev を 0 で初期化
-    AT_CUDA_CHECK(cudaMemsetAsync(res_dev.data_ptr(), 0, sizeof(double), stream));
+    TORCH_CHECK(solution.size(0) == nv && solution.size(1) == n_inner,
+                "solution must be (nv,nx-2)");
+    TORCH_CHECK(fn_tmp.size(0) == nx && fn_tmp.size(1) == nv,
+                "fn_tmp must be (nx,nv)");
+    TORCH_CHECK(res_buf.numel() == 1, "res_buf must be scalar tensor");
 
-    if (n_inner == 0) {
-        fn_out.copy_(fz);
-        return;
-    }
-    const int t = 256;
-    const int N = n_inner * nv;
-    const int blocks = (N + t - 1) / t;
+    auto stream = at::cuda::getCurrentCUDAStream();
+    cudaStream_t s = stream.stream();
 
-    imp_picard::scatter_and_residual_kernel_double<<<blocks, t, 0, stream>>>(
-        fz.data_ptr<double>(), solution.data_ptr<double>(),
-        nx, nv, n_inner,
-        fn_out.data_ptr<double>(), res_dev.data_ptr<double>());
+    // 残差初期化
+    AT_CUDA_CHECK(cudaMemsetAsync(res_buf.data_ptr(), 0, sizeof(double), s));
+
+    launch_scatter_and_residual_kernel_double(
+        fz.data_ptr<double>(),
+        solution.data_ptr<double>(),
+        fn_tmp.data_ptr<double>(),
+        nx, nv,
+        res_buf.data_ptr<double>(),
+        s);
+    AT_CUDA_CHECK(cudaGetLastError());
 }
 
+// ========= pybind =========
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("build_system", &build_system_and_moments,
-          "Build tri-diagonal system and moments (double)");
+          "Build tridiagonal system and moments (double)");
     m.def("writeback_and_residual", &writeback_and_residual,
-          "Scatter solution to grid and compute Linf residual (double)");
+          "Scatter solution and compute L-inf residual (double)");
 }
