@@ -176,8 +176,7 @@ class BGK1D:
             self._implicit_cuda = load(
                 name='implicit_fused',
                 sources=[str(src_dir/'implicit_binding.cpp'),
-                         str(src_dir/'implicit_kernels.cu'),
-                         str(src_dir/'gtsv_batch.cu')],
+                         str(src_dir/'implicit_kernels.cu')],
                 extra_cflags=['-O3'],
                 extra_cuda_cflags=['-O3'],
                 extra_include_paths=[sysconfig.get_paths()['include']],
