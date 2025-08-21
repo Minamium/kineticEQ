@@ -191,7 +191,8 @@ class BGK1D:
         # __init__ 内（implicit_solver=='imp_picard' のブロックで）
         if self.solver == "implicit" and self.implicit_solver == "imp_picard":
             from torch.utils.cpp_extension import load
-            import sysconfig, os
+            import traceback, os, sysconfig
+            from pathlib import Path
             src_dir = Path(__file__).resolve().parent / "backends" / "imp_picard"
             os.makedirs('build', exist_ok=True)
             os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.6")
