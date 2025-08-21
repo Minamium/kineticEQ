@@ -2,6 +2,7 @@
 #include <cmath>
 #include <algorithm>
 #include <assert.h>
+#include <vector>
 
 namespace implicit_fused {
 
