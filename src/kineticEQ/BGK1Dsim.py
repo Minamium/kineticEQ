@@ -359,7 +359,7 @@ class BGK1D:
                     else:
                         self._explicit_update()
                 elif self.solver == "implicit":
-                    self._implicit_cusolver_update()
+                    self._implicit_update_cuda_backend()
                     
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
@@ -390,7 +390,7 @@ class BGK1D:
                     else:
                         self._explicit_update()
                 elif self.solver == "implicit":
-                    self._implicit_cusolver_update()
+                    self._implicit_update_cuda_backend()
                     
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
@@ -446,7 +446,7 @@ class BGK1D:
                 else:
                     self._explicit_update()
             elif self.solver == "implicit":
-                self._implicit_cusolver_update()
+                self._implicit_update_cuda_backend()
 
             # 配列交換
             self.f, self.f_new = self.f_new, self.f
