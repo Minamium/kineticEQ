@@ -1,34 +1,37 @@
+// implicit_kernels.cu
 #include <cuda_runtime.h>
 #include <cmath>
 #include <algorithm>
+#include <assert.h>
 
 namespace implicit_fused {
 
-// clamp positive
+// ========= helpers =========
 template <typename T>
 __device__ __forceinline__ T clamp_pos(T x, T eps) {
     return (x > eps) ? x : eps;
 }
 
-// Maxwellian for one (n,u,T) and one v
 template <typename T>
 __device__ __forceinline__ T maxwell_1v(T n, T u, T Tgas, T vj, T inv_sqrt_2pi) {
-    T inv_sqrtT = rsqrt(Tgas);
-    T coeff = n * inv_sqrt_2pi * inv_sqrtT;
+    // fM = n / sqrt(2π T) * exp(-(v-u)^2/(2T))
+    T Tpos = clamp_pos(Tgas, T(1e-300));
+    T coeff = n * inv_sqrt_2pi / sqrt(Tpos);
     T diff  = vj - u;
-    T expo  = -T(0.5) * (diff*diff) / Tgas;
+    T expo  = -T(0.5) * (diff*diff) / Tpos;
     return coeff * exp(expo);
 }
 
-/* ---------------- moments: 1 block per i ---------------- */
+// ========= moments =========
+// 1 block / x-row, shared-memory reduction
 template <typename T>
 __global__ void moments_kernel(
-    const T* __restrict__ f,
-    const T* __restrict__ v,
+    const T* __restrict__ f,  // (nx,nv)
+    const T* __restrict__ v,  // (nv)
     int nx, int nv, T dv,
-    T* __restrict__ n_out,
-    T* __restrict__ u_out,
-    T* __restrict__ T_out)
+    T* __restrict__ n_out,    // (nx)
+    T* __restrict__ u_out,    // (nx)
+    T* __restrict__ T_out)    // (nx)
 {
     const int i = blockIdx.x;
     if (i >= nx) return;
@@ -51,11 +54,11 @@ __global__ void moments_kernel(
     s2[threadIdx.x] = p2;
     __syncthreads();
 
-    for (int off = blockDim.x>>1; off>0; off >>= 1) {
-        if (threadIdx.x < off) {
-            s0[threadIdx.x] += s0[threadIdx.x + off];
-            s1[threadIdx.x] += s1[threadIdx.x + off];
-            s2[threadIdx.x] += s2[threadIdx.x + off];
+    for (int offset = blockDim.x>>1; offset>0; offset >>= 1) {
+        if (threadIdx.x < offset) {
+            s0[threadIdx.x] += s0[threadIdx.x + offset];
+            s1[threadIdx.x] += s1[threadIdx.x + offset];
+            s2[threadIdx.x] += s2[threadIdx.x + offset];
         }
         __syncthreads();
     }
@@ -73,6 +76,156 @@ __global__ void moments_kernel(
     }
 }
 
+// ========= boundary Maxwell =========
+// compute fL(j), fR(j) only for RHS contribution; **don't touch boundary cells**
+template <typename T>
+__global__ void boundary_maxwell_kernel(
+    const T* __restrict__ v, int nv, T inv_sqrt_2pi,
+    T nL, T uL, T TL, T nR, T uR, T TR,
+    T* __restrict__ fL, T* __restrict__ fR)
+{
+    TL = clamp_pos(TL, T(1e-300));
+    TR = clamp_pos(TR, T(1e-300));
+    T coeffL = nL * inv_sqrt_2pi / sqrt(TL);
+    T coeffR = nR * inv_sqrt_2pi / sqrt(TR);
+
+    for (int j = blockIdx.x * blockDim.x + threadIdx.x; j < nv; j += blockDim.x * gridDim.x) {
+        T vj = v[j];
+        T eL = exp(-T(0.5) * (vj-uL)*(vj-uL) / TL);
+        T eR = exp(-T(0.5) * (vj-uR)*(vj-uR) / TR);
+        fL[j] = coeffL * eL;
+        fR[j] = coeffR * eR;
+    }
+}
+
+// ========= build tri-diagonal & RHS =========
+// 1 block / velocity j, write (nv, n_inner) arrays (row-major by j)
+template <typename T>
+__global__ void build_tridiag_rhs_kernel(
+    const T* __restrict__ f,   // (nx,nv) current candidate fz
+    const T* __restrict__ v,   // (nv)
+    const T* __restrict__ n,   // (nx)
+    const T* __restrict__ u,   // (nx)
+    const T* __restrict__ Tg,  // (nx)
+    const T* __restrict__ fL,  // (nv)
+    const T* __restrict__ fR,  // (nv)
+    int nx, int nv, T dt, T dx, T tau_tilde, T inv_sqrt_2pi,
+    T* __restrict__ dl,        // (nv, n_inner)
+    T* __restrict__ dd,        // (nv, n_inner)
+    T* __restrict__ du,        // (nv, n_inner)
+    T* __restrict__ B)         // (nv, n_inner)  (RHS)
+{
+    const int j = blockIdx.x;
+    if (j >= nv) return;
+    const int n_inner = nx - 2;
+    if (n_inner <= 0) return;
+
+    const T vj = v[j];
+    const T a  = -dt/dx * fmax(vj, T(0));   // <= 0
+    const T c  = -dt/dx * fmax(-vj, T(0));  // <= 0
+    const T minus_a = -a;                   // >= 0
+    const T minus_c = -c;                   // >= 0
+
+    T* dl_j = dl + j * n_inner;
+    T* dd_j = dd + j * n_inner;
+    T* du_j = du + j * n_inner;
+    T*  B_j =  B + j * n_inner;
+
+    const T fL_j = fL[j];
+    const T fR_j = fR[j];
+
+    for (int k = threadIdx.x; k < n_inner; k += blockDim.x) {
+        const int i = k + 1; // interior row index in [1..nx-2]
+
+        T inv_tau = (n[i] * sqrt(clamp_pos(Tg[i], T(1e-300)))) / tau_tilde;
+
+        // diagonal & off-diagonals
+        dd_j[k] = T(1) + minus_a + minus_c + dt * inv_tau;
+        dl_j[k] = (k==0) ? T(0) : a;
+        du_j[k] = (k==n_inner-1) ? T(0) : c;
+
+        // RHS
+        const T fij = f[i*nv + j];
+        const T fM  = maxwell_1v<T>(n[i], u[i], Tg[i], vj, inv_sqrt_2pi);
+        T rhs = fij + dt * inv_tau * fM;
+
+        if (k == 0)          rhs += (dt/dx) * fmax(vj,  T(0)) * fL_j;
+        if (k == n_inner-1)  rhs += (dt/dx) * fmax(-vj, T(0)) * fR_j;
+
+        B_j[k] = rhs;
+    }
+}
+
+// ========= writeback (interior only) + per-velocity residual =========
+// 1 block / velocity j, parallel max-reduction
+template <typename T>
+__global__ void writeback_residual_kernel(
+    const T* __restrict__ fz,   // (nx,nv) old candidate
+    T* __restrict__ fn_tmp,     // (nx,nv) new candidate (only interior written)
+    const T* __restrict__ B,    // (nv, n_inner) solution
+    int nx, int nv,
+    T* __restrict__ res_per_v)  // (nv)
+{
+    const int j = blockIdx.x;
+    if (j >= nv) return;
+    const int n_inner = nx - 2;
+    if (n_inner <= 0) {
+        if (threadIdx.x == 0) res_per_v[j] = T(0);
+        return;
+    }
+
+    extern __shared__ unsigned char smem_raw[];
+    T* smax = reinterpret_cast<T*>(smem_raw);
+
+    T local_max = T(0);
+    const T* Bj = B + j * n_inner;
+
+    // scatter write & track max diff for this velocity
+    for (int k = threadIdx.x; k < n_inner; k += blockDim.x) {
+        const int i = k + 1;
+        const T oldv = fz[i*nv + j];
+        const T newv = Bj[k];
+        fn_tmp[i*nv + j] = newv;  // interior only
+        T diff = fabs(newv - oldv);
+        if (diff > local_max) local_max = diff;
+    }
+
+    smax[threadIdx.x] = local_max;
+    __syncthreads();
+
+    for (int offset = blockDim.x>>1; offset>0; offset >>= 1) {
+        if (threadIdx.x < offset) {
+            smax[threadIdx.x] = fmax(smax[threadIdx.x], smax[threadIdx.x + offset]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) res_per_v[j] = smax[0];
+}
+
+// reduce max over length-nv vector
+template <typename T>
+__global__ void reduce_max_kernel(const T* __restrict__ x, int n, T* __restrict__ out) {
+    extern __shared__ unsigned char smem_raw[];
+    T* s = reinterpret_cast<T*>(smem_raw);
+
+    T vmax = T(0);
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += gridDim.x * blockDim.x) {
+        vmax = fmax(vmax, x[idx]);
+    }
+    s[threadIdx.x] = vmax;
+    __syncthreads();
+
+    for (int offset = blockDim.x>>1; offset>0; offset >>= 1) {
+        if (threadIdx.x < offset) s[threadIdx.x] = fmax(s[threadIdx.x], s[threadIdx.x + offset]);
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        atomicMax(reinterpret_cast<unsigned long long*>(out),
+                  __double_as_longlong(static_cast<double>(s[0])));
+    }
+}
+
+// ========= launchers (double) =========
 void launch_moments_double(
     const double* f, const double* v,
     int nx, int nv, double dv,
@@ -82,83 +235,21 @@ void launch_moments_double(
     const int block = 256;
     dim3 grid(nx);
     size_t shmem = sizeof(double) * block * 3;
-    moments_kernel<double><<<grid, block, shmem, stream>>>(f, v, nx, nv, dv, n, u, T);
+    moments_kernel<double><<<grid, block, shmem, stream>>>(
+        f, v, nx, nv, dv, n, u, T);
 }
 
-/* ------------- boundary from current f (no touch) ------------- */
-template <typename T>
-__global__ void boundary_from_f_kernel(
-    const T* __restrict__ f, int nx, int nv,
-    T* __restrict__ fL, T* __restrict__ fR)
-{
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
-    if (j >= nv) return;
-    fL[j] = f[0*nv + j];
-    fR[j] = f[(nx-1)*nv + j];
-}
-
-void launch_boundary_from_current_f_double(
-    const double* f, int nx, int nv,
+void launch_boundary_maxwell_double(
+    const double* v, int nv, double inv_sqrt_2pi,
+    double nL, double uL, double TL,
+    double nR, double uR, double TR,
     double* fL, double* fR,
     cudaStream_t stream)
 {
     int block = 256;
-    int grid = (nv + block - 1) / block;
-    boundary_from_f_kernel<double><<<grid, block, 0, stream>>>(f, nx, nv, fL, fR);
-}
-
-/* ------------- build tri-diagonal & RHS for interior ------------- */
-template <typename T>
-__global__ void build_tridiag_rhs_kernel(
-    const T* __restrict__ f,
-    const T* __restrict__ v,
-    const T* __restrict__ n,
-    const T* __restrict__ u,
-    const T* __restrict__ Tg,
-    const T* __restrict__ fL,
-    const T* __restrict__ fR,
-    int nx, int nv, T dt, T dx, T tau_tilde, T inv_sqrt_2pi,
-    T* __restrict__ dl,  // (nv, m)
-    T* __restrict__ dd,  // (nv, m)
-    T* __restrict__ du,  // (nv, m)
-    T* __restrict__  B)  // (nv, m)
-{
-    const int j = blockIdx.x;
-    if (j >= nv) return;
-    const int m = nx - 2;
-    const T vj = v[j];
-    const T ap = -dt/dx * fmax(vj,  T(0));   // <=0
-    const T cp = -dt/dx * fmax(-vj, T(0));   // <=0
-    const T ma = -ap; // >=0
-    const T mc = -cp; // >=0
-
-    T* dl_j = dl + j * m;
-    T* dd_j = dd + j * m;
-    T* du_j = du + j * m;
-    T*  B_j =  B + j * m;
-
-    const T fL_j = fL[j];
-    const T fR_j = fR[j];
-
-    for (int k = threadIdx.x; k < m; k += blockDim.x) {
-        const int i = k + 1; // interior row (1..nx-2)
-
-        const T Tg_i = clamp_pos(Tg[i], T(1e-300));
-        const T inv_tau = (n[i] * sqrt(Tg_i)) / tau_tilde;
-
-        dd_j[k] = T(1) + ma + mc + dt * inv_tau;
-        dl_j[k] = (k==0)     ? T(0) : ap;
-        du_j[k] = (k==m-1)   ? T(0) : cp;
-
-        const T fij = f[i*nv + j];
-        const T fM  = maxwell_1v<T>(n[i], u[i], Tg_i, vj, inv_sqrt_2pi);
-
-        T rhs = fij + dt * inv_tau * fM;
-        if (k == 0)     rhs += (dt/dx) * fmax(vj,  T(0)) * fL_j;
-        if (k == m-1)   rhs += (dt/dx) * fmax(-vj, T(0)) * fR_j;
-
-        B_j[k] = rhs;
-    }
+    int grid  = (nv + block - 1) / block;
+    boundary_maxwell_kernel<double><<<grid, block, 0, stream>>>(
+        v, nv, inv_sqrt_2pi, nL, uL, TL, nR, uR, TR, fL, fR);
 }
 
 void launch_build_tridiag_rhs_double(
@@ -175,31 +266,26 @@ void launch_build_tridiag_rhs_double(
         f, v, n, u, T, fL, fR, nx, nv, dt, dx, tau_tilde, inv_sqrt_2pi, dl, d, du, B);
 }
 
-/* ------------- residual (interior only) ------------- */
-template <typename T>
-__global__ void residual_interior_kernel(
-    const T* __restrict__ f_old,
-    const T* __restrict__ f_new,
-    int nx, int nv,
-    T* __restrict__ res_per_v) // length nv
-{
-    const int j = blockIdx.x;
-    if (j >= nv) return;
-    T rmax = T(0);
-    for (int i = 1; i < nx-1; ++i) {
-        T diff = fabs(f_new[i*nv + j] - f_old[i*nv + j]);
-        if (diff > rmax) rmax = diff;
-    }
-    if (threadIdx.x == 0) res_per_v[j] = rmax;
-}
-
-void launch_residual_interior_double(
-    const double* f_old, const double* f_new,
-    int nx, int nv, double* res_per_v,
+void launch_writeback_and_residual_double(
+    const double* fz, double* fn_tmp,
+    const double* B, int nx, int nv,
+    double* res_per_v,
     cudaStream_t stream)
 {
-    dim3 grid(nv), block(1);
-    residual_interior_kernel<double><<<grid, block, 0, stream>>>(f_old, f_new, nx, nv, res_per_v);
+    const int block = 256;
+    dim3 grid(nv);
+    size_t shmem = sizeof(double) * block;
+    writeback_residual_kernel<double><<<grid, block, shmem, stream>>>(
+        fz, fn_tmp, B, nx, nv, res_per_v);
+}
+
+void launch_reduce_max_double(const double* x, int n, double* out, cudaStream_t stream) {
+    int block = 256;
+    int grid  = std::min(1024, (n + block - 1) / block);
+    size_t shmem = sizeof(double) * block;
+    // initialize out to 0 on device
+    cudaMemsetAsync(out, 0, sizeof(double), stream);
+    reduce_max_kernel<double><<<grid, block, shmem, stream>>>(x, n, out);
 }
 
 } // namespace implicit_fused

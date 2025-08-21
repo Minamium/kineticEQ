@@ -1,179 +1,231 @@
+// implicit_binding.cpp
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <cusparse.h>
 #include <cuda_runtime.h>
+#include <cusparse.h>
+#include <stdexcept>
+#include <sstream>
 
-#include <tuple>
-#include <vector>
-#include <cmath>
-#include <cassert>
+using torch::Tensor;
+
+#define CUDA_CHECK(err) do { \
+  cudaError_t e = (err); \
+  if (e != cudaSuccess) { \
+    std::ostringstream oss; \
+    oss << "CUDA error: " << cudaGetErrorString(e) \
+        << " at " << __FILE__ << ":" << __LINE__; \
+    throw std::runtime_error(oss.str()); \
+  } \
+} while(0)
+
+#define CUSPARSE_CHECK(stat) do { \
+  cusparseStatus_t s = (stat); \
+  if (s != CUSPARSE_STATUS_SUCCESS) { \
+    std::ostringstream oss; \
+    oss << "cuSPARSE error: " << int(s) \
+        << " at " << __FILE__ << ":" << __LINE__; \
+    throw std::runtime_error(oss.str()); \
+  } \
+} while(0)
 
 namespace implicit_fused {
-// ---- kernels (defined in implicit_kernels.cu) ----
-void launch_moments_double(
-    const double* f, const double* v,
-    int nx, int nv, double dv,
-    double* n, double* u, double* T,
-    cudaStream_t stream);
-
-void launch_build_tridiag_rhs_double(
-    const double* f, const double* v,
-    const double* n, const double* u, const double* T,
-    const double* fL, const double* fR,
-    int nx, int nv, double dt, double dx, double tau_tilde, double inv_sqrt_2pi,
-    double* dl, double* d, double* du, double* B,
-    cudaStream_t stream);
-
-void launch_boundary_from_current_f_double(
-    const double* f, int nx, int nv,
-    double* fL, double* fR,
-    cudaStream_t stream);
-
-void launch_residual_interior_double(
-    const double* f_old, const double* f_new,
-    int nx, int nv, double* res_per_v,
-    cudaStream_t stream);
-
-// ---- helpers ----
-static inline void cudaCheck(cudaError_t e, const char* msg){
-    TORCH_CHECK(e == cudaSuccess, msg, " : ", cudaGetErrorString(e));
-}
-static inline void cusparseCheck(cusparseStatus_t s, const char* msg){
-    TORCH_CHECK(s == CUSPARSE_STATUS_SUCCESS, "cuSPARSE error: ", (int)s, " : ", msg);
+// from .cu
+void launch_moments_double(const double*, const double*, int, int, double, double*, double*, double*, cudaStream_t);
+void launch_boundary_maxwell_double(const double*, int, double, double,double,double, double,double,double, double*, double*, cudaStream_t);
+void launch_build_tridiag_rhs_double(const double*, const double*, const double*, const double*, const double*, const double*, const double*, int, int, double, double, double, double, double*, double*, double*, double*, cudaStream_t);
+void launch_writeback_and_residual_double(const double*, double*, const double*, int, int, double*, cudaStream_t);
+void launch_reduce_max_double(const double*, int, double*, cudaStream_t);
 }
 
-// Build & solve one implicit step (Picard) entirely on GPU (boundaries untouched)
-std::pair<int,double> implicit_step(
-    torch::Tensor f,      // (nx, nv) double, cuda, contiguous
-    torch::Tensor fn,     // (nx, nv) double, cuda, contiguous (output)
-    torch::Tensor v,      // (nv)     double, cuda, contiguous
-    double dv, double dt, double dx,
-    double tau_tilde, double inv_sqrt_2pi,
-    int /*k0_unused*/,    // for API compatibility only
-    int picard_iter, double picard_tol
-){
-    TORCH_CHECK(f.is_cuda() && fn.is_cuda() && v.is_cuda(), "tensors must be CUDA");
-    TORCH_CHECK(f.dtype() == torch::kFloat64 && fn.dtype() == torch::kFloat64 && v.dtype() == torch::kFloat64,
-                "dtype must be float64");
-    TORCH_CHECK(f.is_contiguous() && fn.is_contiguous() && v.is_contiguous(),
-                "tensors must be contiguous");
+// ========== guards ==========
+static inline void check_cuda_double_contig(const Tensor& t, const char* name) {
+    if (!t.is_cuda())  throw std::invalid_argument(std::string(name) + " must be CUDA tensor");
+    if (t.scalar_type() != torch::kFloat64) throw std::invalid_argument(std::string(name) + " must be float64");
+    if (!t.is_contiguous()) throw std::invalid_argument(std::string(name) + " must be contiguous");
+}
 
-    const int nx = f.size(0);
-    const int nv = f.size(1);
-    TORCH_CHECK(v.size(0) == nv, "v.size(0) must equal nv");
-    TORCH_CHECK(nx >= 3, "nx must be >= 3 for interior update");
+// ========== API: moments ==========
+void moments(Tensor f, Tensor v, double dv, Tensor n, Tensor u, Tensor T) {
+    check_cuda_double_contig(f, "f");
+    check_cuda_double_contig(v, "v");
+    check_cuda_double_contig(n, "n");
+    check_cuda_double_contig(u, "u");
+    check_cuda_double_contig(T, "T");
 
-    const int m = nx - 2;         // system size per velocity
-    const int batch = nv;         // number of tri-diagonal systems
+    const int64_t nx = f.size(0);
+    const int64_t nv = f.size(1);
+    TORCH_CHECK(v.numel() == nv, "v length mismatch");
+    TORCH_CHECK(n.numel() == nx && u.numel() == nx && T.numel() == nx, "n,u,T size mismatch");
+
+    auto stream = at::cuda::getCurrentCUDAStream();
+    implicit_fused::launch_moments_double(
+        f.data_ptr<double>(), v.data_ptr<double>(),
+        (int)nx, (int)nv, dv,
+        n.data_ptr<double>(), u.data_ptr<double>(), T.data_ptr<double>(),
+        stream.stream());
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// ========== API: boundary Maxwell ==========
+void boundary_maxwell(Tensor v, double inv_sqrt_2pi,
+                      double nL, double uL, double TL,
+                      double nR, double uR, double TR,
+                      Tensor fL, Tensor fR)
+{
+    check_cuda_double_contig(v, "v");
+    check_cuda_double_contig(fL, "fL");
+    check_cuda_double_contig(fR, "fR");
+    const int64_t nv = v.numel();
+    TORCH_CHECK(fL.numel() == nv && fR.numel() == nv, "fL/fR length mismatch");
+
+    auto stream = at::cuda::getCurrentCUDAStream();
+    implicit_fused::launch_boundary_maxwell_double(
+        v.data_ptr<double>(), (int)nv, inv_sqrt_2pi,
+        nL, uL, TL, nR, uR, TR,
+        fL.data_ptr<double>(), fR.data_ptr<double>(),
+        stream.stream());
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// ========== API: build tri-diagonal + RHS ==========
+void build_system(Tensor fz, Tensor v, Tensor n, Tensor u, Tensor T,
+                  double dt, double dx, double tau_tilde, double inv_sqrt_2pi,
+                  Tensor fL, Tensor fR,
+                  Tensor dl, Tensor dd, Tensor du, Tensor B)
+{
+    check_cuda_double_contig(fz, "fz");
+    check_cuda_double_contig(v,  "v");
+    check_cuda_double_contig(n,  "n");
+    check_cuda_double_contig(u,  "u");
+    check_cuda_double_contig(T,  "T");
+    check_cuda_double_contig(fL, "fL");
+    check_cuda_double_contig(fR, "fR");
+    check_cuda_double_contig(dl, "dl");
+    check_cuda_double_contig(dd, "dd");
+    check_cuda_double_contig(du, "du");
+    check_cuda_double_contig(B,  "B");
+
+    const int64_t nx = fz.size(0);
+    const int64_t nv = fz.size(1);
+    TORCH_CHECK(v.numel() == nv, "v length mismatch");
+    TORCH_CHECK(n.numel() == nx && u.numel() == nx && T.numel() == nx, "n,u,T size mismatch");
+
+    const int64_t n_inner = nx - 2;
+    TORCH_CHECK(n_inner >= 0, "nx must be >= 2");
+    if (n_inner == 0) return;
+
+    TORCH_CHECK(dl.size(0) == nv && dl.size(1) == n_inner, "dl size mismatch");
+    TORCH_CHECK(dd.size(0) == nv && dd.size(1) == n_inner, "dd size mismatch");
+    TORCH_CHECK(du.size(0) == nv && du.size(1) == n_inner, "du size mismatch");
+    TORCH_CHECK(B.size(0)  == nv && B.size(1)  == n_inner, "B size mismatch");
+    TORCH_CHECK(fL.numel() == nv && fR.numel() == nv, "fL/fR length mismatch");
+
+    auto stream = at::cuda::getCurrentCUDAStream();
+    implicit_fused::launch_build_tridiag_rhs_double(
+        fz.data_ptr<double>(), v.data_ptr<double>(),
+        n.data_ptr<double>(), u.data_ptr<double>(), T.data_ptr<double>(),
+        fL.data_ptr<double>(), fR.data_ptr<double>(),
+        (int)nx, (int)nv, dt, dx, tau_tilde, inv_sqrt_2pi,
+        dl.data_ptr<double>(), dd.data_ptr<double>(), du.data_ptr<double>(), B.data_ptr<double>(),
+        stream.stream());
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// ========== API: batched gtsv (cuSPARSE) ==========
+void gtsv_solve_inplace(Tensor dl, Tensor dd, Tensor du, Tensor B, int nx, int nv)
+{
+    check_cuda_double_contig(dl, "dl");
+    check_cuda_double_contig(dd, "dd");
+    check_cuda_double_contig(du, "du");
+    check_cuda_double_contig(B,  "B");
+
+    const int64_t n_inner = nx - 2;
+    if (n_inner <= 0) return;
+
+    TORCH_CHECK(dl.size(0)==nv && dl.size(1)==n_inner, "dl size mismatch");
+    TORCH_CHECK(dd.size(0)==nv && dd.size(1)==n_inner, "dd size mismatch");
+    TORCH_CHECK(du.size(0)==nv && du.size(1)==n_inner, "du size mismatch");
+    TORCH_CHECK(B.size(0)==nv  && B.size(1)==n_inner,  "B size mismatch");
+
     auto stream = at::cuda::getCurrentCUDAStream();
 
-    // Work buffers
-    auto opts1 = torch::TensorOptions().dtype(torch::kFloat64).device(f.device());
-    auto n  = torch::empty({nx}, opts1);
-    auto u  = torch::empty({nx}, opts1);
-    auto Tg = torch::empty({nx}, opts1);
+    cusparseHandle_t handle = nullptr;
+    CUSPARSE_CHECK(cusparseCreate(&handle));
+    CUSPARSE_CHECK(cusparseSetStream(handle, stream.stream()));
 
-    // boundary values from current f (do not construct Maxwell here)
-    auto fL = torch::empty({nv}, opts1);
-    auto fR = torch::empty({nv}, opts1);
+    size_t bufferSize = 0;
+    CUSPARSE_CHECK(cusparseDgtsv2StridedBatch_bufferSizeExt(
+        handle,
+        (int)n_inner,
+        dl.data_ptr<double>(),
+        dd.data_ptr<double>(),
+        du.data_ptr<double>(),
+        B.data_ptr<double>(),
+        (int)n_inner,   // batch stride
+        (int)nv,
+        &bufferSize
+    ));
 
-    // tri-diagonal bands and RHS for all velocities: (nv, m) row-major => stride = m
-    auto dl = torch::empty({nv, m}, opts1);
-    auto dd = torch::empty({nv, m}, opts1);
-    auto du = torch::empty({nv, m}, opts1);
-    auto  B = torch::empty({nv, m}, opts1);
+    // workspace
+    Tensor workspace = torch::empty({(long long)bufferSize}, torch::dtype(torch::kUInt8).device(B.device()));
+    void* pBuffer = workspace.data_ptr<uint8_t>();
 
-    // per-velocity residual (interior only)
-    auto res_v = torch::empty({nv}, opts1);
-    double residual = 0.0;
-    int iters = 0;
+    CUSPARSE_CHECK(cusparseDgtsv2StridedBatch(
+        handle,
+        (int)n_inner,
+        dl.data_ptr<double>(),
+        dd.data_ptr<double>(),
+        du.data_ptr<double>(),
+        B.data_ptr<double>(),
+        (int)n_inner,   // batch stride
+        (int)nv,
+        pBuffer
+    ));
 
-    // constant device pointers
-    const double* f_ptr  = f.data_ptr<double>();
-    const double* v_ptr  = v.data_ptr<double>();
-
-    // kernels use stream
-    // Picard iteration
-    for (int z = 0; z < picard_iter; ++z) {
-        // 1) moments from current f
-        launch_moments_double(
-            f_ptr, v_ptr, nx, nv, dv,
-            n.data_ptr<double>(), u.data_ptr<double>(), Tg.data_ptr<double>(),
-            stream.stream());
-
-        // 2) boundary vectors from current f (not Maxwell)
-        launch_boundary_from_current_f_double(
-            f_ptr, nx, nv, fL.data_ptr<double>(), fR.data_ptr<double>(),
-            stream.stream());
-
-        // 3) build tri-diagonal and RHS for interior cells only
-        launch_build_tridiag_rhs_double(
-            f_ptr, v_ptr,
-            n.data_ptr<double>(), u.data_ptr<double>(), Tg.data_ptr<double>(),
-            fL.data_ptr<double>(), fR.data_ptr<double>(),
-            nx, nv, dt, dx, tau_tilde, inv_sqrt_2pi,
-            dl.data_ptr<double>(), dd.data_ptr<double>(), du.data_ptr<double>(), B.data_ptr<double>(),
-            stream.stream());
-
-        // 4) cuSPARSE batched gtsv2 (in-place on B)
-        {
-            cusparseHandle_t handle = at::cuda::getCurrentCUDASparseHandle();
-
-            size_t ws_bytes = 0;
-            cusparseCheck(
-                cusparseDgtsv2StridedBatch_bufferSizeExt(
-                    handle, m,
-                    dl.data_ptr<double>(), dd.data_ptr<double>(), du.data_ptr<double>(),
-                    B.data_ptr<double>(), batch, /*ldb=strideB*/ m, &ws_bytes),
-                "bufferSizeExt");
-
-            // at least 1 byte
-            if (ws_bytes == 0) ws_bytes = 4;
-            auto workspace = torch::empty({static_cast<long long>(ws_bytes)}, torch::TensorOptions()
-                                          .dtype(torch::kUInt8).device(f.device()));
-
-            cusparseCheck(
-                cusparseDgtsv2StridedBatch(
-                    handle, m,
-                    dl.data_ptr<double>(), dd.data_ptr<double>(), du.data_ptr<double>(),
-                    B.data_ptr<double>(), batch, /*ldb=strideB*/ m,
-                    workspace.data_ptr<uint8_t>()),
-                "gtsv2StridedBatch");
-        }
-
-        // 5) write back interior only to fn (boundaries untouched)
-        {
-            // copy old f to fn first, then overwrite interior with solution
-            fn.copy_(f);
-            // interior view
-            auto fn_in = fn.index({torch::indexing::Slice(1, nx-1), torch::indexing::Slice()});
-            // B is (nv,m) row-major => need transpose to (m,nv) to match (i,j)
-            fn_in.copy_(B.transpose(0,1));
-        }
-
-        // 6) residual on interior only, and swap f <- fn for next Picard iter
-        launch_residual_interior_double(
-            f.data_ptr<double>(), fn.data_ptr<double>(),
-            nx, nv, res_v.data_ptr<double>(),
-            stream.stream());
-        // reduce on CPU (one scalar per v)
-        residual = res_v.max().item<double>();
-        iters = z + 1;
-
-        // next iterate: f <- fn
-        f.copy_(fn);
-
-        if (residual < picard_tol) break;
-    }
-
-    // 手元のポリシー通り、このバックエンドは境界を触らない。
-    // Python 側で最後に  f_new[0,:]=f[0,:], f_new[-1,:]=f[-1,:] を実行してください。
-
-    return {iters, residual};
+    CUSPARSE_CHECK(cusparseDestroy(handle));
+    CUDA_CHECK(cudaGetLastError());
 }
 
-} // namespace implicit_fused
+// ========== API: writeback + residual (interior only) ==========
+double writeback_and_residual(Tensor fz, Tensor fn_tmp, Tensor B, int nx, int nv)
+{
+    check_cuda_double_contig(fz,     "fz");
+    check_cuda_double_contig(fn_tmp, "fn_tmp");
+    check_cuda_double_contig(B,      "B");
 
+    const int64_t n_inner = nx - 2;
+    if (n_inner <= 0) return 0.0;
+
+    TORCH_CHECK(fz.size(0)==nx && fz.size(1)==nv, "fz size mismatch");
+    TORCH_CHECK(fn_tmp.size(0)==nx && fn_tmp.size(1)==nv, "fn_tmp size mismatch");
+    TORCH_CHECK(B.size(0)==nv && B.size(1)==n_inner, "B size mismatch");
+
+    auto stream = at::cuda::getCurrentCUDAStream();
+
+    // per-velocity maxima
+    Tensor res_per_v = torch::empty({nv}, torch::dtype(torch::kFloat64).device(fz.device()));
+    implicit_fused::launch_writeback_and_residual_double(
+        fz.data_ptr<double>(), fn_tmp.data_ptr<double>(),
+        B.data_ptr<double>(), nx, nv,
+        res_per_v.data_ptr<double>(),
+        stream.stream());
+
+    // reduce to scalar on device, then copy to host
+    Tensor d_max = torch::empty({1}, torch::dtype(torch::kFloat64).device(fz.device()));
+    implicit_fused::launch_reduce_max_double(
+        res_per_v.data_ptr<double>(), nv, d_max.data_ptr<double>(), stream.stream());
+
+    CUDA_CHECK(cudaStreamSynchronize(stream.stream()));
+
+    double host_res = d_max.item<double>();
+    return host_res;
+}
+
+// ========== pybind ==========
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("implicit_step", &implicit_fused::implicit_step, "Implicit BGK step (cuSPARSE GTSV2, boundaries untouched)");
+    m.def("moments", &moments, "Compute (n,u,T) from f");
+    m.def("boundary_maxwell", &boundary_maxwell, "Compute Maxwell at boundaries (fL,fR)");
+    m.def("build_system", &build_system, "Build tri-diagonal (dl,dd,du) and RHS (B) for interior cells");
+    m.def("gtsv_solve_inplace", &gtsv_solve_inplace, "Solve tri-diagonal systems in-place via cuSPARSE gtsv2StridedBatch");
+    m.def("writeback_and_residual", &writeback_and_residual, "Write interior solution and return global residual");
 }

@@ -180,6 +180,7 @@ class BGK1D:
                 extra_cflags=['-O3'],
                 extra_cuda_cflags=['-O3'],
                 extra_include_paths=[sysconfig.get_paths()['include']],
+                extra_ldflags=['-lcusparse'],
                 build_directory='build',
                 verbose=True
             )
@@ -528,6 +529,31 @@ class BGK1D:
         self._k0 = int(torch.searchsorted(
             self.v, torch.tensor(0.0, dtype=self.dtype, device=self.device)
         ))
+
+        # ===== Picard で再利用する内部ワーク領域 =====
+        # (n, u, T)
+        self._n  = torch.empty(self.nx, dtype=self.dtype, device=self.device)
+        self._u  = torch.empty(self.nx, dtype=self.dtype, device=self.device)
+        self._T  = torch.empty(self.nx, dtype=self.dtype, device=self.device)
+
+        # 境界マクスウェル（RHS寄与用。セル値はここでは触らない）
+        self._fL = torch.empty(self.nv, dtype=self.dtype, device=self.device)
+        self._fR = torch.empty(self.nv, dtype=self.dtype, device=self.device)
+
+        # 3重対角＋右辺（内部セル i=1..nx-2 用）
+        n_inner = max(self.nx - 2, 0)
+        if n_inner > 0:
+            self._dl = torch.empty((self.nv, n_inner), dtype=self.dtype, device=self.device)
+            self._dd = torch.empty((self.nv, n_inner), dtype=self.dtype, device=self.device)
+            self._du = torch.empty((self.nv, n_inner), dtype=self.dtype, device=self.device)
+            self._B  = torch.empty((self.nv, n_inner), dtype=self.dtype, device=self.device)
+        else:
+            self._dl = self._dd = self._du = self._B = None
+
+        # Picard反復用の候補バッファ（境界は最後に前状態で固定）
+        self._fz     = torch.empty_like(self.f)
+        self._fn_tmp = torch.empty_like(self.f)
+
          
         #print("Allocated successfully")
 
@@ -975,16 +1001,72 @@ class BGK1D:
 
     # 陰解法のバックエンド
     def _implicit_update_cuda_backend(self):
-        # fn に結果を書き込みつつ、戻り値で (iters, residual) を受け取る
-        iters, residual = self._implicit_cuda.implicit_step(
-            self.f, self.f_new, self.v,
-            float(self.dv), float(self.dt), float(self.dx),
-            float(self.tau_tilde), float(self._inv_sqrt_2pi.item()),
-            int(self._k0),                      # 未使用（API整合用）
-            int(self.picard_iter), float(self.picard_tol)
-        )
-        # 境界セルは触らない方針なので、最後に前状態で固定しておく
+        """Picard は Python ループ、モーメント/境界Maxwell/行列構成/解法/書き戻しは CUDA 実装。"""
+        if self._implicit_cuda is None:
+            raise RuntimeError("implicit_fused backend is not loaded. Set implicit_solver='backend'.")
+
+        # 初期候補（前ステップの解）
+        self._fz.copy_(self.f)
+
+        max_res = float('inf')
+        it = 0
+        swapped_last = False  # 直近イテレーションで swap したかどうか
+
+        for z in range(self.picard_iter):
+            # 1) (n,u,T) を fz から計算
+            self._implicit_cuda.moments(
+                self._fz, self.v, float(self.dv),
+                self._n, self._u, self._T
+            )
+
+            # 2) 境界の Maxwell（RHS 寄与のみ。セル値は触らない）
+            self._implicit_cuda.boundary_maxwell(
+                self.v, float(self._inv_sqrt_2pi.item()),
+                float(self.n_left),  float(self.u_left),  float(self.T_left),
+                float(self.n_right), float(self.u_right), float(self.T_right),
+                self._fL, self._fR
+            )
+
+            # 3) 内部セルの三重対角行列と RHS を構成
+            self._implicit_cuda.build_system(
+                self._fz, self.v, self._n, self._u, self._T,
+                float(self.dt), float(self.dx), float(self.tau_tilde),
+                float(self._inv_sqrt_2pi.item()),
+                self._fL, self._fR,
+                self._dl, self._dd, self._du, self._B
+            )
+
+            # 4) cuSPARSE batched gtsv で一括解法（B に解が上書き）
+            self._implicit_cuda.gtsv_solve_inplace(
+                self._dl, self._dd, self._du, self._B,
+                int(self.nx), int(self.nv)
+            )
+
+            # 5) 内部セルへ書き戻し＋内部セルのみの残差（L∞）を取得
+            res = self._implicit_cuda.writeback_and_residual(
+                self._fz, self._fn_tmp, self._B,
+                int(self.nx), int(self.nv)
+            )
+            max_res = float(res)
+            it = z + 1
+
+            # 収束判定（交換は「非収束」のときのみ実施）
+            if max_res < self.picard_tol:
+                swapped_last = False
+                break
+
+            # 次イテレーションへ：最新候補を _fz にするために入れ替え
+            self._fz, self._fn_tmp = self._fn_tmp, self._fz
+            swapped_last = True
+
+        # 直近のイテレーションで swap したかどうかで、最新候補の場所が異なる点に注意
+        latest = self._fz if swapped_last else self._fn_tmp
+
+        # 出力へ反映（境界は触らない方針なので、最後に前状態で固定）
+        self.f_new.copy_(latest)
         self.f_new[0, :].copy_(self.f[0, :])
         self.f_new[-1, :].copy_(self.f[-1, :])
-        return int(iters), float(residual)
+
+        return it, max_res
+
 
