@@ -187,35 +187,27 @@ class BGK1D:
             traceback.print_exc()
             print('--- fused CUDA backend loaded ---')
 
-        # ---- implicit picard (single cooperative kernel) ----
-        self._imp_picard = None
+        # --- compile CUDA imp_picard (single cooperative kernel) ---
         if self.solver == "implicit" and self.implicit_solver == "imp_picard":
             print("--- compile CUDA imp_picard (single cooperative kernel) ---")
             from torch.utils.cpp_extension import load
             import traceback, os, sysconfig
             from pathlib import Path
-            os.makedirs('build', exist_ok=True)
             src_dir = Path(__file__).resolve().parent / "backends" / "imp_picard"
-
-            # cooperative launch は -rdc 不要。cudadevrt も不要。
+            os.makedirs('build', exist_ok=True)
             os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.6")
-
             self._imp_picard = load(
                 name='imp_picard',
                 sources=[str(src_dir/'imp_picard_binding.cpp'),
                          str(src_dir/'imp_picard_kernels.cu')],
                 extra_cflags=['-O3'],
-                extra_cuda_cflags=['-O3'],          # ← '-rdc=true' を削除
+                extra_cuda_cflags=['-O3'],
                 extra_include_paths=[sysconfig.get_paths()['include']],
-                extra_ldflags=[],                   # ← '-lcudadevrt' を削除
+                extra_ldflags=[],
                 build_directory='build',
                 verbose=True
             )
             traceback.print_exc()
-
-
-
-
 
         # 初期化完了通知
         print(f"initiaze complete:")
@@ -1081,19 +1073,18 @@ class BGK1D:
 
         return (z + 1), residual_val
 
-    # ---- new: single-kernel Picard backend ----
+    # 陰解法（imp_picard 単一カーネル版）
     def _implicit_update_cuda_picard(self):
         if self._imp_picard is None:
             raise RuntimeError("imp_picard backend is not loaded. Set implicit_solver='imp_picard'.")
-
         iters, residual = self._imp_picard.picard_step(
             self.f, self.f_new, self.v,
             float(self.dv), float(self.dt), float(self.dx),
             float(self.tau_tilde), float(self._inv_sqrt_2pi.item()),
             int(self.picard_iter), float(self.picard_tol)
         )
-        # 念のため境界を維持
+        # 念のため境界維持
         self.f_new[0, :].copy_(self.f[0, :])
         self.f_new[-1, :].copy_(self.f[-1, :])
-        return int(iters), float(residual)
+        return iters, residual
 

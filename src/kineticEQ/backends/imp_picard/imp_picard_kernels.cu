@@ -1,234 +1,227 @@
-// src/kineticEQ/backends/imp_picard/imp_picard_kernels.cu
+// imp_picard_kernels.cu
 #include <cuda_runtime.h>
 #include <cooperative_groups.h>
-#include <math_constants.h>
-
 namespace cg = cooperative_groups;
 
-// ---- utility: atomic max for double (non-negative domain) -------------------
-__device__ inline void atomicMaxDouble(double* addr, double val) {
-    // assumes val >= 0
-#if __CUDA_ARCH__ >= 600
-    unsigned long long* uaddr = reinterpret_cast<unsigned long long*>(addr);
-    unsigned long long old    = *uaddr, assumed;
-    do {
+extern "C" {
+
+__device__ inline double atomicMaxDouble(double* addr, double val) {
+    unsigned long long* ull = reinterpret_cast<unsigned long long*>(addr);
+    unsigned long long old = *ull, assumed;
+    while (true) {
+        double old_d = __longlong_as_double(old);
+        if (old_d >= val) break;
         assumed = old;
-        double old_val = __longlong_as_double(assumed);
-        if (old_val >= val) break;
-        old = atomicCAS(uaddr, assumed, __double_as_longlong(val));
-    } while (assumed != old);
-#else
-    // Fallback: coarse-grained via atomicCAS on 64-bit
-    unsigned long long* uaddr = reinterpret_cast<unsigned long long*>(addr);
-    unsigned long long old    = *uaddr, assumed;
-    do {
-        assumed = old;
-        double old_val = __longlong_as_double(assumed);
-        if (old_val >= val) break;
-        old = atomicCAS(uaddr, assumed, __double_as_longlong(val));
-    } while (assumed != old);
-#endif
+        old = atomicCAS(ull, assumed, __double_as_longlong(val));
+        if (assumed == old) break;
+    }
+    return __longlong_as_double(old);
 }
 
-// ---- helpers ----------------------------------------------------------------
-__device__ __forceinline__ int gtid() {
-    return blockIdx.x * blockDim.x + threadIdx.x;
-}
-__device__ __forceinline__ int gsize() {
-    return gridDim.x * blockDim.x;
+__device__ inline double maxwell(double n, double u, double T, double vj, double inv_sqrt_2pi){
+    double coeff = (n * inv_sqrt_2pi) / sqrt(T);
+    double t = vj - u;
+    double ex = exp(-(t*t)/(2.0*T));
+    return coeff * ex;
 }
 
-// ---- The cooperative kernel -------------------------------------------------
-// f  : [nx * nv] (previous time step, read-only)
-// fn : [nx * nv] (Picard iterate buffer, read/write; initialized to f inside)
-// v  : [nv]
-// dl,dd,du,B : [nv * (nx-2)] workspaces (in-place Thomas; solution overwrites B)
-// n_arr,u_arr,T_arr,s0_arr,s1_arr,s2_arr : [nx] workspaces for moments
-// res_dev : [1] device scalar (residual L∞ over interior)
-// iters_dev : [1] device int (non-zero when converged)
-extern "C" __global__
-void picard_kernel_double(
-    const double* __restrict__ f,
-    double* __restrict__ fn,
-    const double* __restrict__ v,
+// Thomas in-place (length = n)
+__device__ inline void thomas_inplace(double* dl, double* dd, double* du, double* B, int n){
+    // forward
+    for (int i=1; i<n; ++i){
+        double m = dl[i] / dd[i-1];
+        dd[i]    -= m * du[i-1];
+        B[i]     -= m * B[i-1];
+    }
+    // back
+    B[n-1] /= dd[n-1];
+    for (int i=n-2; i>=0; --i){
+        B[i] = (B[i] - du[i]*B[i+1]) / dd[i];
+    }
+}
+
+__global__ void picard_kernel_double(
+    const double* __restrict__ f, double* __restrict__ fn, const double* __restrict__ v,
     int nx, int nv,
     double dv, double dt, double dx,
     double tau_tilde, double inv_sqrt_2pi,
     int max_iters, double tol,
-    double* __restrict__ dl,
-    double* __restrict__ dd,
-    double* __restrict__ du,
-    double* __restrict__ B,
-    double* __restrict__ n_arr,
-    double* __restrict__ u_arr,
-    double* __restrict__ T_arr,
-    double* __restrict__ s0_arr,
-    double* __restrict__ s1_arr,
-    double* __restrict__ s2_arr,
-    double* __restrict__ res_dev,
-    int*    __restrict__ iters_dev
-){
+    double* __restrict__ dl, double* __restrict__ dd, double* __restrict__ du, double* __restrict__ B,
+    double* __restrict__ n_arr, double* __restrict__ u_arr, double* __restrict__ T_arr,
+    double* __restrict__ s0_arr, double* __restrict__ s1_arr, double* __restrict__ s2_arr,
+    double* __restrict__ res_dev, int* __restrict__ iters_dev)
+{
     cg::grid_group grid = cg::this_grid();
-    const int tid  = gtid();
-    const int nT   = gsize();
-    const int n_inner = (nx > 2) ? (nx - 2) : 0;
+    const int tid   = threadIdx.x + blockIdx.x * blockDim.x;
+    const int tdim  = blockDim.x * gridDim.x;
 
-    // --- initialize fn = f (all cells, all velocities)
-    for (int idx = tid; idx < nx * nv; idx += nT) {
-        fn[idx] = f[idx];
+    const int n_inner = max(nx - 2, 0);
+    if (nx <= 0 || nv <= 0 || n_inner <= 0){
+        if (tid==0){ *res_dev = 0.0; *iters_dev = 0; }
+        return;
     }
-    // boundaries are therefore already equal to f and will remain untouched
-    grid.sync();
 
-    // constants reused
-    const double dt_over_dx = dt / dx;
-    const double eps_n = 1e-300;    // tiny floor to avoid 0-division
-    const double eps_T = 1e-300;
+    // 初期候補: read_ptr=f, write_ptr=fn
+    const double* read_ptr  = f;
+    double*       write_ptr = fn;
 
-    // Picard loop
-    for (int it = 0; it < max_iters; ++it) {
+    if (tid==0){ *res_dev = 0.0; *iters_dev = 0; }
 
-        // clear reductions and residual flag by all threads (grid-stride)
-        for (int i = tid; i < nx; i += nT) {
-            s0_arr[i] = 0.0;
-            s1_arr[i] = 0.0;
-            s2_arr[i] = 0.0;
+    // ===== Picard loop =====
+    for (int it=0; it<max_iters; ++it){
+        // s0,s1,s2 をゼロ化
+        for (int i = tid; i < nx; i += tdim){
+            s0_arr[i] = 0.0; s1_arr[i] = 0.0; s2_arr[i] = 0.0;
         }
-        if (tid == 0) { *res_dev = 0.0; *iters_dev = 0; }
         grid.sync();
 
-        // (1) accumulate moments: s0 = sum_j fn(i,j), s1 = sum_j v_j fn, s2 = sum_j v_j^2 fn
-        for (int j = tid; j < nv; j += nT) {
+        // 瞬時モーメント集計（原始的: 原子加算）
+        for (int j = tid; j < nv; j += tdim){
+            const double vj = v[j];
+            for (int i=0; i<nx; ++i){
+                double fij = read_ptr[i*nv + j];
+                atomicAdd(&s0_arr[i], fij*dv);
+                atomicAdd(&s1_arr[i], fij*dv*vj);
+                atomicAdd(&s2_arr[i], fij*dv*vj*vj);
+            }
+        }
+        grid.sync();
+
+        // n,u,T 作成
+        for (int i = tid; i < nx; i += tdim){
+            double n  = s0_arr[i];
+            double u  = (n>0.0) ? (s1_arr[i]/n) : 0.0;
+            double T  = (n>0.0) ? (s2_arr[i]/n - u*u) : 1.0;
+            if (T < 1e-20) T = 1e-20;
+            n_arr[i] = n; u_arr[i]=u; T_arr[i]=T;
+        }
+        grid.sync();
+
+        // 境界の Maxwell
+        // (固定： write_ptr の 0, nx-1 は前ステップ f を保持)
+        // 右辺境界寄与用に fL,fR を生成（都度）
+        // ここでは配列を持たず、必要な j で都度 maxwell を使う
+
+        // 係数と RHS 構築（j を並列化、各 j で i=1..nx-2 をシリアル）
+        for (int j = tid; j < nv; j += tdim){
             const double vj  = v[j];
-            const double vj2 = vj * vj;
-            const int base_j = j;           // fn[i*nv + j]
-            for (int i = 0; i < nx; ++i) {
-                const double fij = fn[i * nv + base_j];
-#if __CUDA_ARCH__ >= 600
-                atomicAdd(&s0_arr[i], fij);
-                atomicAdd(&s1_arr[i], fij * vj);
-                atomicAdd(&s2_arr[i], fij * vj2);
-#else
-                // (rare) for very old arch, CAS-based add could be implemented
-                // but this codepath is practically unused on modern GPUs
-                atomicAdd(&s0_arr[i], fij);
-                atomicAdd(&s1_arr[i], fij * vj);
-                atomicAdd(&s2_arr[i], fij * vj2);
-#endif
+            const double alpha = (dt/dx) * (vj>0.0 ? vj : 0.0);
+            const double beta  = (dt/dx) * ((-vj)>0.0 ? (-vj) : 0.0);
+
+            double* dlj = &dl[j*n_inner];
+            double* ddj = &dd[j*n_inner];
+            double* duj = &du[j*n_inner];
+            double* Bj  = &B [j*n_inner];
+
+            // 下上対角の端をゼロ
+            if (n_inner >= 1){
+                dlj[0]          = 0.0;
+                duj[n_inner-1]  = 0.0;
+            }
+            // 各行
+            for (int k=0; k<n_inner; ++k){
+                const int i = k + 1; // 物理セル 1..nx-2
+
+                double n = n_arr[i];
+                double u = u_arr[i];
+                double T = T_arr[i];
+                double tau = tau_tilde / (n * sqrt(T));
+
+                // 主対角
+                ddj[k] = 1.0 + alpha + beta + (dt/tau);
+                // 下・上対角（行インデックスずれに注意）
+                if (k>=1)    dlj[k] = -alpha;
+                if (k<=n_inner-2) duj[k] = -beta;
+
+                // RHS: f^k + (dt/τ) fM
+                double fM = maxwell(n, u, T, vj, inv_sqrt_2pi);
+                double rhs = read_ptr[i*nv + j];   // ←時間レベル k の既知 f
+                rhs += (dt/tau) * fM;
+
+                // 境界からの流入
+                if (k==0 && vj>0.0){
+                    // 左境界 i=0 の Maxwell
+                    double nL=n_arr[0], uL=u_arr[0], TL=T_arr[0];
+                    double fL = maxwell(nL,uL,TL,vj,inv_sqrt_2pi);
+                    rhs += (dt/dx) * vj * fL;
+                }
+                if (k==n_inner-1 && vj<0.0){
+                    // 右境界 i=nx-1 の Maxwell
+                    double nR=n_arr[nx-1], uR=u_arr[nx-1], TR=T_arr[nx-1];
+                    double fR = maxwell(nR,uR,TR,vj,inv_sqrt_2pi);
+                    rhs += (dt/dx) * (-vj) * fR;
+                }
+                Bj[k] = rhs;
             }
         }
         grid.sync();
 
-        // (2) finalize moments and per-cell (n,u,T)
-        for (int i = tid; i < nx; i += nT) {
-            const double n  = s0_arr[i] * dv;
-            const double s1 = s1_arr[i] * dv;
-            const double s2 = s2_arr[i] * dv;
-
-            const double n_safe = (n > eps_n) ? n : eps_n;
-            const double u  = s1 / n_safe;
-            double T  = s2 / n_safe - u * u;
-            if (T < eps_T) T = eps_T;
-
-            n_arr[i] = n_safe;
-            u_arr[i] = u;
-            T_arr[i] = T;
+        // 各 j を1スレッドでトーマス解法（競合なし）
+        for (int j = tid; j < nv; j += tdim){
+            thomas_inplace(&dl[j*n_inner], &dd[j*n_inner], &du[j*n_inner], &B[j*n_inner], n_inner);
         }
         grid.sync();
 
-        // (3) build tri-diagonal per-velocity (interior i=1..nx-2) and solve with Thomas in-place
+        // 書き戻し (内部セルのみ)
+        for (int j = tid; j < nv; j += tdim){
+            for (int k=0; k<n_inner; ++k){
+                const int i = k + 1;
+                write_ptr[i*nv + j] = B[j*n_inner + k];
+            }
+        }
+        grid.sync();
+
+        // 境界はそのまま（read_ptr == f か fn のいずれでも同じセル値を維持）
+        for (int j = tid; j < nv; j += tdim){
+            write_ptr[0*nv + j]      = read_ptr[0*nv + j];
+            write_ptr[(nx-1)*nv + j] = read_ptr[(nx-1)*nv + j];
+        }
+        grid.sync();
+
+        // 残差 L∞
+        // まずブロック内で最大を取り、global に atomicMaxDouble
+        __shared__ double smax[256];
         double local_max = 0.0;
-
-        for (int j = tid; j < nv; j += nT) {
-            if (n_inner <= 0) {
-                // nothing to solve; residual stays 0 (only boundaries exist)
-                continue;
-            }
-
-            const double vj   = v[j];
-            const double alpha = dt_over_dx * (vj > 0.0 ? vj : 0.0);
-            const double beta  = dt_over_dx * (vj < 0.0 ? -vj : 0.0);
-
-            // row pointers for this velocity
-            double* dl_row = dl + j * n_inner;
-            double* dd_row = dd + j * n_inner;
-            double* du_row = du + j * n_inner;
-            double* B_row  = B  + j * n_inner;
-
-            // fill coefficients and RHS
-            for (int il = 0; il < n_inner; ++il) {
-                const int i = il + 1; // interior cell index
-
-                // dt/tau_i = dt * n * sqrt(T) / tau_tilde
-                const double n_i = n_arr[i];
-                const double T_i = T_arr[i];
-                const double u_i = u_arr[i];
-                const double dt_over_tau = dt * n_i * sqrt(T_i) / tau_tilde;
-
-                // main diag and off-diags (signs follow the discrete eq):
-                // -beta f_{i+1} + (1+alpha+beta+dt/tau) f_i - alpha f_{i-1} = rhs
-                dd_row[il] = 1.0 + alpha + beta + dt_over_tau;
-                dl_row[il] = -alpha;   // lower diag (i-1)
-                du_row[il] = -beta;    // upper diag (i+1)
-
-                // RHS = f^k_{i,j} + (dt/tau) * fM_{i,j}
-                const double coeffM = n_i * inv_sqrt_2pi / sqrt(T_i);
-                const double diff   = vj - u_i;
-                const double expo   = -0.5 * (diff * diff) / T_i;
-                double fM = coeffM * exp(expo);
-
-                double rhs = f[i * nv + j] + dt_over_tau * fM;
-
-                // boundary contributions (Dirichlet: fixed boundary cells from f)
-                if (il == 0) {
-                    // i = 1 uses f_{0,j}
-                    rhs += alpha * f[0 * nv + j];
-                }
-                if (il == n_inner - 1) {
-                    // i = nx-2 uses f_{nx-1,j}
-                    rhs += beta * f[(nx - 1) * nv + j];
-                }
-                B_row[il] = rhs;
-            }
-
-            // Thomas forward elimination (in-place)
-            for (int il = 1; il < n_inner; ++il) {
-                const double w = dl_row[il] / dd_row[il - 1];
-                dd_row[il]    -= w * du_row[il - 1];
-                B_row[il]     -= w * B_row[il - 1];
-            }
-
-            // Thomas backward substitution (solution overwrites B_row)
-            B_row[n_inner - 1] = B_row[n_inner - 1] / dd_row[n_inner - 1];
-            for (int il = n_inner - 2; il >= 0; --il) {
-                B_row[il] = (B_row[il] - du_row[il] * B_row[il + 1]) / dd_row[il];
-            }
-
-            // write back to fn (interior only) & compute local residual
-            for (int il = 0; il < n_inner; ++il) {
-                const int i = il + 1;
-                const double newv = B_row[il];
-                const double oldv = fn[i * nv + j];
-                const double diff = fabs(newv - oldv);
-                if (diff > local_max) local_max = diff;
-                fn[i * nv + j] = newv;
-            }
+        for (int idx = tid; idx < nx*nv; idx += tdim){
+            double diff = fabs(write_ptr[idx] - read_ptr[idx]);
+            if (diff > local_max) local_max = diff;
         }
-
-        // reduce residual to global
-        atomicMaxDouble(res_dev, local_max);
+        int lane = threadIdx.x;
+        smax[lane] = local_max;
+        __syncthreads();
+        // block reduce
+        for (int off = blockDim.x/2; off>0; off/=2){
+            if (lane < off) smax[lane] = fmax(smax[lane], smax[lane+off]);
+            __syncthreads();
+        }
+        if (lane==0) atomicMaxDouble(res_dev, smax[0]);
         grid.sync();
 
-        // (4) convergence check (single writer)
-        if (tid == 0) {
-            if (*res_dev < tol) {
-                *iters_dev = it + 1;
-            }
+        if (tid==0){
+            *iters_dev = it+1;
         }
         grid.sync();
 
-        if (*iters_dev != 0) break;
-    }
+        // 収束判定（全ブロック同一分岐）
+        bool converged = false;
+        if (tid==0) converged = (*res_dev <= tol);
+        // 全グリッドへブロードキャスト相当
+        converged = cg::sync(grid, converged);
 
-    // boundaries must remain as input f (already true because we never overwrote them)
+        if (converged) break;
+
+        // 次反復へ: ポインタスワップ
+        if (tid==0){
+            *res_dev = 0.0; // 次回に向けてクリア
+        }
+        grid.sync();
+
+        const double* tmp_r = read_ptr;
+        read_ptr  = write_ptr;
+        write_ptr = (double*)tmp_r;
+
+        grid.sync();
+    } // picard loop
 }
+
+} // extern "C"
