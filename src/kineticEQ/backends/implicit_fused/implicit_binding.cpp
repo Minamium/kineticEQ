@@ -1,13 +1,15 @@
-// implicit_binding.cpp
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <cuda_runtime.h>
 #include <cusparse.h>
+#include <cuda_runtime.h>
+
 #include <tuple>
-#include <stdexcept>
-#include <string>
+#include <vector>
+#include <cmath>
+#include <cassert>
 
 namespace implicit_fused {
+// ---- kernels (defined in implicit_kernels.cu) ----
 void launch_moments_double(
     const double* f, const double* v,
     int nx, int nv, double dv,
@@ -15,194 +17,163 @@ void launch_moments_double(
     cudaStream_t stream);
 
 void launch_build_tridiag_rhs_double(
-    const double* f_prev, const double* v,
+    const double* f, const double* v,
     const double* n, const double* u, const double* T,
+    const double* fL, const double* fR,
     int nx, int nv, double dt, double dx, double tau_tilde, double inv_sqrt_2pi,
-    double* dl, double* dd, double* du, double* B,
+    double* dl, double* d, double* du, double* B,
     cudaStream_t stream);
 
-void launch_writeback_and_residual_double(
-    const double* f_iter, const double* B,
-    int nx, int nv,
-    double* fn, double* res_per_v,
+void launch_boundary_from_current_f_double(
+    const double* f, int nx, int nv,
+    double* fL, double* fR,
     cudaStream_t stream);
-} // namespace implicit_fused
 
-// ====================== cuSPARSE helpers ======================
-#define CUSPARSE_CHECK(call) \
-    do { \
-        cusparseStatus_t _status = (call); \
-        if (_status != CUSPARSE_STATUS_SUCCESS) { \
-            throw std::runtime_error(std::string("cuSPARSE error: ") + std::to_string(_status) + \
-                                     " at " __FILE__ ":" + std::to_string(__LINE__)); \
-        } \
-    } while (0)
+void launch_residual_interior_double(
+    const double* f_old, const double* f_new,
+    int nx, int nv, double* res_per_v,
+    cudaStream_t stream);
 
-static void gtsv_strided_batch_double(
-    cusparseHandle_t handle,
-    int n,                  // system size (n_inner)
-    int batchCount,         // nv
-    double* dl,             // (batchCount, n)
-    double* d,              // (batchCount, n)
-    double* du,             // (batchCount, n)
-    double* B               // (batchCount, n), in/out
-){
-    // API: cusparseDgtsv2StridedBatch requires a temporary buffer
-    size_t pBufferSizeInBytes = 0;
-    CUSPARSE_CHECK(cusparseDgtsv2StridedBatch_bufferSizeExt(
-        handle, n, dl, d, du, B, n, batchCount, &pBufferSizeInBytes));
-
-    auto options = at::TensorOptions().dtype(at::kByte).device(at::kCUDA);
-    at::Tensor buffer = at::empty({static_cast<long long>(pBufferSizeInBytes)}, options);
-    void* pBuffer = buffer.data_ptr();
-
-    CUSPARSE_CHECK(cusparseDgtsv2StridedBatch(
-        handle, n, dl, d, du, B, n, batchCount, pBuffer));
+// ---- helpers ----
+static inline void cudaCheck(cudaError_t e, const char* msg){
+    TORCH_CHECK(e == cudaSuccess, msg, " : ", cudaGetErrorString(e));
+}
+static inline void cusparseCheck(cusparseStatus_t s, const char* msg){
+    TORCH_CHECK(s == CUSPARSE_STATUS_SUCCESS, "cuSPARSE error: ", (int)s, " : ", msg);
 }
 
-// ====================== main entry ======================
-std::tuple<int,double> implicit_step(
-    at::Tensor f,             // (nx,nv), double, cuda, contiguous
-    at::Tensor fn,            // (nx,nv), double, cuda, contiguous (出力)
-    at::Tensor v,             // (nv),    double, cuda, contiguous
+// Build & solve one implicit step (Picard) entirely on GPU (boundaries untouched)
+std::pair<int,double> implicit_step(
+    torch::Tensor f,      // (nx, nv) double, cuda, contiguous
+    torch::Tensor fn,     // (nx, nv) double, cuda, contiguous (output)
+    torch::Tensor v,      // (nv)     double, cuda, contiguous
     double dv, double dt, double dx,
     double tau_tilde, double inv_sqrt_2pi,
-    int /*k0_unused*/,
+    int /*k0_unused*/,    // for API compatibility only
     int picard_iter, double picard_tol
-    // 境界は「触らない」仕様のため、ここでは追加の境界パラメータは受け取らない
 ){
     TORCH_CHECK(f.is_cuda() && fn.is_cuda() && v.is_cuda(), "tensors must be CUDA");
-    TORCH_CHECK(f.dtype() == at::kDouble && fn.dtype() == at::kDouble && v.dtype() == at::kDouble,
+    TORCH_CHECK(f.dtype() == torch::kFloat64 && fn.dtype() == torch::kFloat64 && v.dtype() == torch::kFloat64,
                 "dtype must be float64");
     TORCH_CHECK(f.is_contiguous() && fn.is_contiguous() && v.is_contiguous(),
                 "tensors must be contiguous");
-    TORCH_CHECK(f.dim()==2, "f must be (nx,nv)");
-    TORCH_CHECK(fn.sizes()==f.sizes(), "fn must have same shape as f");
-    TORCH_CHECK(v.dim()==1 && v.size(0)==f.size(1), "v must be (nv,)");
 
-    const int64_t nx64 = f.size(0), nv64 = f.size(1);
-    TORCH_CHECK(nx64 >= 3, "nx must be >= 3 (need interior cells)");
-    const int nx = static_cast<int>(nx64);
-    const int nv = static_cast<int>(nv64);
-    const int n_inner = nx - 2;
+    const int nx = f.size(0);
+    const int nv = f.size(1);
+    TORCH_CHECK(v.size(0) == nv, "v.size(0) must equal nv");
+    TORCH_CHECK(nx >= 3, "nx must be >= 3 for interior update");
 
-    auto optsD = f.options();
-    auto opts1 = f.options().dtype(at::kDouble);
-
-    // work arrays
-    at::Tensor n   = at::empty({nx},     opts1);
-    at::Tensor u   = at::empty({nx},     opts1);
-    at::Tensor T   = at::empty({nx},     opts1);
-    at::Tensor dl  = at::empty({nv, n_inner}, opts1); // 下対角
-    at::Tensor dd  = at::empty({nv, n_inner}, opts1); // 主対角
-    at::Tensor du  = at::empty({nv, n_inner}, opts1); // 上対角
-    at::Tensor B   = at::empty({nv, n_inner}, opts1); // RHS / 解
-    at::Tensor res = at::empty({nv}, opts1);          // 列毎最大残差
-
-    // 交互バッファ（境界は常に f をコピーしておく）
-    at::Tensor work = at::empty_like(f);
-
-    // 境界を含めて、両バッファを f に初期化（内部更新のみを行うので境界は保持される）
-    fn.copy_(f);
-    work.copy_(f);
-
-    // CUDA stream & cuSPARSE handle
+    const int m = nx - 2;         // system size per velocity
+    const int batch = nv;         // number of tri-diagonal systems
     auto stream = at::cuda::getCurrentCUDAStream();
-    cusparseHandle_t handle = nullptr;
-    CUSPARSE_CHECK(cusparseCreate(&handle));
-    CUSPARSE_CHECK(cusparseSetStream(handle, stream.stream()));
 
-    // device pointers
-    const double* f_prev = f.data_ptr<double>();   // RHS 用に固定（タイムレベル n）
+    // Work buffers
+    auto opts1 = torch::TensorOptions().dtype(torch::kFloat64).device(f.device());
+    auto n  = torch::empty({nx}, opts1);
+    auto u  = torch::empty({nx}, opts1);
+    auto Tg = torch::empty({nx}, opts1);
+
+    // boundary values from current f (do not construct Maxwell here)
+    auto fL = torch::empty({nv}, opts1);
+    auto fR = torch::empty({nv}, opts1);
+
+    // tri-diagonal bands and RHS for all velocities: (nv, m) row-major => stride = m
+    auto dl = torch::empty({nv, m}, opts1);
+    auto dd = torch::empty({nv, m}, opts1);
+    auto du = torch::empty({nv, m}, opts1);
+    auto  B = torch::empty({nv, m}, opts1);
+
+    // per-velocity residual (interior only)
+    auto res_v = torch::empty({nv}, opts1);
+    double residual = 0.0;
+    int iters = 0;
+
+    // constant device pointers
+    const double* f_ptr  = f.data_ptr<double>();
     const double* v_ptr  = v.data_ptr<double>();
 
-    double* fn_ptr   = fn.data_ptr<double>();
-    double* work_ptr = work.data_ptr<double>();
-
-    // Picard 反復バッファ: p_iter = 現在反復の参照配列, p_out = 次の解を書き込む先
-    const double* p_iter = f_prev; // 初回は f を基準（境界一定）
-    double*       p_out  = fn_ptr; // 初回は fn に書く
-
-    int iters_done = 0;
-    double final_residual = 0.0;
-
-    // 反復ループ
-    for (int it = 0; it < picard_iter; ++it) {
-        // 1) moments from p_iter
-        implicit_fused::launch_moments_double(
-            p_iter, v_ptr, nx, nv, dv,
-            n.data_ptr<double>(), u.data_ptr<double>(), T.data_ptr<double>(),
+    // kernels use stream
+    // Picard iteration
+    for (int z = 0; z < picard_iter; ++z) {
+        // 1) moments from current f
+        launch_moments_double(
+            f_ptr, v_ptr, nx, nv, dv,
+            n.data_ptr<double>(), u.data_ptr<double>(), Tg.data_ptr<double>(),
             stream.stream());
 
-        // 2) build tri-diagonal and RHS from f_prev (境界流入も f_prev の境界を使用)
-        implicit_fused::launch_build_tridiag_rhs_double(
-            f_prev, v_ptr,
-            n.data_ptr<double>(), u.data_ptr<double>(), T.data_ptr<double>(),
+        // 2) boundary vectors from current f (not Maxwell)
+        launch_boundary_from_current_f_double(
+            f_ptr, nx, nv, fL.data_ptr<double>(), fR.data_ptr<double>(),
+            stream.stream());
+
+        // 3) build tri-diagonal and RHS for interior cells only
+        launch_build_tridiag_rhs_double(
+            f_ptr, v_ptr,
+            n.data_ptr<double>(), u.data_ptr<double>(), Tg.data_ptr<double>(),
+            fL.data_ptr<double>(), fR.data_ptr<double>(),
             nx, nv, dt, dx, tau_tilde, inv_sqrt_2pi,
             dl.data_ptr<double>(), dd.data_ptr<double>(), du.data_ptr<double>(), B.data_ptr<double>(),
             stream.stream());
 
-        // 3) batched gtsv solve (in-place on B)
-        gtsv_strided_batch_double(
-            handle, n_inner, nv,
-            dl.data_ptr<double>(),
-            dd.data_ptr<double>(),
-            du.data_ptr<double>(),
-            B.data_ptr<double>()); // overwritten with solution
+        // 4) cuSPARSE batched gtsv2 (in-place on B)
+        {
+            cusparseHandle_t handle = at::cuda::getCurrentCUDASparseHandle();
 
-        // 4) writeback interior & residual (境界は一切触らない)
-        implicit_fused::launch_writeback_and_residual_double(
-            p_iter, B.data_ptr<double>(), nx, nv, p_out, res.data_ptr<double>(),
+            size_t ws_bytes = 0;
+            cusparseCheck(
+                cusparseDgtsv2StridedBatch_bufferSizeExt(
+                    handle, m,
+                    dl.data_ptr<double>(), dd.data_ptr<double>(), du.data_ptr<double>(),
+                    B.data_ptr<double>(), batch, /*ldb=strideB*/ m, &ws_bytes),
+                "bufferSizeExt");
+
+            // at least 1 byte
+            if (ws_bytes == 0) ws_bytes = 4;
+            auto workspace = torch::empty({static_cast<long long>(ws_bytes)}, torch::TensorOptions()
+                                          .dtype(torch::kUInt8).device(f.device()));
+
+            cusparseCheck(
+                cusparseDgtsv2StridedBatch(
+                    handle, m,
+                    dl.data_ptr<double>(), dd.data_ptr<double>(), du.data_ptr<double>(),
+                    B.data_ptr<double>(), batch, /*ldb=strideB*/ m,
+                    workspace.data_ptr<uint8_t>()),
+                "gtsv2StridedBatch");
+        }
+
+        // 5) write back interior only to fn (boundaries untouched)
+        {
+            // copy old f to fn first, then overwrite interior with solution
+            fn.copy_(f);
+            // interior view
+            auto fn_in = fn.index({torch::indexing::Slice(1, nx-1), torch::indexing::Slice()});
+            // B is (nv,m) row-major => need transpose to (m,nv) to match (i,j)
+            fn_in.copy_(B.transpose(0,1));
+        }
+
+        // 6) residual on interior only, and swap f <- fn for next Picard iter
+        launch_residual_interior_double(
+            f.data_ptr<double>(), fn.data_ptr<double>(),
+            nx, nv, res_v.data_ptr<double>(),
             stream.stream());
+        // reduce on CPU (one scalar per v)
+        residual = res_v.max().item<double>();
+        iters = z + 1;
 
-        // 5) 残差（列最大のさらに最大）
-        //    res: (nv,) → amax
-        auto max_res = std::get<0>(res.max(/*dim=*/0));
-        final_residual = max_res.item<double>();
-        iters_done     = it + 1;
+        // next iterate: f <- fn
+        f.copy_(fn);
 
-        // 6) 収束判定
-        if (final_residual < picard_tol) {
-            // 結果は p_out 内部セルに入っている。境界は既に f_prev と同じ（初期化済み）。
-            // もし p_out != fn_ptr なら最終結果を fn にコピー（境界も含め全体コピーでOK）
-            if (p_out != fn_ptr) {
-                fn.copy_(work); // p_out==work の場合
-            }
-            break;
-        }
-
-        // 7) 交互（次反復へ）
-        //    p_iter <- p_out, p_out <- もう一方
-        if (p_out == fn_ptr) {
-            p_iter = fn_ptr;
-            p_out  = work_ptr;
-            // 境界を f_prev にしておく（明示的に安全側）
-            // 内部は writeback が上書き、境界は保持。
-            cudaMemcpyAsync(work_ptr, f_prev, sizeof(double)*nx*nv,
-                            cudaMemcpyDeviceToDevice, stream.stream());
-        } else {
-            p_iter = work_ptr;
-            p_out  = fn_ptr;
-            cudaMemcpyAsync(fn_ptr, f_prev, sizeof(double)*nx*nv,
-                            cudaMemcpyDeviceToDevice, stream.stream());
-        }
+        if (residual < picard_tol) break;
     }
 
-    // 反復を使い切って未収束の場合、最終反復結果が p_out にあるとは限らないので整える
-    if (iters_done >= picard_iter && final_residual >= picard_tol) {
-        if (p_iter != fn_ptr) {
-            fn.copy_(work); // p_iter==work の場合の保険
-        }
-    }
+    // 手元のポリシー通り、このバックエンドは境界を触らない。
+    // Python 側で最後に  f_new[0,:]=f[0,:], f_new[-1,:]=f[-1,:] を実行してください。
 
-    // cuSPARSE 終了
-    CUSPARSE_CHECK(cusparseDestroy(handle));
-
-    // 戻り値: (反復回数, 残差)
-    return std::make_tuple(iters_done, final_residual);
+    return {iters, residual};
 }
 
+} // namespace implicit_fused
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("implicit_step", &implicit_step,
-          "Fused implicit BGK step (double, CUDA, boundaries untouched; RHS uses f-prev boundaries)");
+    m.def("implicit_step", &implicit_fused::implicit_step, "Implicit BGK step (cuSPARSE GTSV2, boundaries untouched)");
 }

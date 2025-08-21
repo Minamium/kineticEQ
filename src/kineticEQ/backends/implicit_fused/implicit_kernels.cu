@@ -1,36 +1,34 @@
-// implicit_kernels.cu
 #include <cuda_runtime.h>
 #include <cmath>
 #include <algorithm>
 
 namespace implicit_fused {
 
-// ====================== helpers ======================
+// clamp positive
 template <typename T>
 __device__ __forceinline__ T clamp_pos(T x, T eps) {
     return (x > eps) ? x : eps;
 }
 
+// Maxwellian for one (n,u,T) and one v
 template <typename T>
 __device__ __forceinline__ T maxwell_1v(T n, T u, T Tgas, T vj, T inv_sqrt_2pi) {
-    // fM = n / sqrt(2π T) * exp(-(v-u)^2/(2T))
-    T Tpos = clamp_pos(Tgas, T(1e-300));
-    T inv_sqrtT = rsqrt(Tpos);
+    T inv_sqrtT = rsqrt(Tgas);
     T coeff = n * inv_sqrt_2pi * inv_sqrtT;
     T diff  = vj - u;
-    T expo  = -T(0.5) * (diff*diff) / Tpos;
+    T expo  = -T(0.5) * (diff*diff) / Tgas;
     return coeff * exp(expo);
 }
 
-// ====================== moments: one block per row (x) ======================
+/* ---------------- moments: 1 block per i ---------------- */
 template <typename T>
 __global__ void moments_kernel(
-    const T* __restrict__ f,  // (nx*nv)
-    const T* __restrict__ v,  // (nv)
+    const T* __restrict__ f,
+    const T* __restrict__ v,
     int nx, int nv, T dv,
-    T* __restrict__ n_out,    // (nx)
-    T* __restrict__ u_out,    // (nx)
-    T* __restrict__ T_out)    // (nx)
+    T* __restrict__ n_out,
+    T* __restrict__ u_out,
+    T* __restrict__ T_out)
 {
     const int i = blockIdx.x;
     if (i >= nx) return;
@@ -63,11 +61,11 @@ __global__ void moments_kernel(
     }
 
     if (threadIdx.x == 0) {
-        T n   = s0[0] * dv;
-        T s1d = s1[0] * dv;
-        T s2d = s2[0] * dv;
-        T u   = s1d / n;
-        T Tg  = s2d / n - u*u;
+        T n  = s0[0] * dv;
+        T s1d= s1[0] * dv;
+        T s2d= s2[0] * dv;
+        T u  = s1d / n;
+        T Tg = s2d / n - u*u;
         if (!(Tg > T(0))) Tg = T(1e-300);
         n_out[i] = n;
         u_out[i] = u;
@@ -75,100 +73,6 @@ __global__ void moments_kernel(
     }
 }
 
-// ====================== build tri-diagonal & RHS: one block per velocity ======================
-// NOTE: RHS uses f_prev (前タイムステップ). n,u,T は現在ピカード反復の f_iter から計算して与える。
-// 境界流入は f_prev の境界値を使用（Maxwell BC は使わない）。
-template <typename T>
-__global__ void build_tridiag_rhs_kernel(
-    const T* __restrict__ f_prev, // (nx*nv) ← RHS の f^n
-    const T* __restrict__ v,      // (nv)
-    const T* __restrict__ n,      // (nx)
-    const T* __restrict__ u,      // (nx)
-    const T* __restrict__ Tg,     // (nx)
-    int nx, int nv, T dt, T dx, T tau_tilde, T inv_sqrt_2pi,
-    T* __restrict__ dl,           // (nv, n_inner)
-    T* __restrict__ dd,           // (nv, n_inner)
-    T* __restrict__ du,           // (nv, n_inner)
-    T* __restrict__ B)            // (nv, n_inner) ← cuSOLVER 解で上書きされる
-{
-    const int j = blockIdx.x;
-    if (j >= nv) return;
-
-    const int n_inner = nx - 2;
-    const T vj = v[j];
-    const T ap = -dt/dx * fmax(vj,  T(0));  // 下対角（<=0）
-    const T cp = -dt/dx * fmax(-vj, T(0));  // 上対角（<=0）
-    const T minus_a = -ap; // dt/dx * max(v,0)
-    const T minus_c = -cp; // dt/dx * max(-v,0)
-
-    T* dl_j = dl + j * n_inner;
-    T* dd_j = dd + j * n_inner;
-    T* du_j = du + j * n_inner;
-    T*  B_j =  B + j * n_inner;
-
-    // 入力 f の境界値（RHS の境界流入に使用）
-    const T fL_j = f_prev[0 * nv + j];
-    const T fR_j = f_prev[(nx-1) * nv + j];
-
-    for (int k = threadIdx.x; k < n_inner; k += blockDim.x) {
-        const int i = k + 1; // interior cell index [1..nx-2]
-
-        // inv_tau = (n*sqrt(T))/tau_tilde
-        T sqrtT = sqrt(Tg[i]);
-        T inv_tau = (n[i] * sqrtT) / tau_tilde;
-
-        // 三重対角
-        dd_j[k] = T(1) + minus_a + minus_c + dt * inv_tau;
-        dl_j[k] = (k==0)           ? T(0) : ap;
-        du_j[k] = (k==n_inner-1)   ? T(0) : cp;
-
-        // Maxwellian at interior cell (i)
-        T fM = maxwell_1v<T>(n[i], u[i], Tg[i], vj, inv_sqrt_2pi);
-
-        // RHS = f_prev(i,j) + dt*inv_tau*fM + boundary advection terms
-        T fij_prev = f_prev[i*nv + j];
-        T rhs = fij_prev + dt * inv_tau * fM;
-
-        if (k == 0)         rhs += (dt/dx) * fmax(vj,  T(0)) * fL_j;
-        if (k == n_inner-1) rhs += (dt/dx) * fmax(-vj, T(0)) * fR_j;
-
-        B_j[k] = rhs;
-    }
-}
-
-// ====================== writeback interior & residual: one block per velocity ======================
-// B には cuSOLVER で解が上書き済みとする（形状 (nv, n_inner)）。
-// 内部セルだけ fn に書き戻し、残差は max_{i=1..nx-2} |fn(i,j) - f_iter(i,j)| を列毎に計算。
-// 境界セル fn[0,:], fn[-1,:] は一切書かない（Python側で最後に上書きする想定）。
-template <typename T>
-__global__ void writeback_and_residual_kernel(
-    const T* __restrict__ f_iter, // (nx*nv) ← ピカード直前反復 f^{(k)}
-    const T* __restrict__ B,      // (nv, n_inner) 解
-    int nx, int nv,
-    T* __restrict__ fn,           // (nx*nv) 出力（内部のみ書く）
-    T* __restrict__ res_per_v)    // (nv) 列毎の最大残差
-{
-    const int j = blockIdx.x;
-    if (j >= nv) return;
-    const int n_inner = nx - 2;
-
-    T local_max = T(0);
-
-    if (threadIdx.x == 0) {
-        const T* Bj = B + j * n_inner;
-        for (int k = 0; k < n_inner; ++k) {
-            const int i = k + 1;
-            const T newv = Bj[k];
-            const T oldv = f_iter[i*nv + j];
-            fn[i*nv + j] = newv;               // 内部のみ書き戻す
-            T diff = fabs(newv - oldv);
-            if (diff > local_max) local_max = diff;
-        }
-        res_per_v[j] = local_max;
-    }
-}
-
-// ====================== launchers (double) ======================
 void launch_moments_double(
     const double* f, const double* v,
     int nx, int nv, double dv,
@@ -178,35 +82,124 @@ void launch_moments_double(
     const int block = 256;
     dim3 grid(nx);
     size_t shmem = sizeof(double) * block * 3;
-    moments_kernel<double><<<grid, block, shmem, stream>>>(
-        f, v, nx, nv, dv, n, u, T);
+    moments_kernel<double><<<grid, block, shmem, stream>>>(f, v, nx, nv, dv, n, u, T);
+}
+
+/* ------------- boundary from current f (no touch) ------------- */
+template <typename T>
+__global__ void boundary_from_f_kernel(
+    const T* __restrict__ f, int nx, int nv,
+    T* __restrict__ fL, T* __restrict__ fR)
+{
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= nv) return;
+    fL[j] = f[0*nv + j];
+    fR[j] = f[(nx-1)*nv + j];
+}
+
+void launch_boundary_from_current_f_double(
+    const double* f, int nx, int nv,
+    double* fL, double* fR,
+    cudaStream_t stream)
+{
+    int block = 256;
+    int grid = (nv + block - 1) / block;
+    boundary_from_f_kernel<double><<<grid, block, 0, stream>>>(f, nx, nv, fL, fR);
+}
+
+/* ------------- build tri-diagonal & RHS for interior ------------- */
+template <typename T>
+__global__ void build_tridiag_rhs_kernel(
+    const T* __restrict__ f,
+    const T* __restrict__ v,
+    const T* __restrict__ n,
+    const T* __restrict__ u,
+    const T* __restrict__ Tg,
+    const T* __restrict__ fL,
+    const T* __restrict__ fR,
+    int nx, int nv, T dt, T dx, T tau_tilde, T inv_sqrt_2pi,
+    T* __restrict__ dl,  // (nv, m)
+    T* __restrict__ dd,  // (nv, m)
+    T* __restrict__ du,  // (nv, m)
+    T* __restrict__  B)  // (nv, m)
+{
+    const int j = blockIdx.x;
+    if (j >= nv) return;
+    const int m = nx - 2;
+    const T vj = v[j];
+    const T ap = -dt/dx * fmax(vj,  T(0));   // <=0
+    const T cp = -dt/dx * fmax(-vj, T(0));   // <=0
+    const T ma = -ap; // >=0
+    const T mc = -cp; // >=0
+
+    T* dl_j = dl + j * m;
+    T* dd_j = dd + j * m;
+    T* du_j = du + j * m;
+    T*  B_j =  B + j * m;
+
+    const T fL_j = fL[j];
+    const T fR_j = fR[j];
+
+    for (int k = threadIdx.x; k < m; k += blockDim.x) {
+        const int i = k + 1; // interior row (1..nx-2)
+
+        const T Tg_i = clamp_pos(Tg[i], T(1e-300));
+        const T inv_tau = (n[i] * sqrt(Tg_i)) / tau_tilde;
+
+        dd_j[k] = T(1) + ma + mc + dt * inv_tau;
+        dl_j[k] = (k==0)     ? T(0) : ap;
+        du_j[k] = (k==m-1)   ? T(0) : cp;
+
+        const T fij = f[i*nv + j];
+        const T fM  = maxwell_1v<T>(n[i], u[i], Tg_i, vj, inv_sqrt_2pi);
+
+        T rhs = fij + dt * inv_tau * fM;
+        if (k == 0)     rhs += (dt/dx) * fmax(vj,  T(0)) * fL_j;
+        if (k == m-1)   rhs += (dt/dx) * fmax(-vj, T(0)) * fR_j;
+
+        B_j[k] = rhs;
+    }
 }
 
 void launch_build_tridiag_rhs_double(
-    const double* f_prev, const double* v,
+    const double* f, const double* v,
     const double* n, const double* u, const double* T,
+    const double* fL, const double* fR,
     int nx, int nv, double dt, double dx, double tau_tilde, double inv_sqrt_2pi,
-    double* dl, double* dd, double* du, double* B,
+    double* dl, double* d, double* du, double* B,
     cudaStream_t stream)
 {
     const int block = 256;
     dim3 grid(nv);
     build_tridiag_rhs_kernel<double><<<grid, block, 0, stream>>>(
-        f_prev, v, n, u, T,
-        nx, nv, dt, dx, tau_tilde, inv_sqrt_2pi,
-        dl, dd, du, B);
+        f, v, n, u, T, fL, fR, nx, nv, dt, dx, tau_tilde, inv_sqrt_2pi, dl, d, du, B);
 }
 
-void launch_writeback_and_residual_double(
-    const double* f_iter, const double* B,
+/* ------------- residual (interior only) ------------- */
+template <typename T>
+__global__ void residual_interior_kernel(
+    const T* __restrict__ f_old,
+    const T* __restrict__ f_new,
     int nx, int nv,
-    double* fn, double* res_per_v,
+    T* __restrict__ res_per_v) // length nv
+{
+    const int j = blockIdx.x;
+    if (j >= nv) return;
+    T rmax = T(0);
+    for (int i = 1; i < nx-1; ++i) {
+        T diff = fabs(f_new[i*nv + j] - f_old[i*nv + j]);
+        if (diff > rmax) rmax = diff;
+    }
+    if (threadIdx.x == 0) res_per_v[j] = rmax;
+}
+
+void launch_residual_interior_double(
+    const double* f_old, const double* f_new,
+    int nx, int nv, double* res_per_v,
     cudaStream_t stream)
 {
-    const int block = 32;   // thread 0 使用、軽量でOK
-    dim3 grid(nv);
-    writeback_and_residual_kernel<double><<<grid, block, 0, stream>>>(
-        f_iter, B, nx, nv, fn, res_per_v);
+    dim3 grid(nv), block(1);
+    residual_interior_kernel<double><<<grid, block, 0, stream>>>(f_old, f_new, nx, nv, res_per_v);
 }
 
 } // namespace implicit_fused
