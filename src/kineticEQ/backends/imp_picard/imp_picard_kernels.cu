@@ -6,11 +6,11 @@ namespace cg = cooperative_groups;
 
 extern "C" {
 
-// ---- atomicMax for double -------------------------------------------------
-__device__ inline double atomicMaxDouble(double* addr, double val) {
+// ---- atomicMax for double (CAS) -------------------------------------------
+__device__ inline double atomicMaxDouble(double* addr, double val){
     unsigned long long* ull = reinterpret_cast<unsigned long long*>(addr);
     unsigned long long old = *ull, assumed;
-    while (true) {
+    while (true){
         double old_d = __longlong_as_double(old);
         if (old_d >= val) break;
         assumed = old;
@@ -24,8 +24,7 @@ __device__ inline double atomicMaxDouble(double* addr, double val) {
 __device__ inline double maxwell(double n, double u, double T, double vj, double inv_sqrt_2pi){
     double coeff = (n * inv_sqrt_2pi) / sqrt(T);
     double t = vj - u;
-    double ex = exp(-(t*t)/(2.0*T));
-    return coeff * ex;
+    return coeff * exp(-(t*t) / (2.0 * T));
 }
 
 // ---- Thomas solver (in-place), size = n -----------------------------------
@@ -43,7 +42,7 @@ __device__ inline void thomas_inplace(double* dl, double* dd, double* du, double
     }
 }
 
-// ---- Single cooperative kernel --------------------------------------------
+// ---- Single-block kernel (thread_block sync only) -------------------------
 __global__ void picard_kernel_double(
     const double* __restrict__ f,  double* __restrict__ fn, const double* __restrict__ v,
     int nx, int nv,
@@ -55,33 +54,37 @@ __global__ void picard_kernel_double(
     double* __restrict__ s0_arr, double* __restrict__ s1_arr, double* __restrict__ s2_arr,
     double* __restrict__ res_dev, int* __restrict__ iters_dev)
 {
-    cg::grid_group grid = cg::this_grid();
+    cg::thread_block block = cg::this_thread_block();
 
-    const int tid  = threadIdx.x + blockIdx.x * blockDim.x;
-    const int tdim = blockDim.x * gridDim.x;
+    const int tid  = threadIdx.x;
+    const int tdim = blockDim.x;
 
     const int n_inner = max(nx - 2, 0);
     if (nx <= 0 || nv <= 0 || n_inner <= 0){
         if (tid==0){ *res_dev = 0.0; *iters_dev = 0; }
-        return; // 全スレッド同一条件なので安全
+        return;
     }
 
-    // ピカード反復で使う入力/出力ポインタ
+    // 共有メモリ（一時最大値）
+    extern __shared__ double smax[];
+
+    // 入出力バッファ（ピカードで入れ替え）
     const double* read_ptr  = f;
     double*       write_ptr = fn;
 
     if (tid==0){ *res_dev = 0.0; *iters_dev = 0; }
+    cg::sync(block);
 
     // ========================= Picard loop ==================================
     for (int it=0; it<max_iters; ++it){
 
-        // s0,s1,s2 のクリア
+        // s0,s1,s2 をクリア
         for (int i = tid; i < nx; i += tdim){
             s0_arr[i] = 0.0; s1_arr[i] = 0.0; s2_arr[i] = 0.0;
         }
-        grid.sync();
+        cg::sync(block);
 
-        // モーメント（素直に atomicAdd）
+        // モーメント（v方向にストライド）
         for (int j = tid; j < nv; j += tdim){
             const double vj = v[j];
             for (int i=0; i<nx; ++i){
@@ -91,9 +94,9 @@ __global__ void picard_kernel_double(
                 atomicAdd(&s2_arr[i], fij*dv*vj*vj);
             }
         }
-        grid.sync();
+        cg::sync(block);
 
-        // n, u, T 作成
+        // n, u, T
         for (int i = tid; i < nx; i += tdim){
             double n  = s0_arr[i];
             double u  = (n>0.0) ? (s1_arr[i]/n) : 0.0;
@@ -101,9 +104,9 @@ __global__ void picard_kernel_double(
             if (T < 1e-20) T = 1e-20;
             n_arr[i] = n; u_arr[i] = u; T_arr[i] = T;
         }
-        grid.sync();
+        cg::sync(block);
 
-        // 係数と RHS 構築（各 j を並列）
+        // 係数と RHS 構築（各 j をスレッドが担当）
         for (int j = tid; j < nv; j += tdim){
             const double vj = v[j];
             const double alpha = (dt/dx) * (vj>0.0 ? vj : 0.0);
@@ -115,29 +118,24 @@ __global__ void picard_kernel_double(
             double* Bj  = &B [j*n_inner];
 
             if (n_inner >= 1){
-                dlj[0]         = 0.0;            // 未使用要素を明示ゼロ
+                dlj[0]         = 0.0;
                 duj[n_inner-1] = 0.0;
             }
             for (int k=0; k<n_inner; ++k){
-                const int i = k + 1; // 物理セル 1..nx-2
+                const int i = k + 1;
 
                 double n  = n_arr[i];
                 double u  = u_arr[i];
                 double T  = T_arr[i];
                 double tau = tau_tilde / (n * sqrt(T));
 
-                // 主対角
                 ddj[k] = 1.0 + alpha + beta + (dt/tau);
-
-                // 下・上対角
                 if (k>=1)            dlj[k] = -alpha;
                 if (k<=n_inner-2)    duj[k] = -beta;
 
-                // 右辺: f^k + (dt/τ) fM
                 double fM  = maxwell(n, u, T, vj, inv_sqrt_2pi);
                 double rhs = read_ptr[i*nv + j] + (dt/tau) * fM;
 
-                // 境界の流入
                 if (k==0 && vj>0.0){
                     double fL = maxwell(n_arr[0], u_arr[0], T_arr[0], vj, inv_sqrt_2pi);
                     rhs += (dt/dx) * vj * fL;
@@ -149,66 +147,58 @@ __global__ void picard_kernel_double(
                 Bj[k] = rhs;
             }
         }
-        grid.sync();
+        cg::sync(block);
 
-        // トーマス（各 j を 1 スレッドで処理）
+        // Thomas（各 j を1スレッドで処理）
         for (int j = tid; j < nv; j += tdim){
             thomas_inplace(&dl[j*n_inner], &dd[j*n_inner],
                            &du[j*n_inner], &B[j*n_inner], n_inner);
         }
-        grid.sync();
+        cg::sync(block);
 
-        // 書き戻し（内部セル）
+        // 書き戻し（内部）
         for (int j = tid; j < nv; j += tdim){
             for (int k=0; k<n_inner; ++k){
                 const int i = k + 1;
                 write_ptr[i*nv + j] = B[j*n_inner + k];
             }
         }
-        grid.sync();
+        cg::sync(block);
 
         // 境界は維持
         for (int j = tid; j < nv; j += tdim){
             write_ptr[0*nv + j]      = read_ptr[0*nv + j];
             write_ptr[(nx-1)*nv + j] = read_ptr[(nx-1)*nv + j];
         }
-        grid.sync();
+        cg::sync(block);
 
-        // 残差 L∞ = max |write - read|
-        __shared__ double smax[256];
+        // 残差 L∞
         double local_max = 0.0;
         for (int idx = tid; idx < nx*nv; idx += tdim){
             double diff = fabs(write_ptr[idx] - read_ptr[idx]);
             if (diff > local_max) local_max = diff;
         }
-        int lane = threadIdx.x;
-        smax[lane] = local_max;
+        smax[tid] = local_max;
         __syncthreads();
         for (int off = blockDim.x/2; off>0; off/=2){
-            if (lane < off) smax[lane] = fmax(smax[lane], smax[lane+off]);
+            if (tid < off) smax[tid] = fmax(smax[tid], smax[tid+off]);
             __syncthreads();
         }
-        if (lane==0) atomicMaxDouble(res_dev, smax[0]);
-        grid.sync();
+        if (tid==0){
+            atomicMaxDouble(res_dev, smax[0]);
+            *iters_dev = it + 1;
+        }
+        cg::sync(block);
 
-        if (tid==0) *iters_dev = it + 1;
-        grid.sync();
+        // 収束判定（全スレッド同一条件をそれぞれ評価）
+        if (*res_dev <= tol) break;
 
-        // ★ 収束判定（全スレッドが同じ条件を独自に評価）
-        bool converged = (*res_dev <= tol);
-        grid.sync();
-        if (converged) break;
-
-        // 次反復準備
-        if (tid==0) *res_dev = 0.0; // クリア
-        grid.sync();
-
-        const double* tmp = read_ptr;
-        read_ptr  = write_ptr;
-        write_ptr = (double*)tmp;
-
-        grid.sync();
-    } // end Picard loop
+        // 次へ（resをクリアしてバッファ入替）
+        if (tid==0) *res_dev = 0.0;
+        cg::sync(block);
+        const double* tmp = read_ptr; read_ptr = write_ptr; write_ptr = (double*)tmp;
+        cg::sync(block);
+    }
 }
 
 } // extern "C"
