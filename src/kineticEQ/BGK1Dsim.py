@@ -121,7 +121,7 @@ class BGK1D:
         self.animation_data = []  # 状態記録用
 
         # cuSOLVERコンパイル
-        if self.implicit_solver == 'cuSOLVER' and (self.solver == 'implicit' or self.explicit_solver == 'backend'):
+        if (self.implicit_solver == 'cuSOLVER' or self.implicit_solver == 'backend') and self.solver == 'implicit':
             print("--- compile cuSOLVER ---")
             from torch.utils.cpp_extension import load
             import os, sysconfig
