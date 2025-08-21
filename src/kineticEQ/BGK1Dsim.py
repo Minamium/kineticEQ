@@ -41,8 +41,8 @@ class BGK1D:
                  # 陽解法ソルバー
                  explicit_solver='backend',
 
-                 # 三重対角行列ソルバー
-                 implicit_solver='cuSOLVER',
+                 # 陰解法ソルバー
+                 implicit_solver='backend',
 
                  # 陰解法パラメータ
                  picard_iter=10,
@@ -163,6 +163,29 @@ class BGK1D:
             )
             traceback.print_exc()
             print('--- fused CUDA backend loaded ---')
+
+        # __init__ 内でのビルド（explicit_fused と同様に分離コンパイル）
+        if self.solver == "implicit" and self.implicit_solver == "backend":
+            print("--- compile CUDA fused implicit backend ---")
+            from torch.utils.cpp_extension import load
+            import os, sysconfig
+            from pathlib import Path
+            src_dir = Path(__file__).resolve().parent / "backends" / "implicit_fused"
+            os.makedirs('build', exist_ok=True)
+            os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.6")  # 必要に応じて
+            self._implicit_cuda = load(
+                name='implicit_fused',
+                sources=[str(src_dir/'implicit_binding.cpp'),
+                         str(src_dir/'implicit_kernels.cu')],
+                extra_cflags=['-O3'],
+                extra_cuda_cflags=['-O3'],
+                extra_include_paths=[sysconfig.get_paths()['include']],
+                build_directory='build',
+                verbose=True
+            )
+            traceback.print_exc()
+            print('--- fused CUDA backend loaded ---')
+
 
         # 初期化完了通知
         print(f"initiaze complete:")
@@ -400,7 +423,8 @@ class BGK1D:
                 else:
                     self._explicit_update()
             elif self.solver == "implicit":
-                self._implicit_cusolver_update()
+                #self._implicit_cusolver_update()
+                self._implicit_update_cuda_backend()
                 
             # 配列交換
             self.f, self.f_new = self.f_new, self.f
@@ -806,7 +830,8 @@ class BGK1D:
 
             for step in range(self.nt):
                 # 時間発展ステップ
-                Picard_iter, residual = self._implicit_cusolver_update()
+                #Picard_iter, residual = self._implicit_cusolver_update()
+                Picard_iter, residual = self._implicit_update_cuda_backend()
 
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
@@ -936,6 +961,7 @@ class BGK1D:
 
         return error_dict
 
+    # 陽解法のバックエンド
     def _explicit_update_cuda_backend(self):
         # カーネル呼び出し（境界は後で上書き）
         self._explicit_cuda.explicit_step(
@@ -946,3 +972,17 @@ class BGK1D:
         # 境界固定（極小オーバーヘッド）
         self.f_new[0, :].copy_(self.f[0, :])
         self.f_new[-1, :].copy_(self.f[-1, :])
+
+    # 陰解法のバックエンド
+    def _implicit_update_cuda_backend(self):
+        # fn に結果を書き込みつつ、戻り値で (iters, residual) を受け取る
+        iters, residual = self._implicit_cuda.implicit_step(
+            self.f, self.f_new, self.v,
+            float(self.dv), float(self.dt), float(self.dx),
+            float(self.tau_tilde), float(self._inv_sqrt_2pi.item()),
+            int(self._k0),                      # API整合用（内部では未使用）
+            int(self.picard_iter), float(self.picard_tol),
+            float(self.n_left), float(self.u_left), float(self.T_left),
+            float(self.n_right), float(self.u_right), float(self.T_right),
+        )
+        return int(iters), float(residual)
