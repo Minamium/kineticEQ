@@ -187,7 +187,7 @@ class BGK1D:
             traceback.print_exc()
             print('--- fused CUDA backend loaded ---')
 
-        # ---- implicit picard (single-kernel cooperative) ----
+                # ---- implicit picard (single cooperative kernel) ----
         self._imp_picard = None
         if self.solver == "implicit" and self.implicit_solver == "imp_picard":
             print("--- compile CUDA imp_picard (single cooperative kernel) ---")
@@ -196,7 +196,6 @@ class BGK1D:
             from pathlib import Path
             os.makedirs('build', exist_ok=True)
             src_dir = Path(__file__).resolve().parent / "backends" / "imp_picard"
-            # cooperative groups には rdc が必要
             os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.6")
             self._imp_picard = load(
                 name='imp_picard',
@@ -205,12 +204,13 @@ class BGK1D:
                 extra_cflags=['-O3'],
                 extra_cuda_cflags=['-O3', '-rdc=true'],
                 extra_include_paths=[sysconfig.get_paths()['include']],
-                # cooperative launch 用デバイスランタイム
+                # cooperative launch にはデバイスランタイムが必要
                 extra_ldflags=['-lcudadevrt'],
                 build_directory='build',
                 verbose=True
             )
             traceback.print_exc()
+
 
 
 
@@ -1083,14 +1083,14 @@ class BGK1D:
         if self._imp_picard is None:
             raise RuntimeError("imp_picard backend is not loaded. Set implicit_solver='imp_picard'.")
 
-        # 1カーネルで Picard を完了し、f_new に最終解が入る
         iters, residual = self._imp_picard.picard_step(
             self.f, self.f_new, self.v,
             float(self.dv), float(self.dt), float(self.dx),
             float(self.tau_tilde), float(self._inv_sqrt_2pi.item()),
             int(self.picard_iter), float(self.picard_tol)
         )
-        # 念のため境界は前状態を維持（カーネル内でも維持している）
+        # 念のため境界を維持
         self.f_new[0, :].copy_(self.f[0, :])
         self.f_new[-1, :].copy_(self.f[-1, :])
         return int(iters), float(residual)
+
