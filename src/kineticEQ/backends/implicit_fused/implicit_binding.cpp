@@ -1,167 +1,123 @@
+#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
-#include <cmath>
-#include <algorithm>
-#include <assert.h>
+#include <stdexcept>
+#include <string>
 
 namespace implicit_fused {
+    void launch_moments_double(
+        const double* f, const double* v,
+        int nx, int nv, double dv,
+        double* n, double* u, double* T,
+        cudaStream_t stream);
 
-// ---------------- Utility ----------------
-template <typename T>
-__device__ __forceinline__ T clamp_pos(T x, T eps) {
-    return (x > eps) ? x : eps;
+    void launch_boundary_maxwell_double(
+        const double* v, int nv, double inv_sqrt_2pi,
+        double nL, double uL, double TL,
+        double nR, double uR, double TR,
+        double* fL, double* fR,
+        cudaStream_t stream);
+
+    void launch_build_tridiag_rhs_double(
+        const double* f, const double* v,
+        const double* n, const double* u, const double* T,
+        const double* fL, const double* fR,
+        int nx, int nv, double dt, double dx, double tau_tilde, double inv_sqrt_2pi,
+        double* dl, double* dd, double* du, double* B,
+        cudaStream_t stream);
 }
 
-template <typename T>
-__device__ __forceinline__ T maxwell_1v(T n, T u, T Tgas, T vj, T inv_sqrt_2pi) {
-    // fM = n / sqrt(2π T) * exp(-(v-u)^2/(2T))
-    T Tpos = clamp_pos(Tgas, T(1e-300));
-    T inv_sqrtT = rsqrt(Tpos);
-    T coeff = n * inv_sqrt_2pi * inv_sqrtT;
-    T diff  = vj - u;
-    T expo  = -T(0.5) * (diff*diff) / Tpos;
-    return coeff * exp(expo);
-}
-
-// ---------------- Moments kernel ----------------
-// 1 block per row (x), reduction in shared memory.
-template <typename T>
-__global__ void moments_kernel(
-    const T* __restrict__ f,   // (nx, nv)
-    const T* __restrict__ v,   // (nv)
-    int nx, int nv, T dv,
-    T* __restrict__ n_out,     // (nx)
-    T* __restrict__ u_out,     // (nx)
-    T* __restrict__ T_out)     // (nx)
-{
-    const int i = blockIdx.x;
-    if (i >= nx) return;
-
-    extern __shared__ unsigned char smem_raw[];
-    T* s0 = reinterpret_cast<T*>(smem_raw);
-    T* s1 = reinterpret_cast<T*>(smem_raw + sizeof(T)*blockDim.x);
-    T* s2 = reinterpret_cast<T*>(smem_raw + sizeof(T)*blockDim.x*2);
-
-    T p0 = T(0), p1 = T(0), p2 = T(0);
-    const T* fi = f + i*nv;
-
-    for (int j = threadIdx.x; j < nv; j += blockDim.x) {
-        T fij = fi[j];
-        T vj  = v[j];
-        p0 += fij;
-        p1 += fij * vj;
-        p2 += fij * vj * vj;
-    }
-    s0[threadIdx.x] = p0;
-    s1[threadIdx.x] = p1;
-    s2[threadIdx.x] = p2;
-    __syncthreads();
-
-    for (int offset = blockDim.x>>1; offset>0; offset >>= 1) {
-        if (threadIdx.x < offset) {
-            s0[threadIdx.x] += s0[threadIdx.x + offset];
-            s1[threadIdx.x] += s1[threadIdx.x + offset];
-            s2[threadIdx.x] += s2[threadIdx.x + offset];
-        }
-        __syncthreads();
-    }
-
-    if (threadIdx.x == 0) {
-        T n  = s0[0] * dv;
-        T s1d= s1[0] * dv;
-        T s2d= s2[0] * dv;
-        T u  = s1d / n;
-        T Tg = s2d / n - u*u;
-        if (!(Tg > T(0))) Tg = T(1e-300);
-        n_out[i] = n;
-        u_out[i] = u;
-        T_out[i] = Tg;
+static inline void check_cuda(const char* msg){
+    cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess){
+        throw std::runtime_error(std::string(msg) + " : " + cudaGetErrorString(e));
     }
 }
 
-inline void launch_moments_double(
-    const double* f, const double* v,
-    int nx, int nv, double dv,
-    double* n, double* u, double* T,
-    cudaStream_t stream)
-{
-    const int block = 256;
-    dim3 grid(nx);
-    size_t shmem = sizeof(double) * block * 3;
-    moments_kernel<double><<<grid, block, shmem, stream>>>(
-        f, v, nx, nv, dv, n, u, T);
+static void require_cuda_fp64(const at::Tensor& t, const char* name){
+    TORCH_CHECK(t.is_cuda(), name, " must be on CUDA");
+    TORCH_CHECK(t.scalar_type() == at::kDouble, name, " must be float64 (Double)");
+    TORCH_CHECK(t.is_contiguous(), name, " must be contiguous");
 }
 
-// ---------------- Build A,B,C and RHS (B) ----------------
-// 1 block per velocity j. Build lower/diag/upper and RHS for interior cells k=0..n_inner-1 (i=k+1)
-template <typename T>
-__global__ void build_abcB_kernel(
-    const T* __restrict__ f,    // (nx, nv)
-    const T* __restrict__ v,    // (nv)
-    const T* __restrict__ n,    // (nx)
-    const T* __restrict__ u,    // (nx)
-    const T* __restrict__ Tg,   // (nx)
-    int nx, int nv,
-    T dt, T dx, T tau_tilde, T inv_sqrt_2pi,
-    T* __restrict__ a_out,      // (nv, n_inner)
-    T* __restrict__ b_out,      // (nv, n_inner)
-    T* __restrict__ c_out,      // (nv, n_inner)
-    T* __restrict__ B_out)      // (nv, n_inner)
+static void require_shape(const at::Tensor& t, int dim0, int dim1, const char* name){
+    TORCH_CHECK(t.dim()==2 && t.size(0)==dim0 && t.size(1)==dim1,
+        name, " must have shape (", dim0, ", ", dim1, "), got (", t.size(0), ", ", t.size(1), ")");
+}
+
+// f: (nx,nv), v:(nv)
+// dl,dd,du,B: (nv, nx-2)  ※右辺Bは解法の右辺（gtsv_stridedに渡す形）
+// 戻り値なし（出力テンソルに書き込み）
+void build_system_fused(
+    at::Tensor f, at::Tensor v,
+    double dv, double dt, double dx,
+    double tau_tilde, double inv_sqrt_2pi,
+    double nL, double uL, double TL,
+    double nR, double uR, double TR,
+    at::Tensor dl, at::Tensor dd, at::Tensor du, at::Tensor B)
 {
-    const int j = blockIdx.x;
-    if (j >= nv) return;
+    require_cuda_fp64(f, "f");
+    require_cuda_fp64(v, "v");
+    require_cuda_fp64(dl, "dl");
+    require_cuda_fp64(dd, "dd");
+    require_cuda_fp64(du, "du");
+    require_cuda_fp64(B,  "B");
 
-    const int n_inner = nx - 2;
-    const T vj = v[j];
+    TORCH_CHECK(v.dim()==1, "v must be 1-D (nv,)");
 
-    // coefficients
-    const T a_coeff = -dt/dx * fmax(vj,  T(0.0));  // <= 0
-    const T c_coeff = -dt/dx * fmax(-vj, T(0.0));  // <= 0
-    const T minus_a = -a_coeff;
-    const T minus_c = -c_coeff;
+    const int64_t nx = f.size(0);
+    const int64_t nv_ = f.size(1);
+    TORCH_CHECK(v.size(0) == nv_, "v and f nv mismatch");
+    const int64_t n_inner = std::max<int64_t>(nx - 2, 0);
 
-    T* aj = a_out + j * n_inner;
-    T* bj = b_out + j * n_inner;
-    T* cj = c_out + j * n_inner;
-    T* Bj = B_out + j * n_inner;
-
-    // boundary Maxwellians for RHS advection part
-    const T fL = maxwell_1v<T>(n[0],      u[0],      Tg[0],      vj, inv_sqrt_2pi);
-    const T fR = maxwell_1v<T>(n[nx-1],   u[nx-1],   Tg[nx-1],   vj, inv_sqrt_2pi);
-
-    for (int k = threadIdx.x; k < n_inner; k += blockDim.x) {
-        const int i = k + 1; // interior row index
-
-        const T inv_tau = (n[i] * sqrt(Tg[i])) / tau_tilde;
-
-        // diagonals
-        bj[k] = T(1) + minus_a + minus_c + dt * inv_tau;
-        aj[k] = (k==0)         ? T(0) : a_coeff;
-        cj[k] = (k==n_inner-1) ? T(0) : c_coeff;
-
-        // RHS
-        const T fij = f[i*nv + j];
-        const T fMi = maxwell_1v<T>(n[i], u[i], Tg[i], vj, inv_sqrt_2pi);
-        T rhs = fij + dt * inv_tau * fMi;
-
-        // boundary advection contributions
-        if (k == 0)         rhs += (dt/dx) * fmax(vj,  T(0.0)) * fL;
-        if (k == n_inner-1) rhs += (dt/dx) * fmax(-vj, T(0.0)) * fR;
-
-        Bj[k] = rhs;
+    if (n_inner > 0){
+        require_shape(dl, nv_, n_inner, "dl");
+        require_shape(dd, nv_, n_inner, "dd");
+        require_shape(du, nv_, n_inner, "du");
+        require_shape(B,  nv_, n_inner, "B");
+    } else {
+        TORCH_CHECK(dl.numel()==0 && dd.numel()==0 && du.numel()==0 && B.numel()==0,
+            "nx<3 の場合、dl/dd/du/B は空テンソルである必要があります");
+        return;
     }
+
+    auto opts1d = f.options();
+    at::Tensor n = at::empty({nx}, opts1d);
+    at::Tensor u = at::empty({nx}, opts1d);
+    at::Tensor T = at::empty({nx}, opts1d);
+    at::Tensor fL = at::empty({nv_}, opts1d);
+    at::Tensor fR = at::empty({nv_}, opts1d);
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    // (1) moments
+    implicit_fused::launch_moments_double(
+        f.data_ptr<double>(), v.data_ptr<double>(),
+        (int)nx, (int)nv_, dv,
+        n.data_ptr<double>(), u.data_ptr<double>(), T.data_ptr<double>(),
+        stream);
+    check_cuda("moments kernel failed");
+
+    // (2) boundary Maxwell
+    implicit_fused::launch_boundary_maxwell_double(
+        v.data_ptr<double>(), (int)nv_, inv_sqrt_2pi,
+        nL, uL, TL, nR, uR, TR,
+        fL.data_ptr<double>(), fR.data_ptr<double>(),
+        stream);
+    check_cuda("boundary maxwell kernel failed");
+
+    // (3) tri-diagonal & RHS
+    implicit_fused::launch_build_tridiag_rhs_double(
+        f.data_ptr<double>(), v.data_ptr<double>(),
+        n.data_ptr<double>(), u.data_ptr<double>(), T.data_ptr<double>(),
+        fL.data_ptr<double>(), fR.data_ptr<double>(),
+        (int)nx, (int)nv_, dt, dx, tau_tilde, inv_sqrt_2pi,
+        dl.data_ptr<double>(), dd.data_ptr<double>(), du.data_ptr<double>(), B.data_ptr<double>(),
+        stream);
+    check_cuda("build tridiag RHS kernel failed");
 }
 
-inline void launch_build_abcB_double(
-    const double* f, const double* v,
-    const double* n, const double* u, const double* T,
-    int nx, int nv, double dt, double dx, double tau_tilde, double inv_sqrt_2pi,
-    double* a, double* b, double* c, double* B,
-    cudaStream_t stream)
-{
-    const int block = 256;
-    dim3 grid(nv);
-    build_abcB_kernel<double><<<grid, block, 0, stream>>>(
-        f, v, n, u, T, nx, nv, dt, dx, tau_tilde, inv_sqrt_2pi, a, b, c, B);
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("build_system_fused", &build_system_fused,
+          "Build batched tri-diagonal system (dl,dd,du,B) from f and v (double/CUDA)");
 }
-
-} // namespace implicit_fused
