@@ -987,7 +987,7 @@ class BGK1D:
 
         return error_dict
 
-    # 陽解法のバックエンド
+    # 陽解法のバックエンド呼び出し版
     def _explicit_update_cuda_backend(self):
         # カーネル呼び出し（境界は後で上書き）
         self._explicit_cuda.explicit_step(
@@ -999,74 +999,53 @@ class BGK1D:
         self.f_new[0, :].copy_(self.f[0, :])
         self.f_new[-1, :].copy_(self.f[-1, :])
 
-    # 陰解法のバックエンド
+    # 陰解法の行列構成のバックエンド実装版
     def _implicit_update_cuda_backend(self):
-        """Picard は Python ループ、モーメント/境界Maxwell/行列構成/解法/書き戻しは CUDA 実装。"""
         if self._implicit_cuda is None:
             raise RuntimeError("implicit_fused backend is not loaded. Set implicit_solver='backend'.")
 
-        # 初期候補（前ステップの解）
+        # 初期候補：前ステップ
         self._fz.copy_(self.f)
-
-        max_res = float('inf')
-        it = 0
-        swapped_last = False  # 直近イテレーションで swap したかどうか
+        swapped_last = False
+        residual_val = float('inf')
 
         for z in range(self.picard_iter):
-            # 1) (n,u,T) を fz から計算
-            self._implicit_cuda.moments(
-                self._fz, self.v, float(self.dv),
-                self._n, self._u, self._T
+            # (a,b,c,B) を一括構築（Maxwellの境界寄与も旧実装と同等）
+            a_batch, b_batch, c_batch, B_batch = self._implicit_cuda.build_system_fused(
+                self._fz, self.v,
+                float(self.dv), float(self.dt), float(self.dx),
+                float(self.tau_tilde), float(self._inv_sqrt_2pi.item())
             )
 
-            # 2) 境界の Maxwell（RHS 寄与のみ。セル値は触らない）
-            self._implicit_cuda.boundary_maxwell(
-                self.v, float(self._inv_sqrt_2pi.item()),
-                float(self.n_left),  float(self.u_left),  float(self.T_left),
-                float(self.n_right), float(self.u_right), float(self.T_right),
-                self._fL, self._fR
+            # 既存 cuSOLVER バインダで一括解法（戻り値 shape: (nv, nx-2)）
+            solution = self._cusolver.gtsv_strided(
+                a_batch.contiguous(),
+                b_batch.contiguous(),
+                c_batch.contiguous(),
+                B_batch.contiguous()
             )
 
-            # 3) 内部セルの三重対角行列と RHS を構成
-            self._implicit_cuda.build_system(
-                self._fz, self.v, self._n, self._u, self._T,
-                float(self.dt), float(self.dx), float(self.tau_tilde),
-                float(self._inv_sqrt_2pi.item()),
-                self._fL, self._fR,
-                self._dl, self._dd, self._du, self._B
-            )
+            # 内部セルのみ書き戻し。境界は前状態を維持
+            self._fn_tmp.copy_(self._fz)
+            self._fn_tmp[1:-1, :].copy_(solution.T)
 
-            # 4) cuSPARSE batched gtsv で一括解法（B に解が上書き）
-            self._implicit_cuda.gtsv_solve_inplace(
-                self._dl, self._dd, self._du, self._B,
-                int(self.nx), int(self.nv)
-            )
+            # 残差（内部セルのみ）
+            residual = torch.max(torch.abs(self._fn_tmp[1:-1, :] - self._fz[1:-1, :]))
+            residual_val = float(residual)
 
-            # 5) 内部セルへ書き戻し＋内部セルのみの残差（L∞）を取得
-            res = self._implicit_cuda.writeback_and_residual(
-                self._fz, self._fn_tmp, self._B,
-                int(self.nx), int(self.nv)
-            )
-            max_res = float(res)
-            it = z + 1
-
-            # 収束判定（交換は「非収束」のときのみ実施）
-            if max_res < self.picard_tol:
+            if residual <= self.picard_tol:
                 swapped_last = False
                 break
 
-            # 次イテレーションへ：最新候補を _fz にするために入れ替え
+            # 次反復へ
             self._fz, self._fn_tmp = self._fn_tmp, self._fz
             swapped_last = True
 
-        # 直近のイテレーションで swap したかどうかで、最新候補の場所が異なる点に注意
+        # 直近で swap したかで最新候補の位置が変わる
         latest = self._fz if swapped_last else self._fn_tmp
-
-        # 出力へ反映（境界は触らない方針なので、最後に前状態で固定）
         self.f_new.copy_(latest)
+        # 念のため境界は前状態を維持（latest の境界は _fz と同じだが、方針の明確化）
         self.f_new[0, :].copy_(self.f[0, :])
         self.f_new[-1, :].copy_(self.f[-1, :])
 
-        return it, max_res
-
-
+        return (z + 1), residual_val

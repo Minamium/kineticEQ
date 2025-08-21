@@ -1,298 +1,167 @@
-#include <torch/extension.h>
-#include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
-#include <cusparse.h>
-#include <stdexcept>
-#include <string>
-#include <sstream>
+#include <cmath>
+#include <algorithm>
+#include <assert.h>
 
-namespace {
+namespace implicit_fused {
 
-// ---- cuSPARSE エラーチェック ----
-static inline const char* cusparseGetErrorString_(cusparseStatus_t status) {
-    switch (status) {
-        case CUSPARSE_STATUS_SUCCESS: return "CUSPARSE_STATUS_SUCCESS";
-        case CUSPARSE_STATUS_NOT_INITIALIZED: return "CUSPARSE_STATUS_NOT_INITIALIZED";
-        case CUSPARSE_STATUS_ALLOC_FAILED: return "CUSPARSE_STATUS_ALLOC_FAILED";
-        case CUSPARSE_STATUS_INVALID_VALUE: return "CUSPARSE_STATUS_INVALID_VALUE";
-        case CUSPARSE_STATUS_ARCH_MISMATCH: return "CUSPARSE_STATUS_ARCH_MISMATCH";
-        case CUSPARSE_STATUS_MAPPING_ERROR: return "CUSPARSE_STATUS_MAPPING_ERROR";
-        case CUSPARSE_STATUS_EXECUTION_FAILED: return "CUSPARSE_STATUS_EXECUTION_FAILED";
-        case CUSPARSE_STATUS_INTERNAL_ERROR: return "CUSPARSE_STATUS_INTERNAL_ERROR";
-        case CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED: return "CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED";
-        case CUSPARSE_STATUS_ZERO_PIVOT: return "CUSPARSE_STATUS_ZERO_PIVOT";
-        default: return "CUSPARSE_STATUS_UNKNOWN_ERROR";
+// ---------------- Utility ----------------
+template <typename T>
+__device__ __forceinline__ T clamp_pos(T x, T eps) {
+    return (x > eps) ? x : eps;
+}
+
+template <typename T>
+__device__ __forceinline__ T maxwell_1v(T n, T u, T Tgas, T vj, T inv_sqrt_2pi) {
+    // fM = n / sqrt(2π T) * exp(-(v-u)^2/(2T))
+    T Tpos = clamp_pos(Tgas, T(1e-300));
+    T inv_sqrtT = rsqrt(Tpos);
+    T coeff = n * inv_sqrt_2pi * inv_sqrtT;
+    T diff  = vj - u;
+    T expo  = -T(0.5) * (diff*diff) / Tpos;
+    return coeff * exp(expo);
+}
+
+// ---------------- Moments kernel ----------------
+// 1 block per row (x), reduction in shared memory.
+template <typename T>
+__global__ void moments_kernel(
+    const T* __restrict__ f,   // (nx, nv)
+    const T* __restrict__ v,   // (nv)
+    int nx, int nv, T dv,
+    T* __restrict__ n_out,     // (nx)
+    T* __restrict__ u_out,     // (nx)
+    T* __restrict__ T_out)     // (nx)
+{
+    const int i = blockIdx.x;
+    if (i >= nx) return;
+
+    extern __shared__ unsigned char smem_raw[];
+    T* s0 = reinterpret_cast<T*>(smem_raw);
+    T* s1 = reinterpret_cast<T*>(smem_raw + sizeof(T)*blockDim.x);
+    T* s2 = reinterpret_cast<T*>(smem_raw + sizeof(T)*blockDim.x*2);
+
+    T p0 = T(0), p1 = T(0), p2 = T(0);
+    const T* fi = f + i*nv;
+
+    for (int j = threadIdx.x; j < nv; j += blockDim.x) {
+        T fij = fi[j];
+        T vj  = v[j];
+        p0 += fij;
+        p1 += fij * vj;
+        p2 += fij * vj * vj;
+    }
+    s0[threadIdx.x] = p0;
+    s1[threadIdx.x] = p1;
+    s2[threadIdx.x] = p2;
+    __syncthreads();
+
+    for (int offset = blockDim.x>>1; offset>0; offset >>= 1) {
+        if (threadIdx.x < offset) {
+            s0[threadIdx.x] += s0[threadIdx.x + offset];
+            s1[threadIdx.x] += s1[threadIdx.x + offset];
+            s2[threadIdx.x] += s2[threadIdx.x + offset];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        T n  = s0[0] * dv;
+        T s1d= s1[0] * dv;
+        T s2d= s2[0] * dv;
+        T u  = s1d / n;
+        T Tg = s2d / n - u*u;
+        if (!(Tg > T(0))) Tg = T(1e-300);
+        n_out[i] = n;
+        u_out[i] = u;
+        T_out[i] = Tg;
     }
 }
-#define CUSPARSE_CHECK(expr)                                                     \
-    do {                                                                         \
-        cusparseStatus_t _st = (expr);                                           \
-        if (_st != CUSPARSE_STATUS_SUCCESS) {                                    \
-            std::ostringstream _oss;                                             \
-            _oss << "cuSPARSE error: " << (int)_st << " ("                       \
-                 << cusparseGetErrorString_(_st) << ") at "                      \
-                 << __FILE__ << ":" << __LINE__;                                 \
-            throw std::runtime_error(_oss.str());                                \
-        }                                                                        \
-    } while (0)
 
-// ---- CUDA エラーチェック（念のため）----
-#define CUDA_CHECK(expr)                                                         \
-    do {                                                                         \
-        cudaError_t _ce = (expr);                                                \
-        if (_ce != cudaSuccess) {                                                \
-            std::ostringstream _oss;                                             \
-            _oss << "CUDA error: " << (int)_ce << " ("                           \
-                 << cudaGetErrorString(_ce) << ") at "                           \
-                 << __FILE__ << ":" << __LINE__;                                 \
-            throw std::runtime_error(_oss.str());                                \
-        }                                                                        \
-    } while (0)
-
-} // namespace
-
-// ====== kernels (implicit_kernels.cu) のランチャ宣言 ======
-namespace implicit_fused {
-void launch_moments_double(
+inline void launch_moments_double(
     const double* f, const double* v,
     int nx, int nv, double dv,
     double* n, double* u, double* T,
-    cudaStream_t stream);
+    cudaStream_t stream)
+{
+    const int block = 256;
+    dim3 grid(nx);
+    size_t shmem = sizeof(double) * block * 3;
+    moments_kernel<double><<<grid, block, shmem, stream>>>(
+        f, v, nx, nv, dv, n, u, T);
+}
 
-void launch_boundary_maxwell_double(
-    const double* v, int nv, double inv_sqrt_2pi,
-    double nL, double uL, double TL,
-    double nR, double uR, double TR,
-    double* fL, double* fR,
-    cudaStream_t stream);
+// ---------------- Build A,B,C and RHS (B) ----------------
+// 1 block per velocity j. Build lower/diag/upper and RHS for interior cells k=0..n_inner-1 (i=k+1)
+template <typename T>
+__global__ void build_abcB_kernel(
+    const T* __restrict__ f,    // (nx, nv)
+    const T* __restrict__ v,    // (nv)
+    const T* __restrict__ n,    // (nx)
+    const T* __restrict__ u,    // (nx)
+    const T* __restrict__ Tg,   // (nx)
+    int nx, int nv,
+    T dt, T dx, T tau_tilde, T inv_sqrt_2pi,
+    T* __restrict__ a_out,      // (nv, n_inner)
+    T* __restrict__ b_out,      // (nv, n_inner)
+    T* __restrict__ c_out,      // (nv, n_inner)
+    T* __restrict__ B_out)      // (nv, n_inner)
+{
+    const int j = blockIdx.x;
+    if (j >= nv) return;
 
-void launch_build_tridiag_rhs_double(
+    const int n_inner = nx - 2;
+    const T vj = v[j];
+
+    // coefficients
+    const T a_coeff = -dt/dx * fmax(vj,  T(0.0));  // <= 0
+    const T c_coeff = -dt/dx * fmax(-vj, T(0.0));  // <= 0
+    const T minus_a = -a_coeff;
+    const T minus_c = -c_coeff;
+
+    T* aj = a_out + j * n_inner;
+    T* bj = b_out + j * n_inner;
+    T* cj = c_out + j * n_inner;
+    T* Bj = B_out + j * n_inner;
+
+    // boundary Maxwellians for RHS advection part
+    const T fL = maxwell_1v<T>(n[0],      u[0],      Tg[0],      vj, inv_sqrt_2pi);
+    const T fR = maxwell_1v<T>(n[nx-1],   u[nx-1],   Tg[nx-1],   vj, inv_sqrt_2pi);
+
+    for (int k = threadIdx.x; k < n_inner; k += blockDim.x) {
+        const int i = k + 1; // interior row index
+
+        const T inv_tau = (n[i] * sqrt(Tg[i])) / tau_tilde;
+
+        // diagonals
+        bj[k] = T(1) + minus_a + minus_c + dt * inv_tau;
+        aj[k] = (k==0)         ? T(0) : a_coeff;
+        cj[k] = (k==n_inner-1) ? T(0) : c_coeff;
+
+        // RHS
+        const T fij = f[i*nv + j];
+        const T fMi = maxwell_1v<T>(n[i], u[i], Tg[i], vj, inv_sqrt_2pi);
+        T rhs = fij + dt * inv_tau * fMi;
+
+        // boundary advection contributions
+        if (k == 0)         rhs += (dt/dx) * fmax(vj,  T(0.0)) * fL;
+        if (k == n_inner-1) rhs += (dt/dx) * fmax(-vj, T(0.0)) * fR;
+
+        Bj[k] = rhs;
+    }
+}
+
+inline void launch_build_abcB_double(
     const double* f, const double* v,
     const double* n, const double* u, const double* T,
-    const double* fL, const double* fR,
     int nx, int nv, double dt, double dx, double tau_tilde, double inv_sqrt_2pi,
-    double* dl, double* d, double* du, double* B,
-    cudaStream_t stream);
+    double* a, double* b, double* c, double* B,
+    cudaStream_t stream)
+{
+    const int block = 256;
+    dim3 grid(nv);
+    build_abcB_kernel<double><<<grid, block, 0, stream>>>(
+        f, v, n, u, T, nx, nv, dt, dx, tau_tilde, inv_sqrt_2pi, a, b, c, B);
+}
 
-double launch_writeback_and_residual_double(
-    const double* fz, double* fn_tmp, const double* B,
-    int nx, int nv,
-    cudaStream_t stream);
 } // namespace implicit_fused
-
-// ====== Python から呼ぶラッパ ======
-static void moments_binding(
-    torch::Tensor f,  // (nx, nv) float64, cuda
-    torch::Tensor v,  // (nv)     float64, cuda
-    double dv,
-    torch::Tensor n,  // (nx)     float64, cuda
-    torch::Tensor u,  // (nx)     float64, cuda
-    torch::Tensor T   // (nx)     float64, cuda
-) {
-    TORCH_CHECK(f.is_cuda() && v.is_cuda() && n.is_cuda() && u.is_cuda() && T.is_cuda(),
-                "moments: all tensors must be CUDA");
-    TORCH_CHECK(f.scalar_type() == torch::kFloat64 &&
-                v.scalar_type() == torch::kFloat64 &&
-                n.scalar_type() == torch::kFloat64 &&
-                u.scalar_type() == torch::kFloat64 &&
-                T.scalar_type() == torch::kFloat64,
-                "moments: dtype must be float64");
-    TORCH_CHECK(f.is_contiguous() && v.is_contiguous() &&
-                n.is_contiguous() && u.is_contiguous() && T.is_contiguous(),
-                "moments: tensors must be contiguous");
-
-    int64_t nx = f.size(0);
-    int64_t nv = f.size(1);
-    TORCH_CHECK(v.numel() == nv, "moments: v length must equal nv");
-
-    auto stream = at::cuda::getCurrentCUDAStream();
-
-    implicit_fused::launch_moments_double(
-        f.data_ptr<double>(), v.data_ptr<double>(),
-        static_cast<int>(nx), static_cast<int>(nv), dv,
-        n.data_ptr<double>(), u.data_ptr<double>(), T.data_ptr<double>(),
-        stream.stream());
-}
-
-static void boundary_maxwell_binding(
-    torch::Tensor v,  // (nv)
-    double inv_sqrt_2pi,
-    double nL, double uL, double TL,
-    double nR, double uR, double TR,
-    torch::Tensor fL, // (nv)
-    torch::Tensor fR  // (nv)
-) {
-    TORCH_CHECK(v.is_cuda() && fL.is_cuda() && fR.is_cuda(), "boundary_maxwell: CUDA tensors required");
-    TORCH_CHECK(v.scalar_type() == torch::kFloat64 &&
-                fL.scalar_type() == torch::kFloat64 &&
-                fR.scalar_type() == torch::kFloat64,
-                "boundary_maxwell: dtype must be float64");
-    TORCH_CHECK(v.is_contiguous() && fL.is_contiguous() && fR.is_contiguous(),
-                "boundary_maxwell: tensors must be contiguous");
-
-    int64_t nv = v.size(0);
-    TORCH_CHECK(fL.numel() == nv && fR.numel() == nv, "boundary_maxwell: size mismatch");
-
-    auto stream = at::cuda::getCurrentCUDAStream();
-    implicit_fused::launch_boundary_maxwell_double(
-        v.data_ptr<double>(), static_cast<int>(nv), inv_sqrt_2pi,
-        nL, uL, TL, nR, uR, TR,
-        fL.data_ptr<double>(), fR.data_ptr<double>(),
-        stream.stream());
-}
-
-static void build_system_binding(
-    torch::Tensor fz, // (nx, nv)
-    torch::Tensor v,  // (nv)
-    torch::Tensor n,  // (nx)
-    torch::Tensor u,  // (nx)
-    torch::Tensor T,  // (nx)
-    double dt, double dx, double tau_tilde, double inv_sqrt_2pi,
-    torch::Tensor fL, // (nv)
-    torch::Tensor fR, // (nv)
-    torch::Tensor dl, // (nv, n_inner)
-    torch::Tensor dd, // (nv, n_inner)
-    torch::Tensor du, // (nv, n_inner)
-    torch::Tensor B   // (nv, n_inner)
-) {
-    TORCH_CHECK(fz.is_cuda() && v.is_cuda() && n.is_cuda() && u.is_cuda() && T.is_cuda() &&
-                fL.is_cuda() && fR.is_cuda() && dl.is_cuda() && dd.is_cuda() &&
-                du.is_cuda() && B.is_cuda(),
-                "build_system: all tensors must be CUDA");
-    TORCH_CHECK(fz.scalar_type() == torch::kFloat64 && v.scalar_type() == torch::kFloat64 &&
-                n.scalar_type()  == torch::kFloat64 && u.scalar_type() == torch::kFloat64 &&
-                T.scalar_type()  == torch::kFloat64 && fL.scalar_type() == torch::kFloat64 &&
-                fR.scalar_type() == torch::kFloat64 && dl.scalar_type()== torch::kFloat64 &&
-                dd.scalar_type() == torch::kFloat64 && du.scalar_type()== torch::kFloat64 &&
-                B.scalar_type()  == torch::kFloat64,
-                "build_system: dtype must be float64");
-    TORCH_CHECK(fz.is_contiguous() && v.is_contiguous() && n.is_contiguous() &&
-                u.is_contiguous() && T.is_contiguous() && fL.is_contiguous() &&
-                fR.is_contiguous() && dl.is_contiguous() && dd.is_contiguous() &&
-                du.is_contiguous() && B.is_contiguous(),
-                "build_system: tensors must be contiguous");
-
-    int64_t nx = fz.size(0);
-    int64_t nv = fz.size(1);
-    int64_t n_inner = nx - 2;
-    TORCH_CHECK(n_inner >= 1, "build_system: nx must be >= 3");
-
-    TORCH_CHECK(v.numel() == nv, "build_system: v length must equal nv");
-    TORCH_CHECK(n.numel() == nx && u.numel() == nx && T.numel() == nx,
-                "build_system: n,u,T must have length nx");
-    TORCH_CHECK(dl.size(0) == nv && dd.size(0) == nv && du.size(0) == nv && B.size(0) == nv,
-                "build_system: (dl,dd,du,B) first dim must be nv");
-    TORCH_CHECK(dl.size(1) == n_inner && dd.size(1) == n_inner &&
-                du.size(1) == n_inner && B.size(1) == n_inner,
-                "build_system: second dim must be nx-2");
-
-    auto stream = at::cuda::getCurrentCUDAStream();
-    implicit_fused::launch_build_tridiag_rhs_double(
-        fz.data_ptr<double>(), v.data_ptr<double>(),
-        n.data_ptr<double>(), u.data_ptr<double>(), T.data_ptr<double>(),
-        fL.data_ptr<double>(), fR.data_ptr<double>(),
-        static_cast<int>(nx), static_cast<int>(nv),
-        dt, dx, tau_tilde, inv_sqrt_2pi,
-        dl.data_ptr<double>(), dd.data_ptr<double>(), du.data_ptr<double>(), B.data_ptr<double>(),
-        stream.stream());
-}
-
-static void gtsv_solve_inplace_binding(
-    torch::Tensor dl, // (nv, n_inner)
-    torch::Tensor dd, // (nv, n_inner)
-    torch::Tensor du, // (nv, n_inner)
-    torch::Tensor B,  // (nv, n_inner) -> 解で上書き
-    int nx,           // フル格子点数
-    int nv            // 速度格子点数
-) {
-    TORCH_CHECK(dl.is_cuda() && dd.is_cuda() && du.is_cuda() && B.is_cuda(),
-                "gtsv_solve_inplace: tensors must be CUDA");
-    TORCH_CHECK(dl.scalar_type() == torch::kFloat64 &&
-                dd.scalar_type() == torch::kFloat64 &&
-                du.scalar_type() == torch::kFloat64 &&
-                B.scalar_type()  == torch::kFloat64,
-                "gtsv_solve_inplace: dtype must be float64");
-    TORCH_CHECK(dl.is_contiguous() && dd.is_contiguous() &&
-                du.is_contiguous() && B.is_contiguous(),
-                "gtsv_solve_inplace: tensors must be contiguous");
-
-    const int m = nx - 2;     // 内部セル数
-    const int batch = nv;     // バッチ数（= 速度数）
-    TORCH_CHECK(m >= 1, "gtsv_solve_inplace: nx must be >= 3");
-
-    TORCH_CHECK(dl.size(0) == batch && dd.size(0) == batch &&
-                du.size(0) == batch && B.size(0)  == batch,
-                "gtsv_solve_inplace: first dimension must be nv");
-    TORCH_CHECK(dl.size(1) == m && dd.size(1) == m &&
-                du.size(1) == m && B.size(1)  == m,
-                "gtsv_solve_inplace: second dimension must be nx-2");
-
-    // cuSPARSE ハンドルとストリーム
-    cusparseHandle_t handle = nullptr;
-    CUSPARSE_CHECK(cusparseCreate(&handle));
-    auto stream = at::cuda::getCurrentCUDAStream();
-    CUSPARSE_CHECK(cusparseSetStream(handle, stream.stream()));
-
-    const int64_t stride = static_cast<int64_t>(m);  // 各バッチ間ストライド
-    const int ldb = m;                                // 右辺の leading dimension
-
-    // ワークスペースサイズ
-#if CUDART_VERSION >= 10000
-    size_t bufferSize = 0;
-    CUSPARSE_CHECK(cusparseDgtsv2StridedBatch_bufferSizeExt(
-        handle, m,
-        dl.data_ptr<double>(), dd.data_ptr<double>(), du.data_ptr<double>(),
-        B.data_ptr<double>(), ldb, batch, &bufferSize));
-    // Torch の CUDA キャッシュアロケータで確保
-    auto workspace = torch::empty(
-        {static_cast<long>(bufferSize)},
-        torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
-    void* pBuffer = workspace.data_ptr<uint8_t>();
-    // 実行（B が解で上書き）
-    CUSPARSE_CHECK(cusparseDgtsv2StridedBatch(
-        handle, m,
-        dl.data_ptr<double>(), dd.data_ptr<double>(), du.data_ptr<double>(),
-        B.data_ptr<double>(), ldb, batch, pBuffer));
-#else
-#   error "This source requires CUDA 10.0+ (cuSPARSE gtsv2 API)."
-#endif
-
-    CUSPARSE_CHECK(cusparseDestroy(handle));
-}
-
-static double writeback_and_residual_binding(
-    torch::Tensor fz,     // (nx, nv)  旧候補
-    torch::Tensor fn_tmp, // (nx, nv)  新候補(出力先)
-    torch::Tensor B,      // (nv, n_inner)  解
-    int nx,
-    int nv
-) {
-    TORCH_CHECK(fz.is_cuda() && fn_tmp.is_cuda() && B.is_cuda(),
-                "writeback_and_residual: CUDA tensors required");
-    TORCH_CHECK(fz.scalar_type() == torch::kFloat64 &&
-                fn_tmp.scalar_type() == torch::kFloat64 &&
-                B.scalar_type() == torch::kFloat64,
-                "writeback_and_residual: dtype must be float64");
-    TORCH_CHECK(fz.is_contiguous() && fn_tmp.is_contiguous() && B.is_contiguous(),
-                "writeback_and_residual: tensors must be contiguous");
-
-    const int m = nx - 2;
-    TORCH_CHECK(m >= 1, "writeback_and_residual: nx must be >= 3");
-    TORCH_CHECK(fz.size(0) == nx && fz.size(1) == nv, "writeback_and_residual: fz shape mismatch");
-    TORCH_CHECK(fn_tmp.size(0) == nx && fn_tmp.size(1) == nv, "writeback_and_residual: fn_tmp shape mismatch");
-    TORCH_CHECK(B.size(0) == nv && B.size(1) == m, "writeback_and_residual: B shape mismatch");
-
-    auto stream = at::cuda::getCurrentCUDAStream();
-    double res = implicit_fused::launch_writeback_and_residual_double(
-        fz.data_ptr<double>(), fn_tmp.data_ptr<double>(), B.data_ptr<double>(),
-        nx, nv, stream.stream());
-    return res;
-}
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("moments", &moments_binding, "Compute (n,u,T) from f");
-    m.def("boundary_maxwell", &boundary_maxwell_binding, "Compute Maxwellians at boundaries");
-    m.def("build_system", &build_system_binding, "Build tri-diagonal (dl,dd,du) and RHS B");
-    m.def("gtsv_solve_inplace", &gtsv_solve_inplace_binding, "Solve batched tridiagonal in-place with cuSPARSE");
-    m.def("writeback_and_residual", &writeback_and_residual_binding, "Write back interior cells and return L∞ residual");
-}
