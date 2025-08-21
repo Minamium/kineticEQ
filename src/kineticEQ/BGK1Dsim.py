@@ -187,7 +187,7 @@ class BGK1D:
             traceback.print_exc()
             print('--- fused CUDA backend loaded ---')
 
-                # ---- implicit picard (single cooperative kernel) ----
+        # ---- implicit picard (single cooperative kernel) ----
         self._imp_picard = None
         if self.solver == "implicit" and self.implicit_solver == "imp_picard":
             print("--- compile CUDA imp_picard (single cooperative kernel) ---")
@@ -196,20 +196,23 @@ class BGK1D:
             from pathlib import Path
             os.makedirs('build', exist_ok=True)
             src_dir = Path(__file__).resolve().parent / "backends" / "imp_picard"
+
+            # cooperative launch は -rdc 不要。cudadevrt も不要。
             os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.6")
+
             self._imp_picard = load(
                 name='imp_picard',
                 sources=[str(src_dir/'imp_picard_binding.cpp'),
                          str(src_dir/'imp_picard_kernels.cu')],
                 extra_cflags=['-O3'],
-                extra_cuda_cflags=['-O3', '-rdc=true'],
+                extra_cuda_cflags=['-O3'],          # ← '-rdc=true' を削除
                 extra_include_paths=[sysconfig.get_paths()['include']],
-                # cooperative launch にはデバイスランタイムが必要
-                extra_ldflags=['-lcudadevrt'],
+                extra_ldflags=[],                   # ← '-lcudadevrt' を削除
                 build_directory='build',
                 verbose=True
             )
             traceback.print_exc()
+
 
 
 
