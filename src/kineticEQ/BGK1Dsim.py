@@ -168,7 +168,7 @@ class BGK1D:
         if self.solver == "implicit" and self.implicit_solver == "backend":
             print("--- compile CUDA fused implicit backend ---")
             from torch.utils.cpp_extension import load
-            import os, sysconfig
+            import traceback, os, sysconfig
             from pathlib import Path
             src_dir = Path(__file__).resolve().parent / "backends" / "implicit_fused"
             os.makedirs('build', exist_ok=True)
