@@ -42,7 +42,7 @@ class BGK1D:
                  explicit_solver='backend',
 
                  # 陰解法ソルバー
-                 implicit_solver='imp_picard',
+                 implicit_solver='backend',
 
                  # 陰解法パラメータ
                  picard_iter=10,
