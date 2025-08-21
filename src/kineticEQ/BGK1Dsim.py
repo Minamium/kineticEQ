@@ -139,7 +139,7 @@ class BGK1D:
                 verbose=True
             )
 
-        # --- CUDA fused explicit backend (optional) ---
+        # CUDA fused explicitコンパイル
         self._explicit_cuda = None
         if self.solver == 'explicit' and self.explicit_solver == 'backend':
             print("--- compile CUDA fused explicit backend ---")
@@ -335,14 +335,8 @@ class BGK1D:
                     else:
                         self._explicit_update()
                 elif self.solver == "implicit":
-                    if self.implicit_solver == "cuSOLVER":
-                        self._implicit_cusolver_update()
-                    elif self.implicit_solver == "tdma":
-                        self._implicit_TDMA_update()
-                    elif self.implicit_solver == "full":
-                        self._implicit_update()
-                    else:
-                        raise ValueError(f"Unknown implicit solver: {self.implicit_solver}")
+                    self._implicit_cusolver_update()
+                    
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
                 pbar.update(1)
@@ -372,14 +366,8 @@ class BGK1D:
                     else:
                         self._explicit_update()
                 elif self.solver == "implicit":
-                    if self.implicit_solver == "cuSOLVER":
-                        self._implicit_cusolver_update()
-                    elif self.implicit_solver == "tdma":
-                        self._implicit_TDMA_update()
-                    elif self.implicit_solver == "full":
-                        self._implicit_update()
-                    else:
-                        raise ValueError(f"Unknown implicit solver: {self.implicit_solver}")
+                    self._implicit_cusolver_update()
+                    
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
                 pbar.update(1)
@@ -412,12 +400,8 @@ class BGK1D:
                 else:
                     self._explicit_update()
             elif self.solver == "implicit":
-                if self.implicit_solver == "cuSOLVER":
-                    self._implicit_cusolver_update()
-                elif self.implicit_solver == "tdma":
-                    self._implicit_TDMA_update()
-                elif self.implicit_solver == "full":
-                    self._implicit_update()
+                self._implicit_cusolver_update()
+                
             # 配列交換
             self.f, self.f_new = self.f_new, self.f
         
@@ -437,14 +421,8 @@ class BGK1D:
                 else:
                     self._explicit_update()
             elif self.solver == "implicit":
-                if self.implicit_solver == "cuSOLVER":
-                    self._implicit_cusolver_update()
-                elif self.implicit_solver == "tdma":
-                    self._implicit_TDMA_update()
-                elif self.implicit_solver == "full":
-                    self._implicit_update()
-                else:
-                    raise ValueError(f"Unknown implicit solver: {self.implicit_solver}")
+                self._implicit_cusolver_update()
+
             # 配列交換
             self.f, self.f_new = self.f_new, self.f
 
@@ -643,7 +621,7 @@ class BGK1D:
         self.f[-1, :] = coeff_right * torch.exp(exp_right)
         #print("Boundary condition applied")
 
-    # 陽解法更新メソッド
+    # torchによる陽解法更新メソッド
     def _explicit_update(self):
         """BGK explicit scheme"""
         # 現在のモーメント計算
@@ -667,121 +645,6 @@ class BGK1D:
         # 境界固定
         self.f_new[0, :] = self.f[0, :]   
         self.f_new[-1, :] = self.f[-1, :]
-
-    #陰解法更新メソッド(フル行列)
-    def _implicit_update(self):
-        """BGK implicit scheme"""
-        f_z = self.f.clone()
-        f_z_new = self.f.clone()
-
-        # Picard反復
-        for z in range(self.picard_iter):
-            # 前回反復より得たf(k+1)の候補であるf_oldを使ってモーメント計算
-            n, u, T = self.calculate_moments(f_z)
-
-            # 緩和時間計算
-            tau = self.tau_tilde / (n * torch.sqrt(T))
-
-            # マクスウェル分布計算
-            f_maxwell = self.Maxwellian(n, u, T)
-
-            # 係数行列を構築
-            # 要素a
-            a_coeff = -self.dt / self.dx * torch.clamp(self.v, min=0)
-
-            # 要素c
-            c_coeff = -self.dt / self.dx * torch.clamp(-self.v, min=0)
-
-            # 要素b
-            b_coeff = 1.0 + (-a_coeff)[:, None] + (-c_coeff)[:, None] + self.dt / tau[1:-1][None, :]
-
-            # 係数行列Aを構築
-            A_batch = torch.zeros(self.nv, self.nx -2 , self.nx -2, dtype=self.dtype, device=self.device)
-            A_batch.diagonal(dim1=1, dim2=2).copy_(b_coeff)
-
-            A_batch.diagonal(offset=-1, dim1=1, dim2=2).copy_(a_coeff[:, None])
-            A_batch.diagonal(offset=1, dim1=1, dim2=2).copy_(c_coeff[:, None])
-
-            # ソース項行列を構築
-            B_batch = (self.f[1:-1, :] + (self.dt / tau[1:-1][:, None]) * f_maxwell[1:-1, :]).T
-
-            #境界からの移流
-            B_batch[:, 0] += self.dt / self.dx * torch.clamp(self.v, min=0) *f_maxwell[0, :]
-            B_batch[:, -1] += self.dt / self.dx * torch.clamp(-self.v, min=0) *f_maxwell[-1, :]
-
-            # 線形方程式を構築, 計算
-            solution = torch.linalg.solve(A_batch, B_batch)
-            f_z_new[1:-1, :] = solution.T
-
-
-            # 収束判定
-            residual = torch.max(torch.abs(f_z_new - f_z))
-            if residual < self.picard_tol:
-                break
-            f_z = f_z_new.clone()
-
-        self.f_new = f_z_new.clone()
-        return z + 1, residual
-
-    #陰解法更新メソッド(TDMA)
-    def _implicit_TDMA_update(self):
-        """BGK implicit scheme"""
-        f_z = self.f.clone()
-        f_z_new = self.f.clone()
-
-        # Picard反復
-        for z in range(self.picard_iter):
-            # 前回反復より得たf(k+1)の候補であるf_oldを使ってモーメント計算
-            n, u, T = self.calculate_moments(f_z)
-
-            # 緩和時間計算
-            tau = self.tau_tilde / (n * torch.sqrt(T))
-
-            # マクスウェル分布計算
-            f_maxwell = self.Maxwellian(n, u, T)
-
-            # 係数行列を構築
-            # 要素a
-            a_coeff = -self.dt / self.dx * torch.clamp(self.v, min=0)
-            a_batch = torch.zeros(self.nv, self.nx -2, dtype=self.dtype, device=self.device)
-            a_batch[:,:] = a_coeff[:, None]
-            a_batch[:, 0] = 0.0
-
-            # 要素c
-            c_coeff = -self.dt / self.dx * torch.clamp(-self.v, min=0)
-            c_batch = torch.zeros(self.nv, self.nx -2, dtype=self.dtype, device=self.device)
-            c_batch[:,:] = c_coeff[:, None]
-            c_batch[:, -1] = 0.0 
-
-            # 要素b
-            b_batch = torch.zeros(self.nv, self.nx - 2, dtype=self.dtype, device=self.device)
-            b_batch[:, :] = 1.0 + (-a_coeff)[:, None] + (-c_coeff)[:, None] + self.dt / tau[1:-1][None, :]
-
-            # ソース項行列を構築
-            B_batch = (self.f[1:-1, :] + (self.dt / tau[1:-1][:, None]) * f_maxwell[1:-1, :]).T
-
-            #境界からの移流
-            B_batch[:, 0] += self.dt / self.dx * torch.clamp(self.v, min=0) *f_maxwell[0, :]
-            B_batch[:, -1] += self.dt / self.dx * torch.clamp(-self.v, min=0) *f_maxwell[-1, :]
-
-            # 線形方程式を構築, 計算
-            solution = self.tdma_vec(a_batch, b_batch, c_batch, B_batch)
-            f_z_new[1:-1, :] = solution.T
-
-
-            # 収束判定
-            residual = torch.max(torch.abs(f_z_new - f_z))
-            if residual < self.picard_tol:
-                break
-            f_z = f_z_new.clone()
-
-        self.f_new = f_z_new.clone()
-        return z + 1, residual
-
-    # TDMAベクトルソルバー呼び出し
-    @torch.no_grad()
-    def tdma_vec(self, a, b, c, d):
-        return _tdma_vec_impl(a, b, c, d)
 
     #陰解法更新メソッド(cuSOLVER)
     def _implicit_cusolver_update(self):
@@ -943,14 +806,7 @@ class BGK1D:
 
             for step in range(self.nt):
                 # 時間発展ステップ
-                if self.implicit_solver == 'tdma':
-                    Picard_iter, residual = self._implicit_TDMA_update()
-                elif self.implicit_solver == 'cuSOLVER':
-                    Picard_iter, residual = self._implicit_cusolver_update()
-                elif self.implicit_solver == 'full':
-                    Picard_iter, residual = self._implicit_update()
-                else:
-                    raise ValueError(f"Unknown implicit solver: {self.implicit_solver}")
+                Picard_iter, residual = self._implicit_cusolver_update()
 
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
