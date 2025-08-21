@@ -167,21 +167,6 @@ void launch_build_tridiag_rhs_double(
         f, v, n, u, T, fL, fR, nx, nv, dt, dx, tau_tilde, inv_sqrt_2pi, dl, d, du, B);
 }
 
-void launch_tdma_solve_and_writeback_double(
-    const double* f, double* fn,
-    const double* fL, const double* fR,
-    const double* dl, const double* d, const double* du, double* B,
-    int nx, int nv,
-    double* res_per_v,
-    cudaStream_t stream)
-{
-    const int block = 32; // only thread 0 used; small block to keep occupancy reasonable
-    dim3 grid(nv);
-    tdma_solve_and_writeback_kernel<double><<<grid, block, 0, stream>>>(
-        f, fn, fL, fR, const_cast<double*>(dl), const_cast<double*>(d),
-        const_cast<double*>(du), B, nx, nv, res_per_v);
-}
-
 template <typename T>
 __global__ void boundary_maxwell_kernel(
     const T* __restrict__ v, int nv, T inv_sqrt_2pi,
