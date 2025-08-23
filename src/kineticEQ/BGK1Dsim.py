@@ -74,7 +74,11 @@ class BGK1D:
                  device='cuda',
 
                  # tqdm設定
-                 use_tqdm=True):
+                 use_tqdm=True,
+                 
+                 # GIF用のrecord_stateのフラグ
+                 record_state=False
+                 ):
 
         # パラメータ保存
         self.solver = solver
@@ -837,9 +841,10 @@ class BGK1D:
                 self.f, self.f_new = self.f_new, self.f
 
                 # 進捗表示
-                if step % progress_interval == 0:
-                    # 状態記録
-                    self._record_state(step * self.dt)
+                if self.record_state:
+                    if step % progress_interval == 0:
+                        # 状態記録
+                        self._record_state(step * self.dt)
                 pbar.update(1)
 
         #self.create_gif()
