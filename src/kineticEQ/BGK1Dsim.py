@@ -206,8 +206,6 @@ class BGK1D:
         print(f"  dtype: {self.dtype}")
         print(f"  device: {self.device}, GPU name: {torch.cuda.get_device_name(0)}")
 
-        
-
     #シミュレーションメソッド
     def run_simulation(self):
         self.Array_allocation()
