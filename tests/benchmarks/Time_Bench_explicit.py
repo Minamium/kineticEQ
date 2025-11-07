@@ -42,4 +42,4 @@ config = {
 sim = BGK1DPlot(**config)
 bench_result = sim.run_benchmark(benc_type="time", grid_list=[65, 129, 257, 513, 1025, 2049, 4129, 8257], nv_list=[65, 129, 257, 513])
 sim.save_benchmark_results(filename="Explicit_time_bench.pkl")
-sim.plot_benchmark_results(filename="Explicit_time_bench.pkl")
+sim.plot_timing_benchmark(filename="Explicit_time_bench.pkl")
