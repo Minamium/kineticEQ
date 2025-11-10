@@ -165,6 +165,7 @@ class BGK1DPlotMixin:
     # 実行時間ベンチマーク可視化メソッド
     def plot_timing_benchmark(self, bench_results: dict | None = None, 
                              filename: str | None = None,
+                             output_filename: str | None = None,
                              save_fig: bool = True,
                              show_gpu_time: bool = True,
                              show_overhead: bool = True,
@@ -177,7 +178,9 @@ class BGK1DPlotMixin:
         bench_results : dict | None
             ベンチマーク結果辞書。Noneの場合はself.benchmark_resultsを使用
         filename : str | None
-            pklファイルから読み込む場合のファイル名
+            pklファイルから読み込む場合のファイル名（入力用）
+        output_filename : str | None
+            保存する画像ファイル名（拡張子含む）。Noneの場合は'timing_benchmark_heatmap.png'
         save_fig : bool
             図を保存するかどうか
         show_gpu_time : bool
@@ -334,9 +337,10 @@ class BGK1DPlotMixin:
         # plt.tight_layout()  # constrained_layout=True を使用しているため tight_layout は不要
 
         if save_fig:
-            base_name = 'timing_benchmark_heatmap'
-            plt.savefig(base_name + '.png', dpi=300, bbox_inches='tight')
-            print(f"Figure saved: {base_name + '.png'}")
+            if output_filename is None:
+                output_filename = 'timing_benchmark_heatmap.png'
+            plt.savefig(output_filename, dpi=300, bbox_inches='tight')
+            print(f"Figure saved: {output_filename}")
 
     # ベンチマーク結果plotメソッド
     def plot_benchmark_results(
