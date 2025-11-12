@@ -363,7 +363,12 @@ class BGK1D:
                     else:
                         self._explicit_update()
                 elif self.solver == "implicit":
-                    self._implicit_update_cuda_backend()
+                    if self.implicit_solver == 'backend':
+                        self._implicit_update_cuda_backend()
+                    elif self.implicit_solver == 'holo':
+                        self._implicit_update_holo()
+                    else:
+                        self._implicit_cusolver_update()
                     
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
@@ -394,7 +399,12 @@ class BGK1D:
                     else:
                         self._explicit_update()
                 elif self.solver == "implicit":
-                    self._implicit_update_cuda_backend()
+                    if self.implicit_solver == 'backend':
+                        self._implicit_update_cuda_backend()
+                    elif self.implicit_solver == 'holo':
+                        self._implicit_update_holo()
+                    else:
+                        self._implicit_cusolver_update()
                     
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
@@ -428,8 +438,12 @@ class BGK1D:
                 else:
                     self._explicit_update()
             elif self.solver == "implicit":
-                #self._implicit_cusolver_update()
-                self._implicit_update_cuda_backend()
+                if self.implicit_solver == 'backend':
+                    self._implicit_update_cuda_backend()
+                elif self.implicit_solver == 'holo':
+                    self._implicit_update_holo()
+                else:
+                    self._implicit_cusolver_update()
                 
             # 配列交換
             self.f, self.f_new = self.f_new, self.f
@@ -450,7 +464,12 @@ class BGK1D:
                 else:
                     self._explicit_update()
             elif self.solver == "implicit":
-                self._implicit_update_cuda_backend()
+                if self.implicit_solver == 'backend':
+                    self._implicit_update_cuda_backend()
+                elif self.implicit_solver == 'holo':
+                    self._implicit_update_holo()
+                else:
+                    self._implicit_cusolver_update()
 
             # 配列交換
             self.f, self.f_new = self.f_new, self.f
@@ -864,8 +883,12 @@ class BGK1D:
 
             for step in range(self.nt):
                 # 時間発展ステップ
-                #Picard_iter, residual = self._implicit_cusolver_update()
-                Picard_iter, residual = self._implicit_update_cuda_backend()
+                if self.implicit_solver == 'backend':
+                    Picard_iter, residual = self._implicit_update_cuda_backend()
+                elif self.implicit_solver == 'holo':
+                    Picard_iter, residual = self._implicit_update_holo()
+                else:
+                    Picard_iter, residual = self._implicit_cusolver_update()
                 
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
@@ -1058,3 +1081,30 @@ class BGK1D:
         self.f_new[-1, :].copy_(self.f[-1, :])
 
         return (z + 1), residual_val
+
+    # HOLO
+    def _implicit_update_holo(self):
+        """BGK HOLO scheme"""
+        f_z = self.f.clone()
+        f_z_new = self.f.clone()
+        n_HO, u_HO, T_HO = self._HO_calculate_moments(self.f)
+
+        # HOLOアルゴリズム
+        for z in range(self.picard_iter):
+            # LO_calculate_momentsによる次状態のモーメントの近似
+            n_lo, u_lo, T_lo, tau_lo = self._LO_calculate_moments(n_HO, u_HO, T_HO, f_z)
+
+            # 近似したモーメントを用いて分布関数を更新
+            
+
+            # 残差計算
+
+
+
+        # 境界固定（極小オーバーヘッド）
+        self.f_new[0, :].copy_(self.f[0, :])
+        self.f_new[-1, :].copy_(self.f[-1, :])
+
+        return (z + 1), residual_val
+
+
