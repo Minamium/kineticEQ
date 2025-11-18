@@ -48,6 +48,12 @@ class BGK1D:
                  picard_iter=10,
                  picard_tol=1e-4,
 
+                 # HOLOパラメータ
+                 ho_iter=10,
+                 lo_iter=10,
+                 ho_tol=1e-4,
+                 lo_tol=1e-4,
+
                  # ハイパーパラメータ
                  tau_tilde=1.0,
 
@@ -88,6 +94,10 @@ class BGK1D:
         self.explicit_solver = explicit_solver
         self.picard_iter = picard_iter
         self.picard_tol = picard_tol
+        self.ho_iter = ho_iter
+        self.lo_iter = lo_iter
+        self.ho_tol = ho_tol
+        self.lo_tol = lo_tol
         self.tau_tilde = tau_tilde
         self.dt = dt
         self.Lx = Lx
@@ -1085,19 +1095,42 @@ class BGK1D:
     # HOLO
     def _implicit_update_holo(self):
         """BGK HOLO scheme"""
-        f_z = self.f.clone()
-        f_z_new = self.f.clone()
+        f_z.copy_(self.f)
+        f_z_new.copy_(self.f)
         n_HO, u_HO, T_HO = self._HO_calculate_moments(self.f)
-
+        swapped_last = False
+        
         # HOLOアルゴリズム
-        for z in range(self.picard_iter):
+        for z in range(self.ho_iter):
+            # HO_calculate_momentsによるLO反復の初期値モーメント
+            n_HO, u_HO, T_HO = self._HO_calculate_moments(f_z)
+
             # LO_calculate_momentsによる次状態のモーメントの近似
             n_lo, u_lo, T_lo, tau_lo = self._LO_calculate_moments(n_HO, u_HO, T_HO, f_z)
 
             # 近似したモーメントを用いて分布関数を更新
+            # 係数行列の構築
+            # 上対角
+            a_coeff = -(self.dt / (2 * self.dx)) * torch.clamp(-self.v, min=0)
+            a_batch = torch.zeros(self.nv, self.nx -2, dtype=self.dtype, device=self.device)
+            a_batch[:,:] = a_coeff[:, None]
+            a_batch[:, -1] = 0.0
+
+            # 主対角
+
+            # 下対角
+            c_coeff = -(self.dt / (2 * self.dx)) * torch.clamp(self.v, min=0)
+            c_batch = torch.zeros(self.nv, self.nx -2, dtype=self.dtype, device=self.device)
+            c_batch[:,:] = c_coeff[:, None]
+            c_batch[:, 0] = 0.0 
+
+            # ソース項
+
+            # cuSOLVERによる線形方程式のバッチ解法
             
 
-            # 残差計算
+            # 残差計算と収束判定
+
 
 
 
@@ -1107,4 +1140,37 @@ class BGK1D:
 
         return (z + 1), residual_val
 
+    def _HO_calculate_moments(self, f):
+        # 分関数からの単なるモーメント計算
 
+        pass
+
+    def _LO_calculate_moments(self, n_HO, u_HO, T_HO, f_z):
+        # LO系の連立方程式を構築, picardにより線形化してLO反復を実行
+        m = 0
+        for m in range(self.lo_iter):
+            # picard近似によるLO反復
+            # HOフラックスベクトルを既知量(引数)から計算(熱流速Q, 高次モーメントS_1 ~ S_3)
+            Q_HO = self._HO_calculate_fluxes(u_HO)
+
+
+            # 係数行列の構築
+            # 上対角
+
+            # 主対角
+
+            # 下対角
+
+            # ソース項
+            
+            # 3x3ブロック三重対角行列の構築と計算
+
+            # モーメントベクトルからn, u, Tを計算して残差計算と収束判定
+
+
+        return n_lo, u_lo, T_lo, tau_lo, lo_iter, m + 1
+
+    def _HO_calculate_fluxes(self, u_HO):
+        # LO近似のためのHOフラックスをGPU側でリダクション演算
+
+        return Q_HO
