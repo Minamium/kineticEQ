@@ -1208,162 +1208,186 @@ class BGK1D:
         W_i = [n_i, (nu)_i, U_i]^T
         
         CPU実装（nx-2個の内部セル、各3変数）
+        ベクトル化によりセル方向の Python ループを可能な限り排除している。
         """
         import numpy as np
-        
-        # GPUからCPUへ転送
-        n_HO_np = n_HO.cpu().numpy()      # (nx,)
-        u_HO_np = u_HO.cpu().numpy()      # (nx,)
-        T_HO_np = T_HO.cpu().numpy()      # (nx,)
-        Q_HO_np = Q_HO.cpu().numpy()      # (nx,)
-        S_1_HO_np = S_1_HO.cpu().numpy()  # (nx,)
-        S_2_HO_np = S_2_HO.cpu().numpy()  # (nx,)
-        S_3_HO_np = S_3_HO.cpu().numpy()  # (nx,)
-        
-        nx = self.nx
-        dt = self.dt
-        dx = self.dx
-        tau_tilde = self.tau_tilde
-        
-        # HO系のモーメントベクトル W^{HO,k}
-        W_HO = np.zeros((nx, 3))  # [n, nu, U]
+
+        # ─────────────────────────────
+        # GPU → CPU 転送
+        # ─────────────────────────────
+        n_HO_np   = n_HO.cpu().numpy()      # (nx,)
+        u_HO_np   = u_HO.cpu().numpy()      # (nx,)
+        T_HO_np   = T_HO.cpu().numpy()      # (nx,)
+        Q_HO_np   = Q_HO.cpu().numpy()      # (nx,)
+        S_1_HO_np = S_1_HO.cpu().numpy()    # (nx-1,) を想定
+        S_2_HO_np = S_2_HO.cpu().numpy()    # (nx-1,)
+        S_3_HO_np = S_3_HO.cpu().numpy()    # (nx-1,)
+
+        nx         = self.nx
+        dt         = self.dt
+        dx         = self.dx
+        tau_tilde  = self.tau_tilde
+        dt_over_4dx = dt / (4.0 * dx)
+        dt_over_2dx = dt / (2.0 * dx)
+
+        # ─────────────────────────────
+        # HO 系のモーメントベクトル W^{HO,k}
+        # W_HO[i] = [ n_i, (nu)_i, U_i ]
+        # ─────────────────────────────
+        W_HO = np.zeros((nx, 3), dtype=n_HO_np.dtype)
         W_HO[:, 0] = n_HO_np
-        W_HO[:, 1] = n_HO_np * u_HO_np  # nu
+        W_HO[:, 1] = n_HO_np * u_HO_np                       # nu
         W_HO[:, 2] = 0.5 * n_HO_np * (u_HO_np**2 + T_HO_np)  # U = n*(u^2/2 + T/2)
-        
-        # Picard反復の初期値: LO^{k+1,m=0} = HO^k
+
+        # Picard 初期値: LO^{k+1,m=0} = HO^k
         W_m = W_HO.copy()  # (nx, 3)
-        
+
+        # ─────────────────────────────
+        # HO 側フラックス F^{HO}_{i+1/2} は Picard 反復内で変わらないので
+        # 先に一括で構築しておく
+        # F^{HO}_{i+1/2} = [S_1, S_2, S_3 + 2Q_half]
+        # ─────────────────────────────
+        # Q_half: i+1/2 の Q (Q_HO はセル中心 i の値)
+        Q_half = 0.5 * (Q_HO_np[:-1] + Q_HO_np[1:])  # (nx-1,)
+
+        F_HO_half = np.zeros((nx - 1, 3), dtype=n_HO_np.dtype)  # (nx-1,3)
+        F_HO_half[:, 0] = S_1_HO_np
+        F_HO_half[:, 1] = S_2_HO_np
+        F_HO_half[:, 2] = S_3_HO_np + 2.0 * Q_half
+
+        # 内部セル数
+        n_inner = nx - 2
+
         lo_residual = float('inf')
-        
+
+        # 3×3 単位行列
+        I3 = np.eye(3, dtype=n_HO_np.dtype)
+
+        # ─────────────────────────────
+        # Picard 反復
+        # ─────────────────────────────
         for m in range(self.lo_iter):
-            # 前反復のモーメントから非線形項を計算（凍結）
-            n_m = W_m[:, 0]                    # (nx,)
-            nu_m = W_m[:, 1]                   # (nx,)
-            U_m = W_m[:, 2]                    # (nx,)
-            
-            u_star = nu_m / (n_m + 1e-300)     # u* = nu/n
-            T_star = 2.0 * (U_m / (n_m + 1e-300) - 0.5 * u_star**2)  # T = 2(U/n - u^2/2)
-            T_star = np.maximum(T_star, 1e-300)  # 正値保証
-            P_star = n_m * T_star              # P* = n*T
-            
-            # 界面値（中心差分で平均）
-            # i+1/2 の値
-            u_half_p = 0.5 * (u_star[:-1] + u_star[1:])    # (nx-1,)
-            P_half_p = 0.5 * (P_star[:-1] + P_star[1:])    # (nx-1,)
-            
-            # 係数行列 A, b の構築（セル37, 47）
-            # A_{i+1/2}^{m-1} = [[0, 1, 0], [u*^2, 0, 0], [0, 0, u*]]
-            # b_{i+1/2}^{m-1} = [0, P*, u*P*]
-            
-            # HO側フラックス（セル16）
-            # F^{HO}_{i+1/2} = [S_1, S_2, S_3 + 2Q]
-            # S_1_HO_np, S_2_HO_np, S_3_HO_np はすでに界面 i+1/2 の値 (nx-1,)
-            S1_half = S_1_HO_np          # (nx-1,)
-            S2_half = S_2_HO_np          # (nx-1,)
-            S3_half = S_3_HO_np          # (nx-1,)
-            Q_half  = 0.5 * (Q_HO_np[:-1] + Q_HO_np[1:])  # (nx-1,)
+            # 前反復のモーメント W_m から非線形項を計算（凍結）
+            n_m  = W_m[:, 0]   # (nx,)
+            nu_m = W_m[:, 1]   # (nx,)
+            U_m  = W_m[:, 2]   # (nx,)
 
-            F_HO_half = np.zeros((nx - 1, 3))
-            F_HO_half[:, 0] = S1_half
-            F_HO_half[:, 1] = S2_half
-            F_HO_half[:, 2] = S3_half + 2.0 * Q_half
+            u_star = nu_m / (n_m + 1e-300)  # u* = nu / n
+            T_star = 2.0 * (U_m / (n_m + 1e-300) - 0.5 * u_star**2)
+            T_star = np.maximum(T_star, 1e-300)
+            P_star = n_m * T_star          # P* = n*T
 
-            
-            # 3×3ブロック三重対角系の構築（内部セル i=1,...,nx-2）
-            n_inner = nx - 2
-            
-            # ブロック行列 (n_inner, 3, 3)
-            AA = np.zeros((n_inner, 3, 3))  # 下対角ブロック
-            BB = np.zeros((n_inner, 3, 3))  # 主対角ブロック
-            CC = np.zeros((n_inner, 3, 3))  # 上対角ブロック
-            DD = np.zeros((n_inner, 3))     # 右辺ベクトル
-            
-            for k in range(n_inner):
-                i = k + 1  # 内部セル番号 i=1,...,nx-2
-                
-                # 係数 (dt/4dx)
-                coef = dt / (4.0 * dx)
-                
-                # A_{i-1/2}^{m-1} (界面 i-1/2)
-                if i >= 1:
-                    u_L = u_half_p[i - 1]  # i-1/2
-                    P_L = P_half_p[i - 1]
-                    A_L = np.array([[0.0, 1.0, 0.0],
-                                    [u_L**2, 0.0, 0.0],
-                                    [0.0, 0.0, u_L]])
-                    b_L = np.array([0.0, P_L, u_L * P_L])
-                else:
-                    A_L = np.zeros((3, 3))
-                    b_L = np.zeros(3)
-                
-                # A_{i+1/2}^{m-1} (界面 i+1/2)
-                if i < nx - 1:
-                    u_R = u_half_p[i]  # i+1/2
-                    P_R = P_half_p[i]
-                    A_R = np.array([[0.0, 1.0, 0.0],
-                                    [u_R**2, 0.0, 0.0],
-                                    [0.0, 0.0, u_R]])
-                    b_R = np.array([0.0, P_R, u_R * P_R])
-                else:
-                    A_R = np.zeros((3, 3))
-                    b_R = np.zeros(3)
-                
-                # セル47の係数
-                # A_i (下対角) = -(dt/4dx) * A_{i-1/2}
-                AA[k] = -coef * A_L if k > 0 else np.zeros((3, 3))
-                
-                # C_i (上対角) = (dt/4dx) * A_{i+1/2}
-                CC[k] = coef * A_R if k < n_inner - 1 else np.zeros((3, 3))
-                
-                # B_i (主対角) = I + (dt/4dx)(A_{i+1/2} - A_{i-1/2})
-                BB[k] = np.eye(3) + coef * (A_R - A_L)
-                
-                # D_i (右辺)
-                # W_i^{HO} - (dt/2dx)(F^{HO}_{i+1/2} - F^{HO}_{i-1/2})
-                #           - (dt/2dx)(b_{i+1/2} - b_{i-1/2})
-                F_diff = F_HO_half[i] - F_HO_half[i - 1] if i >= 1 and i < nx - 1 else np.zeros(3)
-                b_diff = b_R - b_L
-                
-                DD[k] = W_HO[i] - (dt / (2.0 * dx)) * F_diff - (dt / (2.0 * dx)) * b_diff
-            
-            # 3×3ブロック三重対角系を解く（Thomas algorithm の拡張）
-            W_new = self._solve_block_tridiagonal(AA, BB, CC, DD)
+            # ─────────────────────────
+            # 界面値 i+1/2 の u*, P* （中心平均）
+            # ─────────────────────────
+            u_half_p = 0.5 * (u_star[:-1] + u_star[1:])  # (nx-1,)
+            P_half_p = 0.5 * (P_star[:-1] + P_star[1:])  # (nx-1,)
 
-            # 境界は HO と同じ（固定）
-            W_full = np.zeros((nx, 3))
-            W_full[0] = W_HO[0]
-            W_full[1:-1] = W_new
-            W_full[-1] = W_HO[-1]
-            
+            # ─────────────────────────
+            # 界面行列 A_{i+1/2}, b_{i+1/2} を一括構築
+            # A_{i+1/2} = [[0, 1, 0],
+            #              [u*^2, 0, 0],
+            #              [0, 0, u*]]
+            # b_{i+1/2} = [0, P*, u*P*]
+            # ─────────────────────────
+            A_int = np.zeros((nx - 1, 3, 3), dtype=n_HO_np.dtype)  # (nx-1,3,3)
+            b_int = np.zeros((nx - 1, 3),    dtype=n_HO_np.dtype)  # (nx-1,3)
+
+            # A の非ゼロ成分
+            A_int[:, 0, 1] = 1.0                        # (0,1) = 1
+            A_int[:, 1, 0] = u_half_p * u_half_p        # (1,0) = u*^2
+            A_int[:, 2, 2] = u_half_p                   # (2,2) = u*
+
+            # b の非ゼロ成分
+            b_int[:, 1] = P_half_p                      # P*
+            b_int[:, 2] = u_half_p * P_half_p           # u* P*
+
+            # 内部セル i=1..nx-2 に対応する左/右界面
+            # A_L = A_{i-1/2}, A_R = A_{i+1/2}
+            A_L = A_int[:-1]    # (nx-2,3,3)
+            A_R = A_int[1:]     # (nx-2,3,3)
+            b_L = b_int[:-1]    # (nx-2,3)
+            b_R = b_int[1:]     # (nx-2,3)
+
+            # HO フラックス差分 F^{HO}_{i+1/2} - F^{HO}_{i-1/2}
+            F_L = F_HO_half[:-1]    # (nx-2,3)
+            F_R = F_HO_half[1:]     # (nx-2,3)
+            F_diff = F_R - F_L      # (nx-2,3)
+
+            # b_{i+1/2} - b_{i-1/2}
+            b_diff = b_R - b_L      # (nx-2,3)
+
+            # ─────────────────────────
+            # 3×3 ブロック三重対角系の係数 AA,BB,CC,DD を一括構築
+            # A_i (下対角) = -(dt/4dx) * A_{i-1/2}  (i>1 → k>0)
+            # C_i (上対角) =  (dt/4dx) * A_{i+1/2}  (i<nx-2 → k<n_inner-1)
+            # B_i (主対角) = I + (dt/4dx)(A_{i+1/2} - A_{i-1/2})
+            # D_i         = W_i^{HO}
+            #                - (dt/2dx)(F^{HO}_{i+1/2} - F^{HO}_{i-1/2})
+            #                - (dt/2dx)(b_{i+1/2} - b_{i-1/2})
+            # ─────────────────────────
+            coef = dt_over_4dx
+
+            AA = np.zeros_like(A_L)  # (n_inner,3,3)
+            CC = np.zeros_like(A_L)  # (n_inner,3,3)
+
+            # 下対角: i=2..nx-2 (→ k=1..n_inner-1) にだけ -coef*A_L
+            AA[1:] = -coef * A_L[1:]
+
+            # 上対角: i=1..nx-3 (→ k=0..n_inner-2) にだけ  coef*A_R
+            CC[:-1] = coef * A_R[:-1]
+
+            # 主対角
+            BB = I3[None, :, :] + coef * (A_R - A_L)  # (n_inner,3,3)
+
+            # 右辺
+            DD = (
+                W_HO[1:-1] 
+                - dt_over_2dx * F_diff
+                - dt_over_2dx * b_diff
+            )  # (n_inner,3)
+
+            # ─────────────────────────
+            # 3×3 ブロック三重対角系を解く
+            # ─────────────────────────
+            W_new = self._solve_block_tridiagonal(AA, BB, CC, DD)  # (n_inner,3)
+
+            # 境界セルは HO と同じ（固定）
+            W_full = np.zeros_like(W_HO)
+            W_full[0]      = W_HO[0]
+            W_full[1:-1]   = W_new
+            W_full[-1]     = W_HO[-1]
+
             # 収束判定
-            lo_residual = np.max(np.abs(W_full - W_m))
-            
-            # 次反復へ
-            W_m = W_full.copy()
-            
+            lo_residual = float(np.max(np.abs(W_full - W_m)))
+            W_m = W_full
+
             if lo_residual < self.lo_tol:
                 break
-        
-        # 結果をモーメントに分解
+
+        # ─────────────────────────
+        # 結果をモーメントに逆変換
+        # ─────────────────────────
         n_lo = W_m[:, 0]
         nu_lo = W_m[:, 1]
         U_lo = W_m[:, 2]
-        
+
         u_lo = nu_lo / (n_lo + 1e-300)
         T_lo = 2.0 * (U_lo / (n_lo + 1e-300) - 0.5 * u_lo**2)
         T_lo = np.maximum(T_lo, 1e-300)
-        
+
         tau_lo = tau_tilde / (n_lo * np.sqrt(T_lo))
-        
-        # CPUからGPUへ転送
-        n_lo_gpu = torch.tensor(n_lo, dtype=self.dtype, device=self.device)
-        u_lo_gpu = torch.tensor(u_lo, dtype=self.dtype, device=self.device)
-        T_lo_gpu = torch.tensor(T_lo, dtype=self.dtype, device=self.device)
+
+        # CPU → GPU 転送
+        n_lo_gpu   = torch.tensor(n_lo,   dtype=self.dtype, device=self.device)
+        u_lo_gpu   = torch.tensor(u_lo,   dtype=self.dtype, device=self.device)
+        T_lo_gpu   = torch.tensor(T_lo,   dtype=self.dtype, device=self.device)
         tau_lo_gpu = torch.tensor(tau_lo, dtype=self.dtype, device=self.device)
-        
+
         return n_lo_gpu, u_lo_gpu, T_lo_gpu, tau_lo_gpu, lo_residual, m + 1
-    
+
+    # 3×3ブロック三重対角系を解く（Thomas algorithm の拡張版）
+    @torch.no_grad()
     def _solve_block_tridiagonal(self, A, B, C, D):
         """
         3×3ブロック三重対角系を解く（Thomas algorithm の拡張版）。
