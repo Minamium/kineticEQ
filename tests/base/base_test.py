@@ -17,6 +17,9 @@ parser.add_argument('--dt', type=float, default=5e-5, help='Time step')
 parser.add_argument('--T_total', type=float, default=0.01, help='Total simulation time')
 parser.add_argument('--device', type=str, default='cuda', help='Device')
 parser.add_argument('--use_tqdm', type=bool, default=True, help='Use tqdm')
+parser.add_argument('--nx', type=int, default=1000, help='Number of grid points')
+parser.add_argument('--nv', type=int, default=200, help='Number of velocity points')
+parser.add_argument('--v_max', type=float, default=10.0, help='Maximum velocity')
 args = parser.parse_args()
 
 config = {
@@ -40,7 +43,9 @@ config = {
         "tau_tilde": args.tau_tilde,
 
         # 数値計算パラメータ
-        "v_max": 10.0,
+        "nx": args.nx,
+        "nv": args.nv,
+        "v_max": args.v_max,
         "dt": args.dt,
 
         "initial_regions": [
