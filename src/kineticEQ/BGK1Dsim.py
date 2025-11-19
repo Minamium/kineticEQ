@@ -1095,82 +1095,405 @@ class BGK1D:
     # HOLO
     def _implicit_update_holo(self):
         """BGK HOLO scheme"""
-        f_z.copy_(self.f)
-        f_z_new.copy_(self.f)
-        n_HO, u_HO, T_HO = self._HO_calculate_moments(self.f)
+        self._fz.copy_(self.f)
+        self._fn_tmp.copy_(self.f)
+        ho_residual = float('inf')
+
+        # HOLO反復前の既知のモーメント(W^HO, k | S_1 ~ 3)
+        n_HO, u_HO, T_HO = self.calculate_moments(self.f)
+        S_1_HO, S_2_HO, S_3_HO = self._HO_calculate_moments(self.f)
         swapped_last = False
+
+        # θSchemeの値を計算(暫定処置の強制クランクニコルソン)
+        theta = 0.5
+
+        # LO反復回数を保存するリスト
+        lo_iter_list = []
         
         # HOLOアルゴリズム
         for z in range(self.ho_iter):
-            # HO_calculate_momentsによるLO反復の初期値モーメント
-            n_HO, u_HO, T_HO = self._HO_calculate_moments(f_z)
+            # z-1ステップのfk+1を用いて熱流束を計算
+            Q_HO = self._HO_calculate_fluxes(self._fz)
 
-            # LO_calculate_momentsによる次状態のモーメントの近似
-            n_lo, u_lo, T_lo, tau_lo = self._LO_calculate_moments(n_HO, u_HO, T_HO, f_z)
+            # LO_calculate_momentsによる次状態のモーメントの近似(線形化反復を含む)
+            n_lo, u_lo, T_lo, tau_lo, lo_residual, lo_iter = self._LO_calculate_moments(n_HO, u_HO, T_HO, Q_HO,
+                                                                                        S_1_HO, S_2_HO, S_3_HO)
+
+            # LO反復回数を保存
+            lo_iter_list.append(lo_iter)
 
             # 近似したモーメントを用いて分布関数を更新
             # 係数行列の構築
             # 上対角
-            a_coeff = -(self.dt / (2 * self.dx)) * torch.clamp(-self.v, min=0)
-            a_batch = torch.zeros(self.nv, self.nx -2, dtype=self.dtype, device=self.device)
-            a_batch[:,:] = a_coeff[:, None]
-            a_batch[:, -1] = 0.0
-
-            # 主対角
+            beta = (self.dt / (2 * self.dx)) * torch.clamp(-self.v, min=0)
+            _du = torch.zeros(self.nv, self.nx -2, dtype=self.dtype, device=self.device)
+            _du[:,:] = -beta[:, None]
+            _du[:, -1] = 0.0
 
             # 下対角
-            c_coeff = -(self.dt / (2 * self.dx)) * torch.clamp(self.v, min=0)
-            c_batch = torch.zeros(self.nv, self.nx -2, dtype=self.dtype, device=self.device)
-            c_batch[:,:] = c_coeff[:, None]
-            c_batch[:, 0] = 0.0 
+            alpha = (self.dt / (2 * self.dx)) * torch.clamp(self.v, min=0)
+            _dl = torch.zeros(self.nv, self.nx -2, dtype=self.dtype, device=self.device)
+            _dl[:,:] = -alpha[:, None]
+            _dl[:, 0] = 0.0 
 
-            # ソース項
+            # 主対角
+            _dd = torch.zeros(self.nv, self.nx - 2, dtype=self.dtype, device=self.device)
+            _dd[:, :] = 1.0 + (alpha)[:, None] + (beta)[:, None] + theta * (self.dt / tau_lo[1:-1][None, :])
+
+            ###########
+            # ソース項. #
+            ###########
+            B_batch = torch.zeros(self.nv, self.nx - 2, dtype=self.dtype, device=self.device)
+
+            # Explicit_termの計算
+            Explicit_term = self._compute_Explicit_term(theta)
+            
+            # LO系から得たモーメントでMaxwell分布を計算
+            f_M_LO = self.Maxwellian(n_lo, u_lo, T_lo)
+
+            # ソース項: d[i,j] = EXP[i,j] + θ*(dt/τ^LO)*f_M^LO[i,j]
+            B_batch = (Explicit_term[1:-1, :] + 
+                       theta * (self.dt / tau_lo[1:-1, None]) * f_M_LO[1:-1, :]).T
 
             # cuSOLVERによる線形方程式のバッチ解法
-            
+            solution = self._cusolver.gtsv_strided(
+                _dl.contiguous(),
+                _dd.contiguous(),
+                _du.contiguous(),
+                B_batch.contiguous()
+            )
+
+            # 解を内部セルのみ書き戻し
+            self._fn_tmp[1:-1, :].copy_(solution.T)
 
             # 残差計算と収束判定
+            ho_residual = torch.max(torch.abs(self._fn_tmp - self._fz))
+            if ho_residual <= self.picard_tol:
+                swapped_last = False
+                break
 
-
-
+            # 次反復へ
+            self._fz, self._fn_tmp = self._fn_tmp, self._fz
+            swapped_last = True
 
         # 境界固定（極小オーバーヘッド）
+        latest = self._fz if swapped_last else self._fn_tmp
+        self.f_new.copy_(latest)
         self.f_new[0, :].copy_(self.f[0, :])
         self.f_new[-1, :].copy_(self.f[-1, :])
 
-        return (z + 1), residual_val
+        return (z + 1), ho_residual
 
-    def _HO_calculate_moments(self, f):
-        # 分関数からの単なるモーメント計算
-
-        pass
-
-    def _LO_calculate_moments(self, n_HO, u_HO, T_HO, f_z):
-        # LO系の連立方程式を構築, picardにより線形化してLO反復を実行
-        m = 0
+    def _LO_calculate_moments(self, n_HO, u_HO, T_HO, Q_HO, S_1_HO, S_2_HO, S_3_HO):
+        """
+        LO系のモーメント方程式をPicard反復により線形化して解く。
+        ノートブックのセル23-49の定式化に従う。
+        
+        3×3ブロック三重対角系:
+          A_i * W_{i-1} + B_i * W_i + C_i * W_{i+1} = D_i
+        
+        W_i = [n_i, (nu)_i, U_i]^T
+        
+        CPU実装（nx-2個の内部セル、各3変数）
+        """
+        import numpy as np
+        
+        # GPUからCPUへ転送
+        n_HO_np = n_HO.cpu().numpy()      # (nx,)
+        u_HO_np = u_HO.cpu().numpy()      # (nx,)
+        T_HO_np = T_HO.cpu().numpy()      # (nx,)
+        Q_HO_np = Q_HO.cpu().numpy()      # (nx,)
+        S_1_HO_np = S_1_HO.cpu().numpy()  # (nx,)
+        S_2_HO_np = S_2_HO.cpu().numpy()  # (nx,)
+        S_3_HO_np = S_3_HO.cpu().numpy()  # (nx,)
+        
+        nx = self.nx
+        dt = self.dt
+        dx = self.dx
+        tau_tilde = self.tau_tilde
+        
+        # HO系のモーメントベクトル W^{HO,k}
+        W_HO = np.zeros((nx, 3))  # [n, nu, U]
+        W_HO[:, 0] = n_HO_np
+        W_HO[:, 1] = n_HO_np * u_HO_np  # nu
+        W_HO[:, 2] = 0.5 * n_HO_np * (u_HO_np**2 + T_HO_np)  # U = n*(u^2/2 + T/2)
+        
+        # Picard反復の初期値: LO^{k+1,m=0} = HO^k
+        W_m = W_HO.copy()  # (nx, 3)
+        
+        lo_residual = float('inf')
+        
         for m in range(self.lo_iter):
-            # picard近似によるLO反復
-            # HOフラックスベクトルを既知量(引数)から計算(熱流速Q, 高次モーメントS_1 ~ S_3)
-            Q_HO = self._HO_calculate_fluxes(u_HO)
-
-
-            # 係数行列の構築
-            # 上対角
-
-            # 主対角
-
-            # 下対角
-
-            # ソース項
+            # 前反復のモーメントから非線形項を計算（凍結）
+            n_m = W_m[:, 0]                    # (nx,)
+            nu_m = W_m[:, 1]                   # (nx,)
+            U_m = W_m[:, 2]                    # (nx,)
             
-            # 3x3ブロック三重対角行列の構築と計算
+            u_star = nu_m / (n_m + 1e-300)     # u* = nu/n
+            T_star = 2.0 * (U_m / (n_m + 1e-300) - 0.5 * u_star**2)  # T = 2(U/n - u^2/2)
+            T_star = np.maximum(T_star, 1e-300)  # 正値保証
+            P_star = n_m * T_star              # P* = n*T
+            
+            # 界面値（中心差分で平均）
+            # i+1/2 の値
+            u_half_p = 0.5 * (u_star[:-1] + u_star[1:])    # (nx-1,)
+            P_half_p = 0.5 * (P_star[:-1] + P_star[1:])    # (nx-1,)
+            
+            # 係数行列 A, b の構築（セル37, 47）
+            # A_{i+1/2}^{m-1} = [[0, 1, 0], [u*^2, 0, 0], [0, 0, u*]]
+            # b_{i+1/2}^{m-1} = [0, P*, u*P*]
+            
+            # HO側フラックス（セル16）
+            # F^{HO}_{i+1/2} = [S_1, S_2, S_3 + 2Q]
+            # ここでは中心差分で界面値を作る
+            S1_half = 0.5 * (S_1_HO_np[:-1] + S_1_HO_np[1:])
+            S2_half = 0.5 * (S_2_HO_np[:-1] + S_2_HO_np[1:])
+            S3_half = 0.5 * (S_3_HO_np[:-1] + S_3_HO_np[1:])
+            Q_half = 0.5 * (Q_HO_np[:-1] + Q_HO_np[1:])
+            
+            F_HO_half = np.zeros((nx - 1, 3))
+            F_HO_half[:, 0] = S1_half
+            F_HO_half[:, 1] = S2_half
+            F_HO_half[:, 2] = S3_half + 2.0 * Q_half
+            
+            # 3×3ブロック三重対角系の構築（内部セル i=1,...,nx-2）
+            n_inner = nx - 2
+            
+            # ブロック行列 (n_inner, 3, 3)
+            AA = np.zeros((n_inner, 3, 3))  # 下対角ブロック
+            BB = np.zeros((n_inner, 3, 3))  # 主対角ブロック
+            CC = np.zeros((n_inner, 3, 3))  # 上対角ブロック
+            DD = np.zeros((n_inner, 3))     # 右辺ベクトル
+            
+            for k in range(n_inner):
+                i = k + 1  # 内部セル番号 i=1,...,nx-2
+                
+                # 係数 (dt/4dx)
+                coef = dt / (4.0 * dx)
+                
+                # A_{i-1/2}^{m-1} (界面 i-1/2)
+                if i >= 1:
+                    u_L = u_half_p[i - 1]  # i-1/2
+                    P_L = P_half_p[i - 1]
+                    A_L = np.array([[0.0, 1.0, 0.0],
+                                    [u_L**2, 0.0, 0.0],
+                                    [0.0, 0.0, u_L]])
+                    b_L = np.array([0.0, P_L, u_L * P_L])
+                else:
+                    A_L = np.zeros((3, 3))
+                    b_L = np.zeros(3)
+                
+                # A_{i+1/2}^{m-1} (界面 i+1/2)
+                if i < nx - 1:
+                    u_R = u_half_p[i]  # i+1/2
+                    P_R = P_half_p[i]
+                    A_R = np.array([[0.0, 1.0, 0.0],
+                                    [u_R**2, 0.0, 0.0],
+                                    [0.0, 0.0, u_R]])
+                    b_R = np.array([0.0, P_R, u_R * P_R])
+                else:
+                    A_R = np.zeros((3, 3))
+                    b_R = np.zeros(3)
+                
+                # セル47の係数
+                # A_i (下対角) = -(dt/4dx) * A_{i-1/2}
+                AA[k] = -coef * A_L if k > 0 else np.zeros((3, 3))
+                
+                # C_i (上対角) = (dt/4dx) * A_{i+1/2}
+                CC[k] = coef * A_R if k < n_inner - 1 else np.zeros((3, 3))
+                
+                # B_i (主対角) = I + (dt/4dx)(A_{i+1/2} - A_{i-1/2})
+                BB[k] = np.eye(3) + coef * (A_R - A_L)
+                
+                # D_i (右辺)
+                # W_i^{HO} - (dt/2dx)(F^{HO}_{i+1/2} - F^{HO}_{i-1/2})
+                #           - (dt/2dx)(b_{i+1/2} - b_{i-1/2})
+                F_diff = F_HO_half[i] - F_HO_half[i - 1] if i >= 1 and i < nx - 1 else np.zeros(3)
+                b_diff = b_R - b_L
+                
+                DD[k] = W_HO[i] - (dt / (2.0 * dx)) * F_diff - (dt / (2.0 * dx)) * b_diff
+            
+            # 3×3ブロック三重対角系を解く（Thomas algorithm の拡張）
+            W_new = self._solve_block_tridiagonal(AA, BB, CC, DD)
+            
+            # 境界は HO と同じ（固定）
+            W_full = np.zeros((nx, 3))
+            W_full[0] = W_HO[0]
+            W_full[1:-1] = W_new
+            W_full[-1] = W_HO[-1]
+            
+            # 収束判定
+            lo_residual = np.max(np.abs(W_full - W_m))
+            
+            # 次反復へ
+            W_m = W_full.copy()
+            
+            if lo_residual < self.lo_tol:
+                break
+        
+        # 結果をモーメントに分解
+        n_lo = W_m[:, 0]
+        nu_lo = W_m[:, 1]
+        U_lo = W_m[:, 2]
+        
+        u_lo = nu_lo / (n_lo + 1e-300)
+        T_lo = 2.0 * (U_lo / (n_lo + 1e-300) - 0.5 * u_lo**2)
+        T_lo = np.maximum(T_lo, 1e-300)
+        
+        tau_lo = tau_tilde / (n_lo * np.sqrt(T_lo))
+        
+        # CPUからGPUへ転送
+        n_lo_gpu = torch.tensor(n_lo, dtype=self.dtype, device=self.device)
+        u_lo_gpu = torch.tensor(u_lo, dtype=self.dtype, device=self.device)
+        T_lo_gpu = torch.tensor(T_lo, dtype=self.dtype, device=self.device)
+        tau_lo_gpu = torch.tensor(tau_lo, dtype=self.dtype, device=self.device)
+        
+        return n_lo_gpu, u_lo_gpu, T_lo_gpu, tau_lo_gpu, lo_residual, m + 1
+    
+    def _solve_block_tridiagonal(self, A, B, C, D):
+        """
+        3×3ブロック三重対角系を解く（Thomas algorithm の拡張版）。
+        
+        A[k] * x[k-1] + B[k] * x[k] + C[k] * x[k+1] = D[k]
+        
+        A: (n, 3, 3) 下対角ブロック
+        B: (n, 3, 3) 主対角ブロック
+        C: (n, 3, 3) 上対角ブロック
+        D: (n, 3)    右辺ベクトル
+        
+        戻り値: x (n, 3)
+        """
+        import numpy as np
+        n = len(D)
+        
+        # Forward elimination
+        C_prime = np.zeros((n, 3, 3))
+        D_prime = np.zeros((n, 3))
+        
+        C_prime[0] = np.linalg.solve(B[0], C[0])
+        D_prime[0] = np.linalg.solve(B[0], D[0])
+        
+        for k in range(1, n):
+            denom = B[k] - A[k] @ C_prime[k - 1]
+            if k < n - 1:
+                C_prime[k] = np.linalg.solve(denom, C[k])
+            D_prime[k] = np.linalg.solve(denom, D[k] - A[k] @ D_prime[k - 1])
+        
+        # Back substitution
+        x = np.zeros((n, 3))
+        x[-1] = D_prime[-1]
+        for k in range(n - 2, -1, -1):
+            x[k] = D_prime[k] - C_prime[k] @ x[k + 1]
+        
+        return x
 
-            # モーメントベクトルからn, u, Tを計算して残差計算と収束判定
+    # 高次モーメントS_1, S_2, S_3を分布関数から計算
+    @torch.no_grad()
+    def _HO_calculate_moments(self, f_z: torch.Tensor):
+        """
+        HO 系で使う高次モーメント S_1, S_2, S_3 を
+        分布 f_z と v による風上（upwind）スキームで計算する。
 
+        ここでは
+          ・界面 i+1/2 で upwind した分布 f_up[i+1/2, v]
+          ・重みは v, v^2, 0.5 v^3
+        からフラックスを作り、それを空間差分して
+        セル中心の S_1, S_2, S_3（nx 要素）を返す。
+        """
+        # f_z : (nx, nv)
+        nx, nv = f_z.shape
+        assert nv == self.nv
 
-        return n_lo, u_lo, T_lo, tau_lo, lo_iter, m + 1
+        dv = self.dv
+        dx = self.dx
+        v = self.v  # (nv,)
 
-    def _HO_calculate_fluxes(self, u_HO):
-        # LO近似のためのHOフラックスをGPU側でリダクション演算
+        # i+1/2 の upwind 分布: 正の v は左セル, 負の v は右セル
+        fL = f_z[:-1, :]  # (nx-1, nv), 左側 i
+        fR = f_z[1:, :]   # (nx-1, nv), 右側 i+1
+
+        f_up = torch.empty((nx - 1, nv), dtype=self.dtype, device=self.device)
+        f_up[:, self._pos_mask] = fL[:, self._pos_mask]
+        f_up[:, self._neg_mask] = fR[:, self._neg_mask]
+
+        # 各モーメントの「速度フラックス」の重み
+        # density flux   ~ v * f
+        # momentum flux  ~ v^2 * f
+        # energy  flux   ~ 0.5 * v^3 * f
+        w0 = v                    # (nv,)
+        w1 = v * v                # (nv,)
+        w2 = 0.5 * v * v * v      # (nv,)
+
+        # i+1/2 のフラックス (nx-1,)
+        F0 = torch.sum(f_up * w0[None, :], dim=1) * dv
+        F1 = torch.sum(f_up * w1[None, :], dim=1) * dv
+        F2 = torch.sum(f_up * w2[None, :], dim=1) * dv
+
+        # セル中心 S_k(i) ≈ -(F_{i+1/2} - F_{i-1/2}) / dx
+        S_1_HO = torch.zeros(nx, dtype=self.dtype, device=self.device)
+        S_2_HO = torch.zeros(nx, dtype=self.dtype, device=self.device)
+        S_3_HO = torch.zeros(nx, dtype=self.dtype, device=self.device)
+
+        if nx > 2:
+            S_1_HO[1:-1] = -(F0[1:] - F0[:-1]) / dx
+            S_2_HO[1:-1] = -(F1[1:] - F1[:-1]) / dx
+            S_3_HO[1:-1] = -(F2[1:] - F2[:-1]) / dx
+            # 境界はとりあえず内点と同じ値をコピー（Neumann 的）
+            S_1_HO[0] = S_1_HO[1]
+            S_1_HO[-1] = S_1_HO[-2]
+            S_2_HO[0] = S_2_HO[1]
+            S_2_HO[-1] = S_2_HO[-2]
+            S_3_HO[0] = S_3_HO[1]
+            S_3_HO[-1] = S_3_HO[-2]
+
+        return S_1_HO, S_2_HO, S_3_HO
+
+    # 熱流束を分布関数より計算
+    @torch.no_grad()
+    def _HO_calculate_fluxes(self, f_z: torch.Tensor):
+        """
+        HO 系で使う熱流束 Q^HO を計算する。
+        論文の式 (4.18) に対応する形を意識して、
+          Q_i ≈ 1/2 ∫ (v - u_i)^3 f_i(v) dv
+        を離散化して求める。
+        """
+        # f_z : (nx, nv)
+        dv = self.dv
+        # HO モーメント（n, u, T）を f_z から取得
+        _, u_HO, _ = self.calculate_moments(f_z)
+
+        # (v - u)^3 の計算（ブロードキャストで一括）
+        diff = self.v[None, :] - u_HO[:, None]   # (nx, nv)
+        diff3 = diff * diff * diff               # (nx, nv)
+
+        # Q_i = 0.5 * Σ_v (v - u_i)^3 f_i(v) dv
+        Q_HO = 0.5 * torch.sum(diff3 * f_z, dim=1) * dv  # (nx,)
 
         return Q_HO
+
+    # HOLOスキームにおけるHO差分式のソース項のExplicit_termの計算
+    @torch.no_grad()
+    def _compute_Explicit_term(self, theta: float = 0.5):
+        """
+        HOLO スキームにおける HO 差分式の Explicit 項を計算する.
+        現在ステップ f^k における移流 + BGK 衝突を評価し,
+        θ スキームの (1-θ) 部分をまとめた既知項を返す.
+
+        戻り値: (nx, nv) Tensor
+        """
+        # 現在のモーメントと緩和時間
+        n, u, T = self.calculate_moments(self.f)
+        tau = self.tau_tilde / (n * torch.sqrt(T))  # (nx,)
+
+        # Maxwell 分布 f_M^k
+        f_M = self.Maxwellian(n, u, T)              # (nx, nv)
+
+        # 移流項と衝突項（R(f^k) = streaming + collision）
+        streaming = self._compute_streaming(self.f)             # (nx, nv)
+        collision = (f_M - self.f) / tau[:, None]              # (nx, nv)
+
+        rhs = streaming + collision  # R(f^k)
+
+        # f^{k+1} - θΔt R^{k+1} = f^k + (1-θ)Δt R^k の右辺を Explicit_term として返す
+        Explicit_term = self.f + (1.0 - theta) * self.dt * rhs  # (nx, nv)
+        return Explicit_term
