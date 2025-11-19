@@ -31,46 +31,6 @@ def _tdma_vec_impl(a: torch.Tensor,
         x[:,k] = dp[:,k] - cp[:,k] * x[:,k+1]
     return x
 
-@torch.jit.script
-def _block_tridiag_solve(
-    A: torch.Tensor,  # (n,3,3) lower blocks
-    B: torch.Tensor,  # (n,3,3) diag blocks
-    C: torch.Tensor,  # (n,3,3) upper blocks
-    D: torch.Tensor   # (n,3)
-) -> torch.Tensor:
-    """
-    3×3 ブロック三重対角系を Thomas 法で解く TorchScript 版.
-      A[k] x[k-1] + B[k] x[k] + C[k] x[k+1] = D[k]
-    すべて GPU 上のテンソルで行う。
-    """
-    n = D.size(0)
-    device = D.device
-    dtype = D.dtype
-
-    C_prime = torch.zeros_like(C, device=device, dtype=dtype)
-    D_prime = torch.zeros_like(D, device=device, dtype=dtype)
-
-    # k = 0
-    B0_inv = torch.linalg.inv(B[0])
-    C_prime[0] = B0_inv @ C[0]
-    D_prime[0] = B0_inv @ D[0]
-
-    # forward elimination
-    for k in range(1, n):
-        denom = B[k] - A[k] @ C_prime[k-1]     # (3,3)
-        denom_inv = torch.linalg.inv(denom)
-        if k < n - 1:
-            C_prime[k] = denom_inv @ C[k]
-        D_prime[k] = denom_inv @ (D[k] - A[k] @ D_prime[k-1])
-
-    # back substitution
-    x = torch.empty_like(D, device=device, dtype=dtype)
-    x[-1] = D_prime[-1]
-    for k in range(n - 2, -1, -1):
-        x[k] = D_prime[k] - C_prime[k] @ x[k+1]
-
-    return x
-
 # 数値計算クラス
 class BGK1D:
     """数値計算・データ生成関数群"""
@@ -1137,7 +1097,7 @@ class BGK1D:
 
         return (z + 1), residual_val
 
-    # HOLO
+    # 陰解法のHOLOアルゴリズムによる加速更新関数
     def _implicit_update_holo(self):
         """BGK HOLO scheme"""
         self._fz.copy_(self.f)
@@ -1236,133 +1196,174 @@ class BGK1D:
 
         return (z + 1), ho_residual, lo_iter_list, lo_residual_list
 
+    # LO系のモーメント方程式をPicard反復により線形化して解く
     def _LO_calculate_moments(self, n_HO, u_HO, T_HO, Q_HO, S_1_HO, S_2_HO, S_3_HO):
         """
-        LO 系モーメント方程式の Picard 線形化を torch (GPU) 上で解く版.
-        入力テンソルはすべて shape (nx,) / (nx-1,) を想定。
+        LO系のモーメント方程式をPicard反復により線形化して解く。
+        ノートブックのセル23-49の定式化に従う。
+        
+        3×3ブロック三重対角系:
+          A_i * W_{i-1} + B_i * W_i + C_i * W_{i+1} = D_i
+        
+        W_i = [n_i, (nu)_i, U_i]^T
+        
+        CPU実装（nx-2個の内部セル、各3変数）
         """
-        device, dtype = self.device, self.dtype
-        nx   = self.nx
-        dt   = self.dt
-        dx   = self.dx
+        import numpy as np
+        
+        # GPUからCPUへ転送
+        n_HO_np = n_HO.cpu().numpy()      # (nx,)
+        u_HO_np = u_HO.cpu().numpy()      # (nx,)
+        T_HO_np = T_HO.cpu().numpy()      # (nx,)
+        Q_HO_np = Q_HO.cpu().numpy()      # (nx,)
+        S_1_HO_np = S_1_HO.cpu().numpy()  # (nx,)
+        S_2_HO_np = S_2_HO.cpu().numpy()  # (nx,)
+        S_3_HO_np = S_3_HO.cpu().numpy()  # (nx,)
+        
+        nx = self.nx
+        dt = self.dt
+        dx = self.dx
         tau_tilde = self.tau_tilde
-
-        # 念のため dtype / device をそろえる
-        n_HO   = n_HO.to(device=device, dtype=dtype)
-        u_HO   = u_HO.to(device=device, dtype=dtype)
-        T_HO   = T_HO.to(device=device, dtype=dtype)
-        Q_HO   = Q_HO.to(device=device, dtype=dtype)
-        S_1_HO = S_1_HO.to(device=device, dtype=dtype)   # (nx-1,) を想定
-        S_2_HO = S_2_HO.to(device=device, dtype=dtype)
-        S_3_HO = S_3_HO.to(device=device, dtype=dtype)
-
-        # W^{HO,k} = [n, nu, U]
-        W_HO = torch.empty((nx, 3), device=device, dtype=dtype)
-        W_HO[:, 0] = n_HO
-        W_HO[:, 1] = n_HO * u_HO                        # nu
-        W_HO[:, 2] = 0.5 * n_HO * (u_HO*u_HO + T_HO)    # U
-
-        # Picard 初期値
-        W_m = W_HO.clone()
+        
+        # HO系のモーメントベクトル W^{HO,k}
+        W_HO = np.zeros((nx, 3))  # [n, nu, U]
+        W_HO[:, 0] = n_HO_np
+        W_HO[:, 1] = n_HO_np * u_HO_np  # nu
+        W_HO[:, 2] = 0.5 * n_HO_np * (u_HO_np**2 + T_HO_np)  # U = n*(u^2/2 + T/2)
+        
+        # Picard反復の初期値: LO^{k+1,m=0} = HO^k
+        W_m = W_HO.copy()  # (nx, 3)
+        
         lo_residual = float('inf')
-
-        n_inner = nx - 2
-        coef = dt / (4.0 * dx)
-
-        eye3 = torch.eye(3, device=device, dtype=dtype)
-
+        
         for m in range(self.lo_iter):
-            # ---- 非線形項の「凍結」 ----
-            n_m  = W_m[:, 0]
-            nu_m = W_m[:, 1]
-            U_m  = W_m[:, 2]
+            # 前反復のモーメントから非線形項を計算（凍結）
+            n_m = W_m[:, 0]                    # (nx,)
+            nu_m = W_m[:, 1]                   # (nx,)
+            U_m = W_m[:, 2]                    # (nx,)
+            
+            u_star = nu_m / (n_m + 1e-300)     # u* = nu/n
+            T_star = 2.0 * (U_m / (n_m + 1e-300) - 0.5 * u_star**2)  # T = 2(U/n - u^2/2)
+            T_star = np.maximum(T_star, 1e-300)  # 正値保証
+            P_star = n_m * T_star              # P* = n*T
+            
+            # 界面値（中心差分で平均）
+            # i+1/2 の値
+            u_half_p = 0.5 * (u_star[:-1] + u_star[1:])    # (nx-1,)
+            P_half_p = 0.5 * (P_star[:-1] + P_star[1:])    # (nx-1,)
+            
+            # 係数行列 A, b の構築（セル37, 47）
+            # A_{i+1/2}^{m-1} = [[0, 1, 0], [u*^2, 0, 0], [0, 0, u*]]
+            # b_{i+1/2}^{m-1} = [0, P*, u*P*]
+            
+            # HO側フラックス（セル16）
+            # F^{HO}_{i+1/2} = [S_1, S_2, S_3 + 2Q]
+            # S_1_HO_np, S_2_HO_np, S_3_HO_np はすでに界面 i+1/2 の値 (nx-1,)
+            S1_half = S_1_HO_np          # (nx-1,)
+            S2_half = S_2_HO_np          # (nx-1,)
+            S3_half = S_3_HO_np          # (nx-1,)
+            Q_half  = 0.5 * (Q_HO_np[:-1] + Q_HO_np[1:])  # (nx-1,)
 
-            u_star = nu_m / (n_m + 1e-300)
-            T_star = 2.0 * (U_m / (n_m + 1e-300) - 0.5 * u_star*u_star)
-            T_star = torch.clamp(T_star, min=1e-300)
-            P_star = n_m * T_star
+            F_HO_half = np.zeros((nx - 1, 3))
+            F_HO_half[:, 0] = S1_half
+            F_HO_half[:, 1] = S2_half
+            F_HO_half[:, 2] = S3_half + 2.0 * Q_half
 
-            # 界面値 i+1/2
-            u_half = 0.5 * (u_star[:-1] + u_star[1:])   # (nx-1,)
-            P_half = 0.5 * (P_star[:-1] + P_star[1:])   # (nx-1,)
+            
+            # 3×3ブロック三重対角系の構築（内部セル i=1,...,nx-2）
+            n_inner = nx - 2
+            
+            # ブロック行列 (n_inner, 3, 3)
+            AA = np.zeros((n_inner, 3, 3))  # 下対角ブロック
+            BB = np.zeros((n_inner, 3, 3))  # 主対角ブロック
+            CC = np.zeros((n_inner, 3, 3))  # 上対角ブロック
+            DD = np.zeros((n_inner, 3))     # 右辺ベクトル
+            
+            for k in range(n_inner):
+                i = k + 1  # 内部セル番号 i=1,...,nx-2
+                
+                # 係数 (dt/4dx)
+                coef = dt / (4.0 * dx)
+                
+                # A_{i-1/2}^{m-1} (界面 i-1/2)
+                if i >= 1:
+                    u_L = u_half_p[i - 1]  # i-1/2
+                    P_L = P_half_p[i - 1]
+                    A_L = np.array([[0.0, 1.0, 0.0],
+                                    [u_L**2, 0.0, 0.0],
+                                    [0.0, 0.0, u_L]])
+                    b_L = np.array([0.0, P_L, u_L * P_L])
+                else:
+                    A_L = np.zeros((3, 3))
+                    b_L = np.zeros(3)
+                
+                # A_{i+1/2}^{m-1} (界面 i+1/2)
+                if i < nx - 1:
+                    u_R = u_half_p[i]  # i+1/2
+                    P_R = P_half_p[i]
+                    A_R = np.array([[0.0, 1.0, 0.0],
+                                    [u_R**2, 0.0, 0.0],
+                                    [0.0, 0.0, u_R]])
+                    b_R = np.array([0.0, P_R, u_R * P_R])
+                else:
+                    A_R = np.zeros((3, 3))
+                    b_R = np.zeros(3)
+                
+                # セル47の係数
+                # A_i (下対角) = -(dt/4dx) * A_{i-1/2}
+                AA[k] = -coef * A_L if k > 0 else np.zeros((3, 3))
+                
+                # C_i (上対角) = (dt/4dx) * A_{i+1/2}
+                CC[k] = coef * A_R if k < n_inner - 1 else np.zeros((3, 3))
+                
+                # B_i (主対角) = I + (dt/4dx)(A_{i+1/2} - A_{i-1/2})
+                BB[k] = np.eye(3) + coef * (A_R - A_L)
+                
+                # D_i (右辺)
+                # W_i^{HO} - (dt/2dx)(F^{HO}_{i+1/2} - F^{HO}_{i-1/2})
+                #           - (dt/2dx)(b_{i+1/2} - b_{i-1/2})
+                F_diff = F_HO_half[i] - F_HO_half[i - 1] if i >= 1 and i < nx - 1 else np.zeros(3)
+                b_diff = b_R - b_L
+                
+                DD[k] = W_HO[i] - (dt / (2.0 * dx)) * F_diff - (dt / (2.0 * dx)) * b_diff
+            
+            # 3×3ブロック三重対角系を解く（Thomas algorithm の拡張）
+            #W_new = self._solve_block_tridiagonal(AA, BB, CC, DD)
+            W_
 
-            # HO フラックス F^{HO}_{i+1/2}
-            Q_half = 0.5 * (Q_HO[:-1] + Q_HO[1:])       # (nx-1,)
-            F_HO_half = torch.stack((
-                S_1_HO,                          # (nx-1,)
-                S_2_HO,
-                S_3_HO + 2.0*Q_half
-            ), dim=1)                             # (nx-1,3)
-
-            # 界面行列 A_{i+1/2}, b_{i+1/2}
-            A_int = torch.zeros((nx-1, 3, 3), device=device, dtype=dtype)
-            b_int = torch.zeros((nx-1, 3),    device=device, dtype=dtype)
-
-            A_int[:, 0, 1] = 1.0                     # (0,1) = 1
-            A_int[:, 1, 0] = u_half*u_half           # (1,0) = u*^2
-            A_int[:, 2, 2] = u_half                  # (2,2) = u*
-            b_int[:, 1]    = P_half                  # [0, P*, u*P*]
-            b_int[:, 2]    = u_half * P_half
-
-            # i=1..nx-2 に対応する左/右界面
-            A_L = A_int[:-1]     # (nx-2,3,3)  i-1/2
-            A_R = A_int[1:]      # (nx-2,3,3)  i+1/2
-            b_L = b_int[:-1]     # (nx-2,3)
-            b_R = b_int[1:]      # (nx-2,3)
-
-            # 係数ブロック AA,BB,CC と右辺 DD をまとめて生成
-            AA = torch.zeros((n_inner, 3, 3), device=device, dtype=dtype)
-            BB = torch.empty_like(AA)
-            CC = torch.zeros_like(AA)
-            DD = torch.empty((n_inner, 3), device=device, dtype=dtype)
-
-            # A_i (下対角) = -(dt/4dx) * A_{i-1/2}  (k>0)
-            AA[1:] = -coef * A_L[1:]
-
-            # C_i (上対角) =  (dt/4dx) * A_{i+1/2}  (k<n_inner-1)
-            CC[:-1] = coef * A_R[:-1]
-
-            # B_i (主対角) = I + (dt/4dx)(A_{i+1/2} - A_{i-1/2})
-            BB[:] = eye3 + coef * (A_R - A_L)
-
-            # 右辺 D_i
-            F_L = F_HO_half[:-1]          # (nx-2,3)
-            F_R = F_HO_half[1:]           # (nx-2,3)
-            F_diff = F_R - F_L
-            b_diff = b_R - b_L
-
-            DD[:] = (
-                W_HO[1:-1] 
-                - (dt / (2.0*dx)) * F_diff
-                - (dt / (2.0*dx)) * b_diff
-            )
-
-            # ---- ブロック三重対角系の解法（GPU） ----
-            W_inner = _block_tridiag_solve(AA, BB, CC, DD)  # (nx-2,3)
-
-            # 境界は HO と同じ、内部だけ更新
-            W_full = W_HO.clone()
-            W_full[1:-1] = W_inner
-
+            # 境界は HO と同じ（固定）
+            W_full = np.zeros((nx, 3))
+            W_full[0] = W_HO[0]
+            W_full[1:-1] = W_new
+            W_full[-1] = W_HO[-1]
+            
             # 収束判定
-            lo_residual = torch.max(torch.abs(W_full - W_m)).item()
-            W_m = W_full
-
+            lo_residual = np.max(np.abs(W_full - W_m))
+            
+            # 次反復へ
+            W_m = W_full.copy()
+            
             if lo_residual < self.lo_tol:
                 break
-
-        # ---- 結果を (n,u,T,τ) に戻す ----
-        n_lo  = W_m[:, 0]
+        
+        # 結果をモーメントに分解
+        n_lo = W_m[:, 0]
         nu_lo = W_m[:, 1]
-        U_lo  = W_m[:, 2]
-
+        U_lo = W_m[:, 2]
+        
         u_lo = nu_lo / (n_lo + 1e-300)
-        T_lo = 2.0 * (U_lo / (n_lo + 1e-300) - 0.5 * u_lo*u_lo)
-        T_lo = torch.clamp(T_lo, min=1e-300)
-
-        tau_lo = tau_tilde / (n_lo * torch.sqrt(T_lo))
-
-        return n_lo, u_lo, T_lo, tau_lo, lo_residual, m + 1
+        T_lo = 2.0 * (U_lo / (n_lo + 1e-300) - 0.5 * u_lo**2)
+        T_lo = np.maximum(T_lo, 1e-300)
+        
+        tau_lo = tau_tilde / (n_lo * np.sqrt(T_lo))
+        
+        # CPUからGPUへ転送
+        n_lo_gpu = torch.tensor(n_lo, dtype=self.dtype, device=self.device)
+        u_lo_gpu = torch.tensor(u_lo, dtype=self.dtype, device=self.device)
+        T_lo_gpu = torch.tensor(T_lo, dtype=self.dtype, device=self.device)
+        tau_lo_gpu = torch.tensor(tau_lo, dtype=self.dtype, device=self.device)
+        
+        return n_lo_gpu, u_lo_gpu, T_lo_gpu, tau_lo_gpu, lo_residual, m + 1
     
     def _solve_block_tridiagonal(self, A, B, C, D):
         """
