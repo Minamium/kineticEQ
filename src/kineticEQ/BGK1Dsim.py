@@ -1112,6 +1112,9 @@ class BGK1D:
         # θSchemeの値を計算(暫定処置の強制クランクニコルソン)
         theta = 0.5
 
+        # Explicit_termの計算
+        Explicit_term = self._compute_Explicit_term(theta)
+
         # LO反復回数を保存するリスト
         lo_iter_list = []
         lo_residual_list = []
@@ -1151,9 +1154,6 @@ class BGK1D:
             # ソース項. #
             ###########
             B_batch = torch.zeros(self.nv, self.nx - 2, dtype=self.dtype, device=self.device)
-
-            # Explicit_termの計算
-            Explicit_term = self._compute_Explicit_term(theta)
             
             # LO系から得たモーメントでMaxwell分布を計算
             f_M_LO = self.Maxwellian(n_lo, u_lo, T_lo)
