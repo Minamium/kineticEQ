@@ -1157,6 +1157,9 @@ class BGK1D:
             B_batch = (Explicit_term[1:-1, :] + 
                        theta * (self.dt / tau_lo[1:-1, None]) * f_M_LO[1:-1, :]).T
 
+            # 境界合わせ
+            self._fn_tmp.copy_(self._fz)
+
             # cuSOLVERによる線形方程式のバッチ解法
             solution = self._cusolver.gtsv_strided(
                 _dl.contiguous(),
