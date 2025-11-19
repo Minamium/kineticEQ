@@ -1328,8 +1328,7 @@ class BGK1D:
                 DD[k] = W_HO[i] - (dt / (2.0 * dx)) * F_diff - (dt / (2.0 * dx)) * b_diff
             
             # 3×3ブロック三重対角系を解く（Thomas algorithm の拡張）
-            #W_new = self._solve_block_tridiagonal(AA, BB, CC, DD)
-            W_
+            W_new = self._solve_block_tridiagonal(AA, BB, CC, DD)
 
             # 境界は HO と同じ（固定）
             W_full = np.zeros((nx, 3))
