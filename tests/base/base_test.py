@@ -70,5 +70,6 @@ config = {
 
 sim = BGK1DPlot(**config)
 sim.run_simulation()
-sim.save_state(filename=f"{args.output}.pkl")
 sim.plot_state(filename=f"{args.output}.png")
+sim.create_gif(filename=f"{args.output}.gif")
+

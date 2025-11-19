@@ -16,7 +16,7 @@ from .BGK1D_old import BGK1D_old
 class BGK1DPlotMixin:
     """可視化, 解析用の関数群"""
     #状態可視化メソッド
-    def plot_state(self):
+    def plot_state(self, filename='bgk_simulation.png'):
         """状態の可視化"""
         import matplotlib.pyplot as plt
         # CPUに転送（matplotlib用）
@@ -64,6 +64,7 @@ class BGK1DPlotMixin:
         ax4.grid(True, alpha=0.3)
 
         plt.show()
+        plt.savefig(filename)
 
         # 統計情報表示
         print(f"Density: mean={n_cpu.mean():.4f}, min={n_cpu.min():.4f}, max={n_cpu.max():.4f}")
