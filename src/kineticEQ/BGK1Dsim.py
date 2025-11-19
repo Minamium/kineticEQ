@@ -209,6 +209,9 @@ class BGK1D:
         print(f"  solver: {self.solver}")
         if self.solver == 'implicit':
             print(f"  implicit solver: {self.implicit_solver}")
+            if self.implicit_solver == 'holo':
+                print(f"  ho_iter: {self.ho_iter}, ho_tol: {self.ho_tol}")
+                print(f"  lo_iter: {self.lo_iter}, lo_tol: {self.lo_tol}")
 
         print(f"  space: nx={self.nx}, dx={self.dx:.4f}, Lx={self.Lx}")
         print(f"  velocity: nv={self.nv}, dv={self.dv:.4f}, v_max={self.v_max}")
