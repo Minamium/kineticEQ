@@ -896,7 +896,7 @@ class BGK1D:
                 if self.implicit_solver == 'backend':
                     Picard_iter, residual = self._implicit_update_cuda_backend()
                 elif self.implicit_solver == 'holo':
-                    Picard_iter, residual = self._implicit_update_holo()
+                    Picard_iter, residual, lo_iter_list = self._implicit_update_holo()
                 else:
                     Picard_iter, residual = self._implicit_cusolver_update()
                 
@@ -910,6 +910,8 @@ class BGK1D:
                     current_time = step * self.dt
                     progress_write(f"Step {step:5d}/{self.nt - 1} (t={current_time:.3f})")
                     progress_write(f"Picard iteration: {Picard_iter:5d}, residual: {residual:.6e}")
+                    if self.implicit_solver == 'holo':
+                        progress_write(f"LO iteration: {lo_iter_list}")
 
                 pbar.update(1)
 
@@ -1182,7 +1184,7 @@ class BGK1D:
         self.f_new[0, :].copy_(self.f[0, :])
         self.f_new[-1, :].copy_(self.f[-1, :])
 
-        return (z + 1), ho_residual
+        return (z + 1), ho_residual, lo_iter_list
 
     def _LO_calculate_moments(self, n_HO, u_HO, T_HO, Q_HO, S_1_HO, S_2_HO, S_3_HO):
         """
