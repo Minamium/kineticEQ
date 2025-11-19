@@ -1163,6 +1163,8 @@ class BGK1D:
                        theta * (self.dt / tau_lo[1:-1, None]) * f_M_LO[1:-1, :]).T
 
             # 境界合わせ
+            B_batch[:, 0] += alpha * self.f[0, :]
+            B_batch[:, -1] += beta * self.f[-1, :]
             self._fn_tmp.copy_(self._fz)
 
             # cuSOLVERによる線形方程式のバッチ解法
