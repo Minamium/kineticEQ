@@ -18,6 +18,12 @@ config = {
         "picard_iter": 1,
         "picard_tol": 1e-4,
 
+        # HOLOパラメータ
+        "ho_iter": 1,
+        "lo_iter": 1,
+        "ho_tol": 1e-4,
+        "lo_tol": 1e-4,
+
         # ハイパーパラメータ
         "tau_tilde": 5e-6,
 
