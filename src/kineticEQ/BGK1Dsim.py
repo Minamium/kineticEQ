@@ -1170,7 +1170,7 @@ class BGK1D:
 
             # 残差計算と収束判定
             ho_residual = torch.max(torch.abs(self._fn_tmp - self._fz))
-            if ho_residual <= self.picard_tol:
+            if ho_residual <= self.ho_tol:
                 swapped_last = False
                 break
 
@@ -1247,16 +1247,17 @@ class BGK1D:
             
             # HO側フラックス（セル16）
             # F^{HO}_{i+1/2} = [S_1, S_2, S_3 + 2Q]
-            # ここでは中心差分で界面値を作る
-            S1_half = 0.5 * (S_1_HO_np[:-1] + S_1_HO_np[1:])
-            S2_half = 0.5 * (S_2_HO_np[:-1] + S_2_HO_np[1:])
-            S3_half = 0.5 * (S_3_HO_np[:-1] + S_3_HO_np[1:])
-            Q_half = 0.5 * (Q_HO_np[:-1] + Q_HO_np[1:])
-            
+            # S_1_HO_np, S_2_HO_np, S_3_HO_np はすでに界面 i+1/2 の値 (nx-1,)
+            S1_half = S_1_HO_np          # (nx-1,)
+            S2_half = S_2_HO_np          # (nx-1,)
+            S3_half = S_3_HO_np          # (nx-1,)
+            Q_half  = 0.5 * (Q_HO_np[:-1] + Q_HO_np[1:])  # (nx-1,)
+
             F_HO_half = np.zeros((nx - 1, 3))
             F_HO_half[:, 0] = S1_half
             F_HO_half[:, 1] = S2_half
             F_HO_half[:, 2] = S3_half + 2.0 * Q_half
+
             
             # 3×3ブロック三重対角系の構築（内部セル i=1,...,nx-2）
             n_inner = nx - 2
@@ -1389,66 +1390,45 @@ class BGK1D:
         
         return x
 
-    # 高次モーメントS_1, S_2, S_3を分布関数から計算
+    # 高次モーメント S_1, S_2, S_3 を分布関数から計算
     @torch.no_grad()
     def _HO_calculate_moments(self, f_z: torch.Tensor):
         """
-        HO 系で使う高次モーメント S_1, S_2, S_3 を
-        分布 f_z と v による風上（upwind）スキームで計算する。
+        HO 系で使う高次モーメント S_1, S_2, S_3 を、
+        分布 f_z と速度 v による **風上 upwind スキーム** で
+        「界面 i+1/2 のフラックス」として計算する。
 
-        ここでは
-          ・界面 i+1/2 で upwind した分布 f_up[i+1/2, v]
-          ・重みは v, v^2, 0.5 v^3
-        からフラックスを作り、それを空間差分して
-        セル中心の S_1, S_2, S_3（nx 要素）を返す。
+        戻り値:
+            S_1_HO, S_2_HO, S_3_HO : いずれも shape (nx-1,)
+                i+1/2 の界面フラックスを表す。
         """
         # f_z : (nx, nv)
         nx, nv = f_z.shape
         assert nv == self.nv
 
         dv = self.dv
-        dx = self.dx
         v = self.v  # (nv,)
 
-        # i+1/2 の upwind 分布: 正の v は左セル, 負の v は右セル
-        fL = f_z[:-1, :]  # (nx-1, nv), 左側 i
-        fR = f_z[1:, :]   # (nx-1, nv), 右側 i+1
+        # 左・右セル
+        fL = f_z[:-1, :]  # i
+        fR = f_z[ 1:, :]  # i+1
 
+        # upwind 分布: v>0 なら左セル、v<0 なら右セル
         f_up = torch.empty((nx - 1, nv), dtype=self.dtype, device=self.device)
         f_up[:, self._pos_mask] = fL[:, self._pos_mask]
         f_up[:, self._neg_mask] = fR[:, self._neg_mask]
 
-        # 各モーメントの「速度フラックス」の重み
-        # density flux   ~ v * f
-        # momentum flux  ~ v^2 * f
-        # energy  flux   ~ 0.5 * v^3 * f
-        w0 = v                    # (nv,)
-        w1 = v * v                # (nv,)
-        w2 = 0.5 * v * v * v      # (nv,)
+        # 界面フラックス
+        w1 = v                         # v
+        w2 = v * v                     # v^2
+        w3 = 0.5 * v * v * v           # 0.5 v^3
 
-        # i+1/2 のフラックス (nx-1,)
-        F0 = torch.sum(f_up * w0[None, :], dim=1) * dv
-        F1 = torch.sum(f_up * w1[None, :], dim=1) * dv
-        F2 = torch.sum(f_up * w2[None, :], dim=1) * dv
-
-        # セル中心 S_k(i) ≈ -(F_{i+1/2} - F_{i-1/2}) / dx
-        S_1_HO = torch.zeros(nx, dtype=self.dtype, device=self.device)
-        S_2_HO = torch.zeros(nx, dtype=self.dtype, device=self.device)
-        S_3_HO = torch.zeros(nx, dtype=self.dtype, device=self.device)
-
-        if nx > 2:
-            S_1_HO[1:-1] = -(F0[1:] - F0[:-1]) / dx
-            S_2_HO[1:-1] = -(F1[1:] - F1[:-1]) / dx
-            S_3_HO[1:-1] = -(F2[1:] - F2[:-1]) / dx
-            # 境界はとりあえず内点と同じ値をコピー（Neumann 的）
-            S_1_HO[0] = S_1_HO[1]
-            S_1_HO[-1] = S_1_HO[-2]
-            S_2_HO[0] = S_2_HO[1]
-            S_2_HO[-1] = S_2_HO[-2]
-            S_3_HO[0] = S_3_HO[1]
-            S_3_HO[-1] = S_3_HO[-2]
+        S_1_HO = torch.sum(f_up * w1[None, :], dim=1) * dv  # (nx-1,)
+        S_2_HO = torch.sum(f_up * w2[None, :], dim=1) * dv  # (nx-1,)
+        S_3_HO = torch.sum(f_up * w3[None, :], dim=1) * dv  # (nx-1,)
 
         return S_1_HO, S_2_HO, S_3_HO
+
 
     # 熱流束を分布関数より計算
     @torch.no_grad()
