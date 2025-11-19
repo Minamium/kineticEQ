@@ -6,7 +6,6 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--output', type=str, default='base_bench', help='Output filename prefix')
 parser.add_argument('--solver', type=str, default='implicit', help='Solver type')
 parser.add_argument('--implicit_solver', type=str, default='backend', help='Implicit solver type')
-parser.add_argument('--explicit_solver', type=str, default='backend', help='Explicit solver type')
 parser.add_argument('--picard_iter', type=int, default=64, help='Picard iteration number')
 parser.add_argument('--picard_tol', type=float, default=1e-6, help='Picard tolerance')
 parser.add_argument('--ho_iter', type=int, default=10, help='HOLO iteration number')
@@ -26,9 +25,6 @@ config = {
 
         # 陰解法ソルバー
         "implicit_solver": args.implicit_solver,
-
-        # 陽解法ソルバー
-        "explicit_solver": args.explicit_solver,
 
         # 陰解法パラメータ
         "picard_iter": args.picard_iter,
