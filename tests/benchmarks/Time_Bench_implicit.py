@@ -4,6 +4,7 @@ from kineticEQ import BGK1DPlot
 # コマンドライン引数
 parser = argparse.ArgumentParser()
 parser.add_argument('--output', type=str, default='Implicit_time_bench', help='Output filename prefix')
+parser.add_argument('--implicit_solver', type=str, default='holo', help='Implicit solver type')
 args = parser.parse_args()
 
 config = {
@@ -11,7 +12,7 @@ config = {
         "solver": "implicit",
 
         # 陰解法ソルバー
-        "implicit_solver": "backend",
+        "implicit_solver": args.implicit_solver,
 
         # 陰解法パラメータ
         "picard_iter": 1,
