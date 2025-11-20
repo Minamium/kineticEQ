@@ -1382,45 +1382,6 @@ class BGK1D:
 
         return n_lo, u_lo, T_lo, tau_lo, lo_residual, m + 1
 
-    # 3×3ブロック三重対角系を解く（Thomas algorithm の拡張版）
-    @torch.no_grad()
-    def _solve_block_tridiagonal(self, A, B, C, D):
-        """
-        3×3ブロック三重対角系を解く（Thomas algorithm の拡張版）。
-        
-        A[k] * x[k-1] + B[k] * x[k] + C[k] * x[k+1] = D[k]
-        
-        A: (n, 3, 3) 下対角ブロック
-        B: (n, 3, 3) 主対角ブロック
-        C: (n, 3, 3) 上対角ブロック
-        D: (n, 3)    右辺ベクトル
-        
-        戻り値: x (n, 3)
-        """
-        import numpy as np
-        n = len(D)
-        
-        # Forward elimination
-        C_prime = np.zeros((n, 3, 3))
-        D_prime = np.zeros((n, 3))
-        
-        C_prime[0] = np.linalg.solve(B[0], C[0])
-        D_prime[0] = np.linalg.solve(B[0], D[0])
-        
-        for k in range(1, n):
-            denom = B[k] - A[k] @ C_prime[k - 1]
-            if k < n - 1:
-                C_prime[k] = np.linalg.solve(denom, C[k])
-            D_prime[k] = np.linalg.solve(denom, D[k] - A[k] @ D_prime[k - 1])
-        
-        # Back substitution
-        x = np.zeros((n, 3))
-        x[-1] = D_prime[-1]
-        for k in range(n - 2, -1, -1):
-            x[k] = D_prime[k] - C_prime[k] @ x[k + 1]
-        
-        return x
-
     # 高次モーメント S_1, S_2, S_3 を分布関数から計算
     @torch.no_grad()
     def _HO_calculate_moments(self, f_z: torch.Tensor):
