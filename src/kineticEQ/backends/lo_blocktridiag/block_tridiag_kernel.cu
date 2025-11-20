@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
 
 template <typename T>
 __device__ inline void mat3_mul(const T* A, const T* B, T* C) {
@@ -67,17 +68,16 @@ __device__ inline bool invert3x3(const T* M, T* Minv) {
 template <typename T>
 __global__ void block_tridiag_kernel(
     const T* __restrict__ A,   // (batch, n, 3, 3)
-    T* __restrict__       B,   // (batch, n, 3, 3) ← in-placeで更新
-    T* __restrict__       C,   // (batch, n, 3, 3) ← in-placeで C'
-    T* __restrict__       D,   // (batch, n, 3)    ← in-placeで D'
-    T* __restrict__       X,   // (batch, n, 3)    ← 解
+    T* __restrict__       B,   // (batch, n, 3, 3) ← in-place
+    T* __restrict__       C,   // (batch, n, 3, 3) ← in-place (C')
+    T* __restrict__       D,   // (batch, n, 3)    ← in-place (D')
+    T* __restrict__       X,   // (batch, n, 3)    ← solution
     int n,
     int batch
 ) {
     const int b = blockIdx.x;
     if (b >= batch) return;
 
-    // 各系統の先頭ポインタ
     const int mat_stride = n * 9;  // 3x3=9
     const int vec_stride = n * 3;
 
@@ -89,20 +89,18 @@ __global__ void block_tridiag_kernel(
 
     if (n <= 0) return;
 
-    // ---- Forward elimination ----
+    // Forward elimination
     T denom[9];
     T denom_inv[9];
     T tmp3[3];
     T mat_tmp[9];
 
     // k = 0
-    // C'_0 = inv(B_0) * C_0
     if (!invert3x3(&Bb[0], denom_inv)) {
-        // 特異な場合はそのまま返してしまう（要検討）
         return;
     }
-    mat3_mul(denom_inv, &Cb[0], &Cb[0]);       // Cb[0] ← C'_0
-    mat3_vec_mul(denom_inv, &Db[0], &Db[0]);   // Db[0] ← D'_0
+    mat3_mul(denom_inv, &Cb[0], &Cb[0]);
+    mat3_vec_mul(denom_inv, &Db[0], &Db[0]);
 
     // k = 1..n-1
     for (int k = 1; k < n; ++k) {
@@ -128,17 +126,14 @@ __global__ void block_tridiag_kernel(
             return;
         }
 
-        // C'_k = inv(denom) * C_k （最後の行では使わないが、一応計算）
         if (k < n - 1) {
             mat3_mul(denom_inv, &Cb[idx_k], &Cb[idx_k]);
         }
 
-        // D'_k = inv(denom) * rhs_tmp
         mat3_vec_mul(denom_inv, tmp3, &Db[idv_k]);
     }
 
-    // ---- Back substitution ----
-    // X_{n-1} = D'_{n-1}
+    // Back substitution
     Xb[(n - 1)*3 + 0] = Db[(n - 1)*3 + 0];
     Xb[(n - 1)*3 + 1] = Db[(n - 1)*3 + 1];
     Xb[(n - 1)*3 + 2] = Db[(n - 1)*3 + 2];
@@ -148,7 +143,6 @@ __global__ void block_tridiag_kernel(
         const int idv_k  = k * 3;
         const int idv_kp = (k + 1) * 3;
 
-        // y = C'_k * X_{k+1}
         mat3_vec_mul(&Cb[idx_k], &Xb[idv_kp], tmp3);
 
         Xb[idv_k + 0] = Db[idv_k + 0] - tmp3[0];
@@ -156,3 +150,28 @@ __global__ void block_tridiag_kernel(
         Xb[idv_k + 2] = Db[idv_k + 2] - tmp3[2];
     }
 }
+
+// nvcc 側でカーネルを起動するランチャ関数
+template <typename scalar_t>
+void launch_block_tridiag_kernel(
+    const scalar_t* A,
+    scalar_t* B,
+    scalar_t* C,
+    scalar_t* D,
+    scalar_t* X,
+    int n,
+    int batch,
+    cudaStream_t stream
+) {
+    const dim3 blocks(batch);
+    const int  threads = 1;
+    block_tridiag_kernel<scalar_t><<<blocks, threads, 0, stream>>>(
+        A, B, C, D, X, n, batch
+    );
+}
+
+// 明示的インスタンス化
+template void launch_block_tridiag_kernel<float>(
+    const float*, float*, float*, float*, float*, int, int, cudaStream_t);
+template void launch_block_tridiag_kernel<double>(
+    const double*, double*, double*, double*, double*, int, int, cudaStream_t);
