@@ -208,7 +208,7 @@ class BGK1D:
         if self.solver == "implicit" and self.implicit_solver == "holo":
             print("--- compile LO block-tridiag backend ---")
             from torch.utils.cpp_extension import load
-            import os, sysconfig
+            import traceback, os, sysconfig
             from pathlib import Path
 
             src_dir = Path(__file__).resolve().parent / "backends" / "lo_blocktridiag"
