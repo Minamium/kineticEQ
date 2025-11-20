@@ -137,7 +137,7 @@ class BGK1D:
         self.animation_data = []  # 状態記録用
 
         # cuSOLVERコンパイル
-        if self.solver == 'implicit':
+        if self.solver == 'implicit' and (self.implicit_solver == 'backend' or self.implicit_solver == 'holo'):
             print("--- compile cuSOLVER ---")
             from torch.utils.cpp_extension import load
             import os, sysconfig
@@ -203,6 +203,31 @@ class BGK1D:
             )
             traceback.print_exc()
             print('--- fused CUDA backend loaded ---')
+
+        # HOLO 用ブロック三重対角ソルバ
+        if self.solver == "implicit" and self.implicit_solver == "holo":
+            print("--- compile LO block-tridiag backend ---")
+            from torch.utils.cpp_extension import load
+            import os, sysconfig
+            from pathlib import Path
+
+            src_dir = Path(__file__).resolve().parent / "backends" / "lo_blocktridiag"
+            os.makedirs('build', exist_ok=True)
+            os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.6")
+
+            self._lo_block = load(
+                name='lo_blocktridiag',
+                sources=[str(src_dir / 'block_tridiag_binding.cpp'),
+                         str(src_dir / 'block_tridiag_kernel.cu')],
+                extra_cflags=['-O3'],
+                extra_cuda_cflags=['-O3'],
+                extra_include_paths=[sysconfig.get_paths()['include']],
+                build_directory='build',
+                verbose=True
+            )
+            traceback.print_exc()
+            print('--- LO block-tridiag backend loaded ---')
+
 
         # 初期化完了通知
         print(f"initiaze complete:")
