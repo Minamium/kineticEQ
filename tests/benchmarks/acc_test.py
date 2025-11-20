@@ -55,4 +55,6 @@ config = {
 sim = BGK1DPlot(**config)
 bench_result = sim.run_benchmark(benc_type="spatial", grid_list=[65, 129, 257, 513, 1025, 2049, 4129])
 sim.save_benchmark_results(filename=f"{args.output}.pkl")
-sim.plot_benchmark_results(filename=f"{args.output}.pkl", output_filename=f"{args.output}.png")
+error_dict = sim.compute_error(filename=f"{args.output}.pkl", kind='nearest')
+result = sim.plot_benchmark_results(filename=f"{args.output}.pkl", error_dict=error_dict, show_plots=True)
+print(f"収束次数: {result['convergence_orders']}")
