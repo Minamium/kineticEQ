@@ -20,7 +20,7 @@ parser.add_argument('--use_tqdm', type=bool, default=True, help='Use tqdm')
 parser.add_argument('--nx', type=int, default=1000, help='Number of grid points')
 parser.add_argument('--nv', type=int, default=200, help='Number of velocity points')
 parser.add_argument('--v_max', type=float, default=10.0, help='Maximum velocity')
-parser.add_argument('--ic_fn', type=str, default='acoustic_wave', help='Custom initial condition function')
+parser.add_argument('--ic_fn', type=str, default=None, help='Custom initial condition function')
 args = parser.parse_args()
 
 config = {
@@ -50,7 +50,7 @@ config = {
         "dt": args.dt,
         
         # カスタム初期条件
-        "ic_fn": ic_fn,
+        "ic_fn": args.ic_fn,
 
         "initial_regions": [
         {"x_range": (0.0, 0.5), "n": 1.0, "u": 0.0, "T": 1.0},    
