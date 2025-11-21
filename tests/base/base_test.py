@@ -78,6 +78,9 @@ config = {
     }
 
 sim = BGK1DPlot(**config)
+sim.Array_allocation()
+sim.set_initial_condition()
+sim.apply_boundary_condition()
 sim.plot_state(filename=f"{args.output}_init.png")
 sim.run_simulation()
 sim.plot_state(filename=f"{args.output}_final.png")
