@@ -240,8 +240,13 @@ class BGK1D:
                 print(f"  ho_iter: {self.ho_iter}, ho_tol: {self.ho_tol}")
                 print(f"  lo_iter: {self.lo_iter}, lo_tol: {self.lo_tol}")
 
+        print(" ---- hyperparameter ----")
+        print(f"  hyperparameter: tau_tilde={self.tau_tilde}")
+        print(" ---- space ----")
         print(f"  space: nx={self.nx}, dx={self.dx:.4f}, Lx={self.Lx}")
+        print(" ---- velocity ----")
         print(f"  velocity: nv={self.nv}, dv={self.dv:.4f}, v_max={self.v_max}")
+        print(" ---- time ----")
         print(f"  time: nt={self.nt}, dt={self.dt:.4f}, T_total={self.T_total}")
         print(f"  dtype: {self.dtype}")
         print(f"  device: {self.device}, GPU name: {torch.cuda.get_device_name(0)}")
