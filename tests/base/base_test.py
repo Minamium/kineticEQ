@@ -23,35 +23,6 @@ parser.add_argument('--v_max', type=float, default=10.0, help='Maximum velocity'
 parser.add_argument('--ic_fn', type=str, default='acoustic_wave', help='Custom initial condition function')
 args = parser.parse_args()
 
-import torch
-import math
-
-def ic_acoustic_wave(x: torch.Tensor):
-    """
-    小振幅の密度波: n = n0 * (1 + eps * sin(2π x / L))
-    u = 0, T = T0 一様
-    """
-    device, dtype = x.device, x.dtype
-
-    L = x[-1] - x[0]          # 物理長さ (≈ Lx)
-    n0 = torch.tensor(1.0, device=device, dtype=dtype)
-    T0 = torch.tensor(1.0, device=device, dtype=dtype)
-    eps = torch.tensor(0.01, device=device, dtype=dtype)  # 小振幅
-
-    phase = 2.0 * math.pi * (x - x[0]) / L
-    n = n0 * (1.0 + eps * torch.sin(phase))
-    u = torch.zeros_like(x)
-    T = T0 * torch.ones_like(x)
-
-    return n, u, T
-
-
-# カスタム初期条件関数
-if args.ic_fn == 'acoustic_wave':
-    ic_fn = ic_acoustic_wave
-else:
-    ic_fn = None
-
 config = {
         # ソルバ選択
         "solver": args.solver,
