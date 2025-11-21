@@ -46,7 +46,6 @@ error_dict = sim.compute_error(bench_results)
 sim.save_benchmark_results(
     filename=f"{args.output}.pkl",
     bench_results=bench_results,
-    error_dict=error_dict,
 )
 
 # 4. 図をプロット
