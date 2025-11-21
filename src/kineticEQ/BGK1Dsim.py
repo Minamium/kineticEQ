@@ -66,6 +66,7 @@ class BGK1D:
                  v_max=5.0,
 
                  # 初期状態設定
+                 ic_fn=None,
                  initial_regions=[{"x_range": (0.0, 0.5), "n": 1.0, "u": 0.0, "T": 1.0},    
                                   {"x_range": (0.5, 1.0), "n": 0.125, "u": 0.0, "T": 0.8}],
 
@@ -107,6 +108,7 @@ class BGK1D:
         self.v_max = v_max
 
         # 初期状態保存
+        self.ic_fn = ic_fn
         self.initial_regions = initial_regions
 
         # 境界条件保存
@@ -454,6 +456,8 @@ class BGK1D:
         
         self.nx = nx_num
         self.nv = nv_num
+        self.dx = self.Lx / (self.nx - 1)
+        self.dv = 2 * self.v_max / (self.nv - 1)
 
         self.Array_allocation()
         self.set_initial_condition()
@@ -693,33 +697,42 @@ class BGK1D:
     # 初期条件設定メソッド
     def set_initial_condition(self):
         """config設定による初期条件設定"""
-        #print("--- set initial condition ---")
+        x = self.x  # (nx,) 物理座標
 
         # デフォルト値で初期化
         n_init = torch.ones(self.nx, dtype=self.dtype, device=self.device)
         u_init = torch.zeros(self.nx, dtype=self.dtype, device=self.device)
         T_init = torch.ones(self.nx, dtype=self.dtype, device=self.device)
 
-        # config設定があれば適用
-        if hasattr(self, 'initial_regions'):
+        # ic_fn 優先
+        if self.ic_fn is not None:
+            n_i, u_i, T_i = self.ic_fn(x)
+
+            # 型・shape チェック
+            if n_i.shape != x.shape or u_i.shape != x.shape or T_i.shape != x.shape:
+                raise ValueError("ic_fn must return (n, u, T) with same shape as x")
+
+            n_init = n_i.to(device=self.device, dtype=self.dtype)
+            u_init = u_i.to(device=self.device, dtype=self.dtype)
+            T_init = T_i.to(device=self.device, dtype=self.dtype)
+
+        # 後方互換: initial_regions があればそれを使う
+        elif hasattr(self, 'initial_regions') and self.initial_regions is not None:
             for region in self.initial_regions:
-                # 座標範囲をインデックスに変換
                 x_start, x_end = region['x_range']
-                i_start = int(x_start / self.Lx * (self.nx - 1))
-                i_end = int(x_end / self.Lx * (self.nx - 1)) + 1
-                i_start = max(0, i_start)
-                i_end = min(self.nx, i_end)
+                # 物理座標でマスクを切る（nxをユーザに意識させない）
+                mask = (x >= x_start) & (x < x_end)
 
-                # モーメント値設定
-                n_init[i_start:i_end] = region.get('n', 1.0)
-                u_init[i_start:i_end] = region.get('u', 0.0)
-                T_init[i_start:i_end] = region.get('T', 1.0)
-
-                #print(f"  Region x=[{x_start:.2f}, {x_end:.2f}]: n={region.get('n', 1.0)}, u={region.get('u', 0.0)}, T={region.get('T', 1.0)}")
+                if 'n' in region:
+                    n_init[mask] = region['n']
+                if 'u' in region:
+                    u_init[mask] = region['u']
+                if 'T' in region:
+                    T_init[mask] = region['T']
 
         # マクスウェル分布で初期化
         self.f = self.Maxwellian(n_init, u_init, T_init)
-        #print("Initial condition set")
+
 
     #境界条件設定メソッド
     def apply_boundary_condition(self):
