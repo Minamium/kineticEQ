@@ -145,7 +145,7 @@ class BGK1D:
         if auto_compile:
             print("--- auto compile ---")
             self.compile()
-            print("--- auto compile complete ---") 
+            print("--- auto compile complete ---")
 
         # 初期化完了通知
         print(f"initiaze complete:")
@@ -185,9 +185,9 @@ class BGK1D:
         print("--- run simulation complete, Result is saved in self.f ---")
 
     # コンパイルメソッド
-    def compile(self):
+    def compile(self, force_compile=False):
         # cuSOLVERコンパイル
-        if self.solver == 'implicit' and (self.implicit_solver == 'backend' or self.implicit_solver == 'holo'):
+        if force_compile or (self.solver == 'implicit' and (self.implicit_solver == 'backend' or self.implicit_solver == 'holo')):
             print("--- compile cuSOLVER ---")
             from torch.utils.cpp_extension import load
             import os, sysconfig
@@ -208,7 +208,7 @@ class BGK1D:
 
         # CUDA fused explicitコンパイル
         self._explicit_cuda = None
-        if self.solver == 'explicit' and self.explicit_solver == 'backend':
+        if force_compile or (self.solver == 'explicit' and self.explicit_solver == 'backend'):
             print("--- compile CUDA fused explicit backend ---")
             from torch.utils.cpp_extension import load
             import traceback, os, sysconfig
@@ -232,7 +232,7 @@ class BGK1D:
             print('--- fused CUDA backend loaded ---')
 
         # __init__ 内でのビルド（explicit_fused と同様に分離コンパイル）
-        if self.solver == "implicit" and self.implicit_solver == "backend":
+        if force_compile or (self.solver == "implicit" and self.implicit_solver == "backend"):
             print("--- compile CUDA fused implicit backend ---")
             from torch.utils.cpp_extension import load
             import traceback, os, sysconfig
@@ -255,7 +255,7 @@ class BGK1D:
             print('--- fused CUDA backend loaded ---')
 
         # HOLO 用ブロック三重対角ソルバ
-        if self.solver == "implicit" and self.implicit_solver == "holo":
+        if force_compile or (self.solver == "implicit" and self.implicit_solver == "holo"):
             print("--- compile LO block-tridiag backend ---")
             from torch.utils.cpp_extension import load
             import traceback, os, sysconfig
@@ -304,6 +304,92 @@ class BGK1D:
         print("--- Benchmark Completed ---")
         return self.benchmark_results
 
+    # 収束性テスト(HOLO反復 vs picard反復)
+    def run_convergence_test(self,
+                             tau_tilde_list=[5e-3, 5e-4, 5e-5, 5e-6, 5e-7, 5e-8]):
+        # 必要なバイナリをコンパイル
+        self.compile(force_compile=True)
+        print(f"--- Convergence Test Start ---")
+        
+        # 結果保存用辞書
+        self.convergence_results = []
+
+        # tau_tilde_listに従って収束性テストを実行
+        for tau in tau_tilde_list:
+            # tau_tildeを設定
+            print(f"--- tau_tilde: {tau} ---")
+            self.tau_tilde = tau
+            
+            # 収束性テストメソッド
+            self._run_holo_test()
+            self._run_picard_test()
+
+        print("--- Convergence Test Completed ---")
+        return self.convergence_results
+            
+    # HOLO収束性テスト
+    def _run_holo_test(self):
+        print("--- HOLO ---")
+
+        # 配列確保
+        self.Array_allocation()
+        self.set_initial_condition()
+        self.apply_boundary_condition()
+
+        # 1% 間隔
+        progress_interval = max(1, self.nt // 100)
+
+        with get_progress_bar(self.use_tqdm,total=self.nt, desc="Progress", 
+                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+
+            for step in range(self.nt):
+                #更新実行
+                ho_iter, ho_residual, lo_iter_list, lo_residual = self._implicit_update_holo()
+
+                # 進捗1%ごとに収集
+                if step % progress_interval == 0 or (step == self.nt - 1):
+                    self.convergence_results.append({
+                        "scheme": "holo",
+                        "tau_tilde": self.tau_tilde,
+                        "step": step,
+                        "time": step * self.dt,
+                        "ho_iter": ho_iter,
+                        "ho_residual": ho_residual,
+                        "lo_iter_list": lo_iter_list,
+                        "lo_residual": lo_residual
+                    })
+                pbar.update(1)
+    
+    def _run_picard_test(self):
+        print("--- PICARD ---")
+
+        # 配列確保
+        self.Array_allocation()
+        self.set_initial_condition()
+        self.apply_boundary_condition()
+
+        # 1% 間隔
+        progress_interval = max(1, self.nt // 100)
+
+        with get_progress_bar(self.use_tqdm,total=self.nt, desc="Progress", 
+                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+
+            for step in range(self.nt):
+                #更新実行
+                picard_iter, picard_residual = self._implicit_update_cuda_backend()
+
+                # 進捗1%ごとに収集
+                if step % progress_interval == 0 or (step == self.nt - 1):
+                    self.convergence_results.append({
+                        "scheme": "implicit_picard",
+                        "tau_tilde": self.tau_tilde,
+                        "step": step,
+                        "time": step * self.dt,
+                        "picard_iter": picard_iter,
+                        "picard_residual": picard_residual
+                    })
+                pbar.update(1)
+    
     #空間差分ベンチマーク
     def _run_benchmark_space(self, grid_list):
 
@@ -1447,7 +1533,6 @@ class BGK1D:
         S_3_HO = torch.sum(f_up * w3[None, :], dim=1) * dv  # (nx-1,)
 
         return S_1_HO, S_2_HO, S_3_HO
-
 
     # 熱流束を分布関数より計算
     @torch.no_grad()
