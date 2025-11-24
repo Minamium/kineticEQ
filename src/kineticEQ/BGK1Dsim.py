@@ -185,9 +185,12 @@ class BGK1D:
         print("--- run simulation complete, Result is saved in self.f ---")
 
     # コンパイルメソッド
-    def compile(self, force_compile=False):
+    def compile(self, cuSOLVER=False, 
+                fused_explicit=False,
+                fused_implicit=False,
+                lo_block=False):
         # cuSOLVERコンパイル
-        if force_compile or (self.solver == 'implicit' and (self.implicit_solver == 'backend' or self.implicit_solver == 'holo')):
+        if cuSOLVER or (self.solver == 'implicit' and (self.implicit_solver == 'backend' or self.implicit_solver == 'holo')):
             print("--- compile cuSOLVER ---")
             from torch.utils.cpp_extension import load
             import os, sysconfig
@@ -208,7 +211,7 @@ class BGK1D:
 
         # CUDA fused explicitコンパイル
         self._explicit_cuda = None
-        if force_compile or (self.solver == 'explicit' and self.explicit_solver == 'backend'):
+        if fused_explicit or (self.solver == 'explicit' and self.explicit_solver == 'backend'):
             print("--- compile CUDA fused explicit backend ---")
             from torch.utils.cpp_extension import load
             import traceback, os, sysconfig
@@ -232,7 +235,7 @@ class BGK1D:
             print('--- fused CUDA backend loaded ---')
 
         # __init__ 内でのビルド（explicit_fused と同様に分離コンパイル）
-        if force_compile or (self.solver == "implicit" and self.implicit_solver == "backend"):
+        if fused_implicit or (self.solver == "implicit" and self.implicit_solver == "backend"):
             print("--- compile CUDA fused implicit backend ---")
             from torch.utils.cpp_extension import load
             import traceback, os, sysconfig
@@ -255,7 +258,7 @@ class BGK1D:
             print('--- fused CUDA backend loaded ---')
 
         # HOLO 用ブロック三重対角ソルバ
-        if force_compile or (self.solver == "implicit" and self.implicit_solver == "holo"):
+        if lo_block or (self.solver == "implicit" and self.implicit_solver == "holo"):
             print("--- compile LO block-tridiag backend ---")
             from torch.utils.cpp_extension import load
             import traceback, os, sysconfig
@@ -308,7 +311,10 @@ class BGK1D:
     def run_convergence_test(self,
                              tau_tilde_list=[5e-3, 5e-4, 5e-5, 5e-6, 5e-7, 5e-8]):
         # 必要なバイナリをコンパイル
-        self.compile(force_compile=True)
+        self.compile(cuSOLVER=True,
+                     fused_explicit=False,
+                     fused_implicit=True,
+                     lo_block=True)
         print(f"--- Convergence Test Start ---")
         
         # 結果保存用辞書

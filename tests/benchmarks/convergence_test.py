@@ -16,6 +16,17 @@ config = {
     "dt": args.dt,
     "nv": args.nv,
     "nx": args.nx,
+
+    # 陰解法パラメータ
+    "picard_iter": 1e+4,
+    "picard_tol": 1e-6,
+
+    # HOLOパラメータ
+    "ho_iter": 1e+4,
+    "lo_iter": 1e+4,
+    "ho_tol": 1e-6,
+    "lo_tol": 1e-6,
+
     "initial_regions": [
         {"x_range": (0.0, 0.5), "n": 1.0,   "u": 0.0, "T": 1.0},
         {"x_range": (0.5, 1.0), "n": 0.125, "u": 0.0, "T": 0.8},
