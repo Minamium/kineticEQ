@@ -868,30 +868,37 @@ class BGK1DPlotMixin:
         ho_tol: float | None = None,
         picard_tol: float | None = None,
         lo_tol: float | None = None,
-        figsize: tuple[float, float] = (14, 8),
+        figsize: tuple[float, float] = (10, 4.5),
         show_plots: bool = True,
     ) -> None:
         """
-        HOLO / Picard 収束性テスト結果の可視化（2×2 レイアウト）
+        HOLO / Picard 収束性テスト結果の可視化
 
-        - 左上: HOLO vs Picard の外側反復回数
-        - 右上: HOLO vs Picard の最終残差
-        - 左下: HOLO の外側反復回数のみ（拡大表示）
-        - 右下: LO 内部反復の総回数（HOLO のみ）
+        Figure 1（横並び 2 枚）:
+          - 左 : HOLO vs Picard の外側反復回数
+          - 右 : HOLO vs Picard の最終残差
+
+        Figure 2（横並び 2 枚）:
+          - 左 : HOLO の外側反復回数のみ（拡大表示）
+          - 右 : LO 内部反復の総回数（HOLO のみ）
 
         Parameters
         ----------
         results : list[dict]
             run_convergence_test() が返す list。
         filename : str
-            保存する PNG ファイル名。
+            Figure 1 の PNG ファイル名。
+            Figure 2 は "<元ファイル名>_holo.png" で保存する。
         dt, nx, nv : optional
             タイトルに表示する Δt, nx, nv。None の場合 self から取得。
         ho_tol, picard_tol, lo_tol : optional
             HOLO / Picard / LO の収束許容誤差（タイトル表示用）。
         figsize : tuple
-            figure 全体サイズ。
+            各 Figure のサイズ。
+        show_plots : bool
+            True のとき plt.show() 相当で Figure を表示（ノートブック想定）。
         """
+        import os
         import numpy as np
         import matplotlib.pyplot as plt
         from collections import defaultdict
@@ -956,21 +963,20 @@ class BGK1DPlotMixin:
 
         # カラー・マーカー設定（tau ごとに色、HOLO/Picard で塗りつぶし/抜き）
         color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-        # tau が多くても一応回るように
         tau_colors = {tau: color_cycle[i % len(color_cycle)] for i, tau in enumerate(taus)}
 
-        # tau ごとのマーカー形状
         base_markers = ["o", "s", "^", "D", "v", "P", "X", "h"]
         tau_markers = {tau: base_markers[i % len(base_markers)] for i, tau in enumerate(taus)}
 
-        fig, axes = plt.subplots(2, 2, figsize=figsize)
-        ax_outer = axes[0, 0]   # HOLO vs Picard outer iters
-        ax_resid = axes[0, 1]   # HOLO vs Picard residual
-        ax_outer_ho = axes[1, 0]  # HOLO only outer iters
-        ax_lo_inner = axes[1, 1]  # LO inner total iters
+        # ==================================================
+        # Figure 1: HOLO vs Picard（外側反復 & 残差）
+        # ==================================================
+        fig1, axes1 = plt.subplots(1, 2, figsize=figsize)
+        ax_outer = axes1[0]
+        ax_resid = axes1[1]
 
         # figure タイトル
-        title_lines = ["HOLO vs Picard convergence"]
+        title_lines = []
         title_info = []
         if dt is not None:
             title_info.append(r"$\Delta t$={:.4g}".format(dt))
@@ -987,17 +993,26 @@ class BGK1DPlotMixin:
             # {LO} も同様にエスケープ
             title_info.append(r"tol$_{{LO}}$={:.1e}".format(lo_tol))
 
-
+        title_lines.append("HOLO vs Picard convergence")
         if title_info:
             title_lines.append(", ".join(title_info))
-        fig.suptitle("\n".join(title_lines), fontsize=12)
+        fig1.suptitle("\n".join(title_lines), fontsize=12)
 
         legend_handles = []
         legend_labels = []
 
+        # HOLO-only 図用の凡例（tau ごとに 1 本だけ登録）
+        ho_legend_handles = []
+        ho_legend_labels = []
+
         # --------------------------------------------------
         # プロットループ
         # --------------------------------------------------
+        # Figure 2: HOLO-only（後で生成）
+        fig2, axes2 = plt.subplots(1, 2, figsize=figsize)
+        ax_outer_ho = axes2[0]
+        ax_lo_inner = axes2[1]
+
         for tau in taus:
             info = per_tau[tau]
             color = tau_colors[tau]
@@ -1011,7 +1026,11 @@ class BGK1DPlotMixin:
                 ho_res = np.array(info["ho_res"])
                 lo_total = np.array(info["lo_total"])
 
-                # 上段・下段の HOLO outer iter
+                # マーカー間引き（最大 20 個程度）
+                npts = len(t_norm)
+                mark_every = max(1, npts // 20)
+
+                # Figure 1: outer iter & residual
                 line_outer_ho, = ax_outer.plot(
                     t_norm,
                     ho_iter,
@@ -1019,18 +1038,9 @@ class BGK1DPlotMixin:
                     linestyle="-",
                     marker=marker,
                     markersize=4,
-                    label=f"HOLO, ṫ={tau:g}",
+                    markevery=mark_every,
+                    label=f"HOLO, τ̃={tau:g}",
                 )
-                ax_outer_ho.plot(
-                    t_norm,
-                    ho_iter,
-                    color=color,
-                    linestyle="-",
-                    marker=marker,
-                    markersize=4,
-                )
-
-                # 残差
                 ax_resid.plot(
                     t_norm,
                     ho_res,
@@ -1038,9 +1048,23 @@ class BGK1DPlotMixin:
                     linestyle="-",
                     marker=marker,
                     markersize=4,
+                    markevery=mark_every,
                 )
 
-                # LO inner
+                legend_handles.append(line_outer_ho)
+                legend_labels.append(f"HOLO, τ̃={tau:g}")
+
+                # Figure 2: HOLO-only
+                line_outer_ho_zoom, = ax_outer_ho.plot(
+                    t_norm,
+                    ho_iter,
+                    color=color,
+                    linestyle="-",
+                    marker=marker,
+                    markersize=4,
+                    markevery=mark_every,
+                    label=f"τ̃={tau:g}",
+                )
                 ax_lo_inner.plot(
                     t_norm,
                     lo_total,
@@ -1048,11 +1072,11 @@ class BGK1DPlotMixin:
                     linestyle="-",
                     marker=marker,
                     markersize=4,
-                    label=f"τ̃={tau:g}",
+                    markevery=mark_every,
                 )
 
-                legend_handles.append(line_outer_ho)
-                legend_labels.append(f"HOLO, τ̃={tau:g}")
+                ho_legend_handles.append(line_outer_ho_zoom)
+                ho_legend_labels.append(f"τ̃={tau:g}")
 
             # ---- Picard ----
             if info["time_pi"]:
@@ -1061,6 +1085,9 @@ class BGK1DPlotMixin:
                 pi_iter = np.array(info["pi_iter"])
                 pi_res = np.array(info["pi_res"])
 
+                npts = len(t_norm)
+                mark_every = max(1, npts // 20)
+
                 line_outer_pi, = ax_outer.plot(
                     t_norm,
                     pi_iter,
@@ -1068,6 +1095,7 @@ class BGK1DPlotMixin:
                     linestyle="--",
                     marker=marker,
                     markersize=4,
+                    markevery=mark_every,
                     markerfacecolor="none",   # 中抜き
                     markeredgewidth=1.5,
                     label=f"Picard, τ̃={tau:g}",
@@ -1079,6 +1107,7 @@ class BGK1DPlotMixin:
                     linestyle="--",
                     marker=marker,
                     markersize=4,
+                    markevery=mark_every,
                     markerfacecolor="none",
                     markeredgewidth=1.5,
                 )
@@ -1087,9 +1116,8 @@ class BGK1DPlotMixin:
                 legend_labels.append(f"Picard, τ̃={tau:g}")
 
         # --------------------------------------------------
-        # 軸の体裁
+        # 軸の体裁: Figure 1
         # --------------------------------------------------
-        # 上段: outer iter / residual
         ax_outer.set_xlabel("t / T_total")
         ax_outer.set_ylabel("Number of iterations per time step")
         ax_outer.set_title("HOLO vs Picard: iteration count (outer)")
@@ -1101,7 +1129,21 @@ class BGK1DPlotMixin:
         ax_resid.set_yscale("log")
         ax_resid.grid(True, which="both", alpha=0.3)
 
-        # 下段: HOLO-only outer, LO inner
+        if legend_handles:
+            fig1.legend(
+                legend_handles,
+                legend_labels,
+                loc="center left",
+                bbox_to_anchor=(0.99, 0.5),
+                borderaxespad=0.5,
+                fontsize=8,
+            )
+
+        fig1.tight_layout(rect=[0.02, 0.03, 0.95, 0.92])
+
+        # --------------------------------------------------
+        # 軸の体裁: Figure 2（HOLO-only）
+        # --------------------------------------------------
         ax_outer_ho.set_xlabel("t / T_total")
         ax_outer_ho.set_ylabel("HOLO outer iterations")
         ax_outer_ho.set_title("HOLO outer iterations (zoom)")
@@ -1119,23 +1161,41 @@ class BGK1DPlotMixin:
         ax_lo_inner.set_title("LO inner iterations per time step (HOLO)")
         ax_lo_inner.grid(True, alpha=0.3)
 
-        # 図全体の右側に凡例を 1 つ配置（HOLO/Picard 両方）
-        if legend_handles:
-            fig.legend(
-                legend_handles,
-                legend_labels,
+        if ho_legend_handles:
+            fig2.legend(
+                ho_legend_handles,
+                ho_legend_labels,
                 loc="center left",
                 bbox_to_anchor=(0.99, 0.5),
                 borderaxespad=0.5,
                 fontsize=8,
             )
 
-        fig.tight_layout(rect=[0.02, 0.03, 0.95, 0.92])
-        if show_plots:
-            fig.show()
+        fig2.tight_layout(rect=[0.02, 0.03, 0.95, 0.95])
 
-        fig.savefig(filename, dpi=300, bbox_inches="tight")
+        # --------------------------------------------------
+        # 表示 & 保存
+        # --------------------------------------------------
+        # Figure 1: メイン
+        fig1.savefig(filename, dpi=300, bbox_inches="tight")
+
+        # Figure 2: HOLO-only は _holo サフィックスで保存
+        root, ext = os.path.splitext(filename)
+        if not ext:
+            ext = ".png"
+        holo_filename = root + "_holo" + ext
+        fig2.savefig(holo_filename, dpi=300, bbox_inches="tight")
+
+        if show_plots:
+            fig1.show()
+            fig2.show()
+
+        plt.close(fig1)
+        plt.close(fig2)
+
         print(f"収束性テストの図を保存: {filename}")
+        print(f"HOLO-only 図を保存: {holo_filename}")
+ 
 
     # ベンチマーク結果の保存・読み込みユーティリティ
     def save_benchmark_results(self, bench_results: dict | None = None, filename: str = "benchmark_results.pkl") -> str:
