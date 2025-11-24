@@ -857,6 +857,170 @@ class BGK1DPlotMixin:
             if show_plots:
                 fig.show()
 
+    # 収束性テスト結果の可視化メソッド
+    def plot_convergence_results(
+        self,
+        conv_results: list[dict] | None = None,
+        filename: str = "convergence_results.png",
+        normalize_time: bool = True,
+        show_plots: bool = True,) -> dict[str, Any]:
+        """
+        run_convergence_test で得られた self.convergence_results を可視化する。
+
+        - 左: 1 ステップあたりの外側反復回数（HOLO vs Picard）
+        - 右: 1 ステップあたりの最終残差（HOLO vs Picard, log 目盛）
+
+        Parameters
+        ----------
+        conv_results : list[dict] | None
+            run_convergence_test の戻り値。None の場合 self.convergence_results を使用。
+        filename : str
+            保存する画像ファイル名（拡張子付き）。
+        normalize_time : bool
+            True のとき横軸を t/T_total にする。False のとき物理時間 t をそのまま使う。
+        show_plots : bool
+            True のとき plt.show() で画面にも表示。
+
+        Returns
+        -------
+        dict
+            使用した tau_tilde の一覧やファイル名など。
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        # 結果の取得
+        if conv_results is None:
+            if not hasattr(self, "convergence_results"):
+                raise ValueError("conv_results が None で、self.convergence_results も存在しません")
+            conv_results = self.convergence_results
+
+        if not conv_results:
+            raise ValueError("convergence_results が空です")
+
+        # scheme と tau_tilde でグループ化
+        tau_values = sorted({float(rec["tau_tilde"]) for rec in conv_results})
+        schemes = {rec["scheme"] for rec in conv_results}
+        if not {"holo", "implicit_picard"} <= schemes:
+            print("Warning: holo / implicit_picard の両方がそろっていません")
+
+        T_total = float(self.T_total)
+
+        # 図の用意
+        fig, (ax_iter, ax_res) = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+
+        # scheme ごとの線種
+        scheme_style = {
+            "holo": "-",
+            "implicit_picard": "--",
+        }
+
+        # カラーマップ（tau_tilde ごとに色を変える）
+        color_map = plt.get_cmap("tab10")
+        tau_to_color = {tau: color_map(i % 10) for i, tau in enumerate(tau_values)}
+
+        # 各 tau_tilde ごとにプロット
+        for tau in tau_values:
+            # HOLO
+            holo_records = [rec for rec in conv_results
+                            if rec["scheme"] == "holo" and float(rec["tau_tilde"]) == tau]
+            # Picard
+            pic_records = [rec for rec in conv_results
+                           if rec["scheme"] == "implicit_picard" and float(rec["tau_tilde"]) == tau]
+
+            if not holo_records or not pic_records:
+                # 片方しかない場合はスキップ
+                continue
+
+            # 時刻配列（念のためソート）
+            holo_records_sorted = sorted(holo_records, key=lambda r: r["time"])
+            pic_records_sorted  = sorted(pic_records,  key=lambda r: r["time"])
+
+            t_h = np.array([float(r["time"]) for r in holo_records_sorted])
+            t_p = np.array([float(r["time"]) for r in pic_records_sorted])
+
+            if normalize_time and T_total > 0:
+                t_h_plot = t_h / T_total
+                t_p_plot = t_p / T_total
+                x_label = "t / T_total"
+            else:
+                t_h_plot = t_h
+                t_p_plot = t_p
+                x_label = "time t"
+
+            # 反復回数
+            ho_iter = np.array([int(r["ho_iter"]) for r in holo_records_sorted])
+            pi_iter = np.array([int(r["picard_iter"]) for r in pic_records_sorted])
+
+            # 残差（0 は避ける）
+            ho_res = np.array([float(r["ho_residual"]) for r in holo_records_sorted])
+            pi_res = np.array([float(r["picard_residual"]) for r in pic_records_sorted])
+            eps = 1e-16
+            ho_res = np.maximum(ho_res, eps)
+            pi_res = np.maximum(pi_res, eps)
+
+            color = tau_to_color[tau]
+            label_base = f"τ̃={tau:g}"
+
+            # 左: 反復回数
+            ax_iter.plot(
+                t_h_plot, ho_iter,
+                linestyle=scheme_style["holo"],
+                color=color,
+                label=f"HOLO, {label_base}",
+            )
+            ax_iter.plot(
+                t_p_plot, pi_iter,
+                linestyle=scheme_style["implicit_picard"],
+                color=color,
+                label=f"Picard, {label_base}",
+            )
+
+            # 右: 残差
+            ax_res.plot(
+                t_h_plot, ho_res,
+                linestyle=scheme_style["holo"],
+                color=color,
+                label=f"HOLO, {label_base}",
+            )
+            ax_res.plot(
+                t_p_plot, pi_res,
+                linestyle=scheme_style["implicit_picard"],
+                color=color,
+                label=f"Picard, {label_base}",
+            )
+
+        # 軸ラベル・スケール
+        ax_iter.set_xlabel(x_label)
+        ax_iter.set_ylabel("Number of iterations per time step")
+        ax_iter.set_title("HOLO vs Picard: iteration count")
+        ax_iter.grid(True, alpha=0.3)
+
+        ax_res.set_xlabel(x_label)
+        ax_res.set_ylabel("Final residual per time step")
+        ax_res.set_title("HOLO vs Picard: residual")
+        ax_res.set_yscale("log")
+        ax_res.grid(True, which="both", alpha=0.3)
+
+        # 凡例（図全体に 1 個）
+        handles, labels = ax_iter.get_legend_handles_labels()
+        fig.legend(handles, labels, bbox_to_anchor=(1.02, 1.0), loc="upper left", borderaxespad=0.)
+
+        # 保存・表示
+        fig.savefig(filename, dpi=300, bbox_inches="tight", facecolor="white")
+        print(f"収束性テストの図を保存: {filename}")
+
+        if show_plots:
+            plt.show()
+        else:
+            plt.close(fig)
+
+        return {
+            "taus": tau_values,
+            "filename": filename,
+            "normalize_time": normalize_time,
+        }
+
     # ベンチマーク結果の保存・読み込みユーティリティ
     def save_benchmark_results(self, bench_results: dict | None = None, filename: str = "benchmark_results.pkl") -> str:
         """ベンチマーク結果 dict を pickle 形式で保存
