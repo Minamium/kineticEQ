@@ -1190,9 +1190,6 @@ class BGK1DPlotMixin:
             fig1.show()
             fig2.show()
 
-        plt.close(fig1)
-        plt.close(fig2)
-
         print(f"収束性テストの図を保存: {filename}")
         print(f"HOLO-only 図を保存: {holo_filename}")
  
