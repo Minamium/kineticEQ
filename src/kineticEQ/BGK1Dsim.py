@@ -309,7 +309,7 @@ class BGK1D:
 
     # 収束性テスト(HOLO反復 vs picard反復)
     def run_convergence_test(self,
-                             tau_tilde_list=[5e-3, 5e-4, 5e-5, 5e-6, 5e-7, 5e-8]):
+                             tau_tilde_list=[5e-4, 5e-5, 5e-6, 5e-7]):
         # 必要なバイナリをコンパイル
         self.compile(cuSOLVER=True,
                      fused_explicit=False,
