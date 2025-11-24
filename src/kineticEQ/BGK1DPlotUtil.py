@@ -981,9 +981,12 @@ class BGK1DPlotMixin:
         if picard_tol is not None:
             title_info.append(r"tol$_P$={:.1e}".format(picard_tol))
         if ho_tol is not None:
-            title_info.append(r"tol$_{HO}$={:.1e}".format(ho_tol))
+            # {HO} の波括弧をエスケープ
+            title_info.append(r"tol$_{{HO}}$={:.1e}".format(ho_tol))
         if lo_tol is not None:
-            title_info.append(r"tol$_{LO}$={:.1e}".format(lo_tol))
+            # {LO} も同様にエスケープ
+            title_info.append(r"tol$_{{LO}}$={:.1e}".format(lo_tol))
+
 
         if title_info:
             title_lines.append(", ".join(title_info))
