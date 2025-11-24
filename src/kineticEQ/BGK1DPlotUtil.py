@@ -869,6 +869,7 @@ class BGK1DPlotMixin:
         picard_tol: float | None = None,
         lo_tol: float | None = None,
         figsize: tuple[float, float] = (14, 8),
+        show_plots: bool = True,
     ) -> None:
         """
         HOLO / Picard 収束性テスト結果の可視化（2×2 レイアウト）
@@ -1127,6 +1128,8 @@ class BGK1DPlotMixin:
             )
 
         fig.tight_layout(rect=[0.02, 0.03, 0.95, 0.92])
+        if show_plots:
+            fig.show()
         fig.savefig(filename, dpi=300, bbox_inches="tight")
         plt.close(fig)
         print(f"収束性テストの図を保存: {filename}")
