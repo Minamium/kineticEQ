@@ -36,13 +36,13 @@ class BGK1D:
     """数値計算・データ生成関数群"""
     def __init__(self, 
                  # 解法選択
-                 solver='explicit',
+                 solver=None,
 
                  # 陽解法ソルバー
-                 explicit_solver='backend',
+                 explicit_solver=None,
 
                  # 陰解法ソルバー
-                 implicit_solver='backend',
+                 implicit_solver=None,
 
                  # 陰解法パラメータ
                  picard_iter=10,
