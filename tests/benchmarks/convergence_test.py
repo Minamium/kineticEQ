@@ -18,12 +18,12 @@ config = {
     "nx": args.nx,
 
     # 陰解法パラメータ
-    "picard_iter": 1e+4,
+    "picard_iter": 4096,
     "picard_tol": 1e-6,
 
     # HOLOパラメータ
-    "ho_iter": 1e+4,
-    "lo_iter": 1e+4,
+    "ho_iter": 4096,
+    "lo_iter": 4096,
     "ho_tol": 1e-6,
     "lo_tol": 1e-6,
 
