@@ -364,6 +364,9 @@ class BGK1D:
                         "lo_iter_list": lo_iter_list,
                         "lo_residual": lo_residual
                     })
+
+                # 配列交換
+                self.f, self.f_new = self.f_new, self.f
                 pbar.update(1)
     
     def _run_picard_test(self):
@@ -394,6 +397,9 @@ class BGK1D:
                         "picard_iter": picard_iter,
                         "picard_residual": picard_residual
                     })
+
+                # 配列交換
+                self.f, self.f_new = self.f_new, self.f
                 pbar.update(1)
     
     #空間差分ベンチマーク
