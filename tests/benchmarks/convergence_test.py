@@ -8,6 +8,12 @@ parser.add_argument('--output', type=str, default='Conv_bench', help='Output fil
 parser.add_argument('--dt', type=float, default=5e-4, help='Time step')
 parser.add_argument('--nv', type=int, default=200, help='Number of velocity points')
 parser.add_argument('--nx', type=int, default=1000, help='Number of space points')
+parser.add_argument('--picard_iter', type=int, default=4096, help='Number of picard iterations')
+parser.add_argument('--picard_tol', type=float, default=1e-6, help='Tolerance for picard iterations')
+parser.add_argument('--ho_iter', type=int, default=4096, help='Number of ho iterations')
+parser.add_argument('--lo_iter', type=int, default=4096, help='Number of lo iterations')
+parser.add_argument('--ho_tol', type=float, default=1e-6, help='Tolerance for ho iterations')
+parser.add_argument('--lo_tol', type=float, default=1e-6, help='Tolerance for lo iterations')
 parser.add_argument('--use_tqdm', type=bool, default=True, help='Use tqdm')
 args = parser.parse_args()
 
@@ -18,14 +24,14 @@ config = {
     "nx": args.nx,
 
     # 陰解法パラメータ
-    "picard_iter": 4096,
-    "picard_tol": 1e-6,
+    "picard_iter": args.picard_iter,
+    "picard_tol": args.picard_tol,
 
     # HOLOパラメータ
-    "ho_iter": 4096,
-    "lo_iter": 4096,
-    "ho_tol": 1e-6,
-    "lo_tol": 1e-6,
+    "ho_iter": args.ho_iter,
+    "lo_iter": args.lo_iter,
+    "ho_tol": args.ho_tol,
+    "lo_tol": args.lo_tol,
 
     "initial_regions": [
         {"x_range": (0.0, 0.5), "n": 1.0,   "u": 0.0, "T": 1.0},
