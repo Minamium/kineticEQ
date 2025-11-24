@@ -15,6 +15,7 @@ parser.add_argument('--lo_iter', type=int, default=4096, help='Number of lo iter
 parser.add_argument('--ho_tol', type=float, default=1e-6, help='Tolerance for ho iterations')
 parser.add_argument('--lo_tol', type=float, default=1e-6, help='Tolerance for lo iterations')
 parser.add_argument('--use_tqdm', type=bool, default=True, help='Use tqdm')
+parser.add_argument('--no_run', type=bool, default=False, help='Do not run the simulation')
 args = parser.parse_args()
 
 config = {
@@ -43,13 +44,15 @@ config = {
     "dtype": "float64",
     "use_tqdm": args.use_tqdm,
     "device": "cuda",
+    "auto_compile": False,
 }
 
 sim = BGK1DPlot(**config)
-conv_result = sim.run_convergence_test()
-sim.save_benchmark_results(
-    filename=f"{args.output}.pkl",
-    bench_results=conv_result,
-)
+if not args.no_run:
+    conv_result = sim.run_convergence_test()
+    sim.save_benchmark_results(
+        filename=f"{args.output}.pkl",
+        bench_results=conv_result,
+    )
 
-sim.plot_convergence_results(conv_result, filename=f"{args.output}.png")
+sim.plot_convergence_results(conv_result, show_plots=True, filename=f"{args.output}.png")

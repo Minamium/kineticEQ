@@ -956,6 +956,12 @@ class BGK1DPlotMixin:
         ]
         color_cycle = cycle(tol_colors)
 
+        # τ̃ ごとのマーカー（一周したらループ）
+        marker_list = ["o", "s", "^", "D", "v", "P", "X", "*", "h"]
+        # markevery でマーカー間引き（点が多い場合のゴチャゴチャ防止）
+        def _markevery(n: int) -> int:
+            return max(1, n // 20)
+
         fig, axes = plt.subplots(1, 3, figsize=(18, 5), sharex=True)
 
         ax_iter = axes[0]
@@ -976,8 +982,9 @@ class BGK1DPlotMixin:
         # ─────────────────────────────
         # 各 τ̃ について描画
         # ─────────────────────────────
-        for tau in tau_list:
+        for idx, tau in enumerate(tau_list):
             color = next(color_cycle)
+            marker = marker_list[idx % len(marker_list)]
 
             holo = data[tau]["holo"]
             pic = data[tau]["picard"]
@@ -988,26 +995,38 @@ class BGK1DPlotMixin:
             label_holo = f"HOLO, τ̃={tau:g}"
             label_picard = f"Picard, τ̃={tau:g}"
 
-            # 1: 外側反復回数
+            # 1: 外側反復回数 (HOLO: 実線 + 塗りつぶしマーカー, Picard: 破線 + 中抜きマーカー)
             if holo["t"]:
+                me = _markevery(len(holo["t"]))
                 lh, = ax_iter.plot(
                     holo["t"],
                     holo["iter"],
                     color=color,
                     linestyle="-",
                     linewidth=1.5,
+                    marker=marker,
+                    markersize=4.5,
+                    markevery=me,
+                    markerfacecolor=color,
+                    markeredgecolor="black",
                     label=label_holo,
                 )
                 legend_handles.append(lh)
                 legend_labels.append(label_holo)
 
             if pic["t"]:
+                me = _markevery(len(pic["t"]))
                 lp, = ax_iter.plot(
                     pic["t"],
                     pic["iter"],
                     color=color,
                     linestyle="--",
                     linewidth=1.5,
+                    marker=marker,
+                    markersize=4.5,
+                    markevery=me,
+                    markerfacecolor="none",   # 中抜き
+                    markeredgecolor=color,
                     label=label_picard,
                 )
                 legend_handles.append(lp)
@@ -1015,30 +1034,48 @@ class BGK1DPlotMixin:
 
             # 2: LO 内部反復（1 ステップあたりの LO 総回数）
             if holo["t"]:
+                me = _markevery(len(holo["t"]))
                 ax_lo.plot(
                     holo["t"],
                     holo["lo_total"],
                     color=color,
                     linestyle=":",
                     linewidth=1.5,
+                    marker=marker,
+                    markersize=4.0,
+                    markevery=me,
+                    markerfacecolor=color,
+                    markeredgecolor="black",
                 )
 
             # 3: 残差（log-y）
             if holo["t"]:
+                me = _markevery(len(holo["t"]))
                 ax_resid.semilogy(
                     holo["t"],
                     holo["res"],
                     color=color,
                     linestyle="-",
                     linewidth=1.5,
+                    marker=marker,
+                    markersize=4.5,
+                    markevery=me,
+                    markerfacecolor=color,
+                    markeredgecolor="black",
                 )
             if pic["t"]:
+                me = _markevery(len(pic["t"]))
                 ax_resid.semilogy(
                     pic["t"],
                     pic["res"],
                     color=color,
                     linestyle="--",
                     linewidth=1.5,
+                    marker=marker,
+                    markersize=4.5,
+                    markevery=me,
+                    markerfacecolor="none",
+                    markeredgecolor=color,
                 )
 
         # ─────────────────────────────
@@ -1089,7 +1126,6 @@ class BGK1DPlotMixin:
             plt.show()
         else:
             plt.close(fig)
-
 
     # ベンチマーク結果の保存・読み込みユーティリティ
     def save_benchmark_results(self, bench_results: dict | None = None, filename: str = "benchmark_results.pkl") -> str:
