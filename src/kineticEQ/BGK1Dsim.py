@@ -84,7 +84,10 @@ class BGK1D:
                  use_tqdm=True,
                  
                  # GIF用のrecord_stateのフラグ
-                 record_state=False
+                 record_state=False,
+
+                 # インスタンス作成時に自動コンパイル
+                 auto_compile=True
                  ):
         # flag保存
         self.flag_record_state = record_state
@@ -138,6 +141,51 @@ class BGK1D:
 
         self.animation_data = []  # 状態記録用
 
+        # コンパイル
+        if auto_compile:
+            print("--- auto compile ---")
+            self.compile()
+            print("--- auto compile complete ---") 
+
+        # 初期化完了通知
+        print(f"initiaze complete:")
+        print(f"  solver: {self.solver}")
+        if self.solver == 'implicit':
+            print(f"  implicit solver: {self.implicit_solver}")
+            if self.implicit_solver == 'holo':
+                print(f"  ho_iter: {self.ho_iter}, ho_tol: {self.ho_tol}")
+                print(f"  lo_iter: {self.lo_iter}, lo_tol: {self.lo_tol}")
+
+        print(" ---- hyperparameter ----")
+        print(f"  hyperparameter: tau_tilde={self.tau_tilde}")
+        print(" ---- space ----")
+        print(f"  space: nx={self.nx}, dx={self.dx:.4f}, Lx={self.Lx}")
+        print(" ---- velocity ----")
+        print(f"  velocity: nv={self.nv}, dv={self.dv:.4f}, v_max={self.v_max}")
+        print(" ---- time ----")
+        print(f"  time: nt={self.nt}, dt={self.dt:.4f}, T_total={self.T_total}")
+        print(f"  dtype: {self.dtype}")
+        print(f"  device: {self.device}, GPU name: {torch.cuda.get_device_name(0)}")
+
+    #シミュレーションメソッド
+    def run_simulation(self):
+        self.Array_allocation()
+        self.set_initial_condition()
+        self.apply_boundary_condition()
+
+        print("--- run simulation ---")
+
+        if self.solver == "explicit":
+            self.explicit_scheme()
+        elif self.solver == "implicit":
+            self.implicit_scheme()
+        else:
+            raise ValueError(f"Unknown solver: {self.solver}")
+
+        print("--- run simulation complete, Result is saved in self.f ---")
+
+    # コンパイルメソッド
+    def compile(self):
         # cuSOLVERコンパイル
         if self.solver == 'implicit' and (self.implicit_solver == 'backend' or self.implicit_solver == 'holo'):
             print("--- compile cuSOLVER ---")
@@ -229,45 +277,7 @@ class BGK1D:
             )
             traceback.print_exc()
             print('--- LO block-tridiag backend loaded ---')
-
-
-        # 初期化完了通知
-        print(f"initiaze complete:")
-        print(f"  solver: {self.solver}")
-        if self.solver == 'implicit':
-            print(f"  implicit solver: {self.implicit_solver}")
-            if self.implicit_solver == 'holo':
-                print(f"  ho_iter: {self.ho_iter}, ho_tol: {self.ho_tol}")
-                print(f"  lo_iter: {self.lo_iter}, lo_tol: {self.lo_tol}")
-
-        print(" ---- hyperparameter ----")
-        print(f"  hyperparameter: tau_tilde={self.tau_tilde}")
-        print(" ---- space ----")
-        print(f"  space: nx={self.nx}, dx={self.dx:.4f}, Lx={self.Lx}")
-        print(" ---- velocity ----")
-        print(f"  velocity: nv={self.nv}, dv={self.dv:.4f}, v_max={self.v_max}")
-        print(" ---- time ----")
-        print(f"  time: nt={self.nt}, dt={self.dt:.4f}, T_total={self.T_total}")
-        print(f"  dtype: {self.dtype}")
-        print(f"  device: {self.device}, GPU name: {torch.cuda.get_device_name(0)}")
-
-    #シミュレーションメソッド
-    def run_simulation(self):
-        self.Array_allocation()
-        self.set_initial_condition()
-        self.apply_boundary_condition()
-
-        print("--- run simulation ---")
-
-        if self.solver == "explicit":
-            self.explicit_scheme()
-        elif self.solver == "implicit":
-            self.implicit_scheme()
-        else:
-            raise ValueError(f"Unknown solver: {self.solver}")
-
-        print("--- run simulation complete, Result is saved in self.f ---")
-
+        
     # ベンチマークメソッド
     def run_benchmark(self, 
                       benc_type="spatial", 
@@ -737,7 +747,6 @@ class BGK1D:
 
         # マクスウェル分布で初期化
         self.f = self.Maxwellian(n_init, u_init, T_init)
-
 
     #境界条件設定メソッド
     def apply_boundary_condition(self):
