@@ -1133,8 +1133,8 @@ class BGK1DPlotMixin:
         fig.tight_layout(rect=[0.02, 0.03, 0.95, 0.92])
         if show_plots:
             fig.show()
+
         fig.savefig(filename, dpi=300, bbox_inches="tight")
-        plt.close(fig)
         print(f"収束性テストの図を保存: {filename}")
 
     # ベンチマーク結果の保存・読み込みユーティリティ
