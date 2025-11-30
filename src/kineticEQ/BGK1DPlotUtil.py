@@ -858,342 +858,6 @@ class BGK1DPlotMixin:
                 fig.show()
 
     # 収束性テスト結果の可視化メソッド
-    def old_plot_convergence_results(
-        self,
-        results: list[dict],
-        filename: str = "Conv_bench.png",
-        dt: float | None = None,
-        nx: int | None = None,
-        nv: int | None = None,
-        ho_tol: float | None = None,
-        picard_tol: float | None = None,
-        lo_tol: float | None = None,
-        figsize: tuple[float, float] = (10, 4.5),
-        show_plots: bool = True,
-    ) -> None:
-        """
-        HOLO / Picard 収束性テスト結果の可視化
-
-        Figure 1（横並び 2 枚）:
-          - 左 : HOLO vs Picard の外側反復回数
-          - 右 : HOLO vs Picard の最終残差
-
-        Figure 2（横並び 2 枚）:
-          - 左 : HOLO の外側反復回数のみ（拡大表示）
-          - 右 : LO 内部反復の総回数（HOLO のみ）
-
-        Parameters
-        ----------
-        results : list[dict]
-            run_convergence_test() が返す list。
-        filename : str
-            Figure 1 の PNG ファイル名。
-            Figure 2 は "<元ファイル名>_holo.png" で保存する。
-        dt, nx, nv : optional
-            タイトルに表示する Δt, nx, nv。None の場合 self から取得。
-        ho_tol, picard_tol, lo_tol : optional
-            HOLO / Picard / LO の収束許容誤差（タイトル表示用）。
-        figsize : tuple
-            各 Figure のサイズ。
-        show_plots : bool
-            True のとき plt.show() 相当で Figure を表示（ノートブック想定）。
-        """
-        import os
-        import numpy as np
-        import matplotlib.pyplot as plt
-        from collections import defaultdict
-
-        if not results:
-            raise ValueError("results が空です")
-
-        # self からのデフォルト値補完
-        if dt is None:
-            dt = getattr(self, "dt", None)
-        if nx is None:
-            nx = getattr(self, "nx", None)
-        if nv is None:
-            nv = getattr(self, "nv", None)
-        if ho_tol is None:
-            ho_tol = getattr(self, "ho_tol", None)
-        if picard_tol is None:
-            picard_tol = getattr(self, "picard_tol", None)
-        if lo_tol is None:
-            lo_tol = getattr(self, "lo_tol", None)
-
-        # --------------------------------------------------
-        # 結果集計: tau_tilde ごとにまとめる
-        # --------------------------------------------------
-        per_tau = defaultdict(
-            lambda: {
-                "time_ho": [],
-                "ho_iter": [],
-                "ho_res": [],
-                "lo_total": [],
-                "time_pi": [],
-                "pi_iter": [],
-                "pi_res": [],
-            }
-        )
-
-        for rec in results:
-            tau = float(rec["tau_tilde"])
-            scheme = rec["scheme"]
-            t = float(rec["time"])
-            if scheme == "holo":
-                per_tau[tau]["time_ho"].append(t)
-                per_tau[tau]["ho_iter"].append(int(rec["ho_iter"]))
-                # ho_residual は torch.Tensor のことがあるので float にしておく
-                per_tau[tau]["ho_res"].append(float(rec["ho_residual"]))
-                # LO 内部反復の総数
-                lo_list = rec.get("lo_iter_list", [])
-                per_tau[tau]["lo_total"].append(int(sum(lo_list)))
-            elif scheme == "implicit_picard":
-                per_tau[tau]["time_pi"].append(t)
-                per_tau[tau]["pi_iter"].append(int(rec["picard_iter"]))
-                per_tau[tau]["pi_res"].append(float(rec["picard_residual"]))
-
-        # t / T_total 用に最大時間をとる
-        all_times = [t for v in per_tau.values() for t in (v["time_ho"] + v["time_pi"])]
-        if not all_times:
-            raise ValueError("time 情報が見つかりません")
-        T_total = max(all_times)
-
-        # tau の並び順（小さい順）
-        taus = sorted(per_tau.keys())
-
-        # カラー・マーカー設定（tau ごとに色、HOLO/Picard で塗りつぶし/抜き）
-        color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-        tau_colors = {tau: color_cycle[i % len(color_cycle)] for i, tau in enumerate(taus)}
-
-        base_markers = ["o", "s", "^", "D", "v", "P", "X", "h"]
-        tau_markers = {tau: base_markers[i % len(base_markers)] for i, tau in enumerate(taus)}
-
-        # ==================================================
-        # Figure 1: HOLO vs Picard（外側反復 & 残差）
-        # ==================================================
-        fig1, axes1 = plt.subplots(1, 2, figsize=figsize)
-        ax_outer = axes1[0]
-        ax_resid = axes1[1]
-
-        # figure タイトル
-        title_lines = []
-        title_info = []
-        if dt is not None:
-            title_info.append(r"$\Delta t$={:.4g}".format(dt))
-        if nx is not None:
-            title_info.append(f"nx={nx}")
-        if nv is not None:
-            title_info.append(f"nv={nv}")
-        if picard_tol is not None:
-            title_info.append(r"tol$_P$={:.1e}".format(picard_tol))
-        if ho_tol is not None:
-            # {HO} の波括弧をエスケープ
-            title_info.append(r"tol$_{{HO}}$={:.1e}".format(ho_tol))
-        if lo_tol is not None:
-            # {LO} も同様にエスケープ
-            title_info.append(r"tol$_{{LO}}$={:.1e}".format(lo_tol))
-
-        title_lines.append("HOLO vs Picard convergence")
-        if title_info:
-            title_lines.append(", ".join(title_info))
-        fig1.suptitle("\n".join(title_lines), fontsize=12)
-
-        legend_handles = []
-        legend_labels = []
-
-        # HOLO-only 図用の凡例（tau ごとに 1 本だけ登録）
-        ho_legend_handles = []
-        ho_legend_labels = []
-
-        # --------------------------------------------------
-        # プロットループ
-        # --------------------------------------------------
-        # Figure 2: HOLO-only（後で生成）
-        fig2, axes2 = plt.subplots(1, 2, figsize=figsize)
-        ax_outer_ho = axes2[0]
-        ax_lo_inner = axes2[1]
-
-        for tau in taus:
-            info = per_tau[tau]
-            color = tau_colors[tau]
-            marker = tau_markers[tau]
-
-            # ---- HOLO ----
-            if info["time_ho"]:
-                t_arr = np.array(info["time_ho"])
-                t_norm = t_arr / T_total
-                ho_iter = np.array(info["ho_iter"])
-                ho_res = np.array(info["ho_res"])
-                lo_total = np.array(info["lo_total"])
-
-                # マーカー間引き（最大 20 個程度）
-                npts = len(t_norm)
-                mark_every = max(1, npts // 20)
-
-                # Figure 1: outer iter & residual
-                line_outer_ho, = ax_outer.plot(
-                    t_norm,
-                    ho_iter,
-                    color=color,
-                    linestyle="-",
-                    marker=marker,
-                    markersize=4,
-                    markevery=mark_every,
-                    label=f"HOLO, τ̃={tau:g}",
-                )
-                ax_resid.plot(
-                    t_norm,
-                    ho_res,
-                    color=color,
-                    linestyle="-",
-                    marker=marker,
-                    markersize=4,
-                    markevery=mark_every,
-                )
-
-                legend_handles.append(line_outer_ho)
-                legend_labels.append(f"HOLO, τ̃={tau:g}")
-
-                # Figure 2: HOLO-only
-                line_outer_ho_zoom, = ax_outer_ho.plot(
-                    t_norm,
-                    ho_iter,
-                    color=color,
-                    linestyle="-",
-                    marker=marker,
-                    markersize=4,
-                    markevery=mark_every,
-                    label=f"τ̃={tau:g}",
-                )
-                ax_lo_inner.plot(
-                    t_norm,
-                    lo_total,
-                    color=color,
-                    linestyle="-",
-                    marker=marker,
-                    markersize=4,
-                    markevery=mark_every,
-                )
-
-                ho_legend_handles.append(line_outer_ho_zoom)
-                ho_legend_labels.append(f"τ̃={tau:g}")
-
-            # ---- Picard ----
-            if info["time_pi"]:
-                t_arr = np.array(info["time_pi"])
-                t_norm = t_arr / T_total
-                pi_iter = np.array(info["pi_iter"])
-                pi_res = np.array(info["pi_res"])
-
-                npts = len(t_norm)
-                mark_every = max(1, npts // 20)
-
-                line_outer_pi, = ax_outer.plot(
-                    t_norm,
-                    pi_iter,
-                    color=color,
-                    linestyle="--",
-                    marker=marker,
-                    markersize=4,
-                    markevery=mark_every,
-                    markerfacecolor="none",   # 中抜き
-                    markeredgewidth=1.5,
-                    label=f"Picard, τ̃={tau:g}",
-                )
-                ax_resid.plot(
-                    t_norm,
-                    pi_res,
-                    color=color,
-                    linestyle="--",
-                    marker=marker,
-                    markersize=4,
-                    markevery=mark_every,
-                    markerfacecolor="none",
-                    markeredgewidth=1.5,
-                )
-
-                legend_handles.append(line_outer_pi)
-                legend_labels.append(f"Picard, τ̃={tau:g}")
-
-        # --------------------------------------------------
-        # 軸の体裁: Figure 1
-        # --------------------------------------------------
-        ax_outer.set_xlabel("t / T_total")
-        ax_outer.set_ylabel("Number of iterations per time step")
-        ax_outer.set_title("HOLO vs Picard: iteration count (outer)")
-        ax_outer.grid(True, alpha=0.3)
-
-        ax_resid.set_xlabel("t / T_total")
-        ax_resid.set_ylabel("Final residual per time step")
-        ax_resid.set_title("HOLO vs Picard: residual")
-        ax_resid.set_yscale("log")
-        ax_resid.grid(True, which="both", alpha=0.3)
-
-        if legend_handles:
-            fig1.legend(
-                legend_handles,
-                legend_labels,
-                loc="center left",
-                bbox_to_anchor=(0.99, 0.5),
-                borderaxespad=0.5,
-                fontsize=8,
-            )
-
-        fig1.tight_layout(rect=[0.02, 0.03, 0.95, 0.92])
-
-        # --------------------------------------------------
-        # 軸の体裁: Figure 2（HOLO-only）
-        # --------------------------------------------------
-        ax_outer_ho.set_xlabel("t / T_total")
-        ax_outer_ho.set_ylabel("HOLO outer iterations")
-        ax_outer_ho.set_title("HOLO outer iterations (zoom)")
-        ax_outer_ho.grid(True, alpha=0.3)
-
-        # y 範囲を少しタイトに（HOLO だけなので小さめ）
-        all_ho_iters = [it for v in per_tau.values() for it in v["ho_iter"]]
-        if all_ho_iters:
-            ymin = 0
-            ymax = max(all_ho_iters) * 1.2
-            ax_outer_ho.set_ylim(ymin, ymax)
-
-        ax_lo_inner.set_xlabel("t / T_total")
-        ax_lo_inner.set_ylabel("Total LO inner iterations")
-        ax_lo_inner.set_title("LO inner iterations per time step (HOLO)")
-        ax_lo_inner.grid(True, alpha=0.3)
-
-        if ho_legend_handles:
-            fig2.legend(
-                ho_legend_handles,
-                ho_legend_labels,
-                loc="center left",
-                bbox_to_anchor=(0.99, 0.5),
-                borderaxespad=0.5,
-                fontsize=8,
-            )
-
-        fig2.tight_layout(rect=[0.02, 0.03, 0.95, 0.95])
-
-        # --------------------------------------------------
-        # 表示 & 保存
-        # --------------------------------------------------
-        # Figure 1: メイン
-        fig1.savefig(filename, dpi=300, bbox_inches="tight")
-
-        # Figure 2: HOLO-only は _holo サフィックスで保存
-        root, ext = os.path.splitext(filename)
-        if not ext:
-            ext = ".png"
-        holo_filename = root + "_holo" + ext
-        fig2.savefig(holo_filename, dpi=300, bbox_inches="tight")
-
-        if show_plots:
-            fig1.show()
-            fig2.show()
-
-        print(f"収束性テストの図を保存: {filename}")
-        print(f"HOLO-only 図を保存: {holo_filename}")
- 
-    # 収束性テスト結果の可視化メソッド
     def plot_convergence_results(
         self,
         results: list[dict] | dict[str, Any],
@@ -1218,9 +882,9 @@ class BGK1DPlotMixin:
           - 左 : HOLO の外側反復回数のみ（拡大表示）
           - 右 : LO 内部反復の総回数（HOLO のみ）
 
-        Figure 3（単独）:
-          - 横軸 : 時間発展 (t / T_total)
-          - 縦軸 : 1 step あたりの walltime [s]（HOLO / Picard 比較）
+        Figure 3（横並び 2 枚）:
+          - 左 : 1 step あたりの walltime [s]（線形軸）
+          - 右 : 1 step あたりの walltime [s]（対数軸）
 
         Parameters
         ----------
@@ -1277,10 +941,13 @@ class BGK1DPlotMixin:
         # T_total も meta にあれば使う（なければ後で time の max から決定）
         T_total_meta = meta.get("T_total", None)
 
+        # GPU 名（walltime 図タイトル用）
+        gpu_name = meta.get("gpu_name", None)
+
         # --------------------------------------------------
         # 結果集計: tau_tilde ごとにまとめる
         #   time_ho/time_pi: 物理時間 t
-        #   step_*        : ステップ番号（必要なら使えるよう保持）
+        #   step_*        : ステップ番号
         #   wall_*        : 1 step ごとの walltime [s]
         # --------------------------------------------------
         per_tau = defaultdict(
@@ -1309,7 +976,6 @@ class BGK1DPlotMixin:
             if scheme == "holo":
                 per_tau[tau]["time_ho"].append(t)
                 per_tau[tau]["ho_iter"].append(int(rec["ho_iter"]))
-                # ho_residual は tensor の可能性があるので float 化
                 per_tau[tau]["ho_res"].append(float(rec["ho_residual"]))
                 lo_list = rec.get("lo_iter_list", [])
                 per_tau[tau]["lo_total"].append(int(sum(lo_list)))
@@ -1363,10 +1029,8 @@ class BGK1DPlotMixin:
         if picard_tol is not None:
             title_info.append(r"tol$_P$={:.1e}".format(picard_tol))
         if ho_tol is not None:
-            # {HO} の波括弧をエスケープ
             title_info.append(r"tol$_{{HO}}$={:.1e}".format(ho_tol))
         if lo_tol is not None:
-            # {LO} も同様にエスケープ
             title_info.append(r"tol$_{{LO}}$={:.1e}".format(lo_tol))
 
         title_lines.append("HOLO vs Picard convergence")
@@ -1388,9 +1052,10 @@ class BGK1DPlotMixin:
         ho_legend_labels = []
 
         # ==================================================
-        # Figure 3: per-step walltime（HOLO vs Picard）
+        # Figure 3: per-step walltime（HOLO vs Picard）, 左: linear, 右: log
         # ==================================================
-        fig3, ax3 = plt.subplots(1, 1, figsize=figsize)
+        fig3, axes3 = plt.subplots(1, 2, figsize=figsize)
+        ax3_lin, ax3_log = axes3
         wall_legend_handles = []
         wall_legend_labels = []
 
@@ -1469,7 +1134,8 @@ class BGK1DPlotMixin:
                     npts_w = len(t_wall_norm)
                     mark_every_w = max(1, npts_w // 20)
 
-                    h_ho, = ax3.plot(
+                    # 線形軸
+                    h_ho_lin, = ax3_lin.plot(
                         t_wall_norm,
                         w_ho,
                         color=color,
@@ -1481,7 +1147,20 @@ class BGK1DPlotMixin:
                         markevery=mark_every_w,
                         label=f"HOLO, τ̃={tau:g}",
                     )
-                    wall_legend_handles.append(h_ho)
+                    # 対数軸
+                    ax3_log.plot(
+                        t_wall_norm,
+                        w_ho,
+                        color=color,
+                        linestyle="-",
+                        marker=marker,
+                        markersize=4,
+                        markerfacecolor=color,
+                        markeredgewidth=0.0,
+                        markevery=mark_every_w,
+                    )
+
+                    wall_legend_handles.append(h_ho_lin)
                     wall_legend_labels.append(f"HOLO, τ̃={tau:g}")
 
             # ---------- Picard ----------
@@ -1502,7 +1181,7 @@ class BGK1DPlotMixin:
                     marker=marker,
                     markersize=4,
                     markevery=mark_every,
-                    markerfacecolor="none",   # 中抜き
+                    markerfacecolor="none",
                     markeredgewidth=1.5,
                     label=f"Picard, τ̃={tau:g}",
                 )
@@ -1529,7 +1208,8 @@ class BGK1DPlotMixin:
                     npts_w = len(t_wall_norm)
                     mark_every_w = max(1, npts_w // 20)
 
-                    h_pi, = ax3.plot(
+                    # 線形軸
+                    h_pi_lin, = ax3_lin.plot(
                         t_wall_norm,
                         w_pi,
                         color=color,
@@ -1541,7 +1221,20 @@ class BGK1DPlotMixin:
                         markevery=mark_every_w,
                         label=f"Picard, τ̃={tau:g}",
                     )
-                    wall_legend_handles.append(h_pi)
+                    # 対数軸
+                    ax3_log.plot(
+                        t_wall_norm,
+                        w_pi,
+                        color=color,
+                        linestyle="--",
+                        marker=marker,
+                        markersize=4,
+                        markerfacecolor="none",
+                        markeredgewidth=1.5,
+                        markevery=mark_every_w,
+                    )
+
+                    wall_legend_handles.append(h_pi_lin)
                     wall_legend_labels.append(f"Picard, τ̃={tau:g}")
 
         # --------------------------------------------------
@@ -1602,12 +1295,24 @@ class BGK1DPlotMixin:
         fig2.tight_layout(rect=[0.02, 0.03, 0.95, 0.95])
 
         # --------------------------------------------------
-        # 軸の体裁: Figure 3（walltime）
+        # 軸の体裁: Figure 3（walltime, linear & log）
         # --------------------------------------------------
-        ax3.set_xlabel("t / T_total")
-        ax3.set_ylabel("Walltime per step [s]")
-        ax3.set_title("Per-step walltime (HOLO vs Picard)")
-        ax3.grid(True, alpha=0.3)
+        ax3_lin.set_xlabel("t / T_total")
+        ax3_lin.set_ylabel("Walltime per step [s]")
+        ax3_lin.set_title("Per-step walltime (linear)")
+        ax3_lin.grid(True, alpha=0.3)
+
+        ax3_log.set_xlabel("t / T_total")
+        ax3_log.set_ylabel("Walltime per step [s]")
+        ax3_log.set_title("Per-step walltime (log)")
+        ax3_log.set_yscale("log")
+        ax3_log.grid(True, which="both", alpha=0.3)
+
+        # GPU 名を suptitle に反映
+        if gpu_name:
+            fig3.suptitle(f"Per-step walltime (HOLO vs Picard) – GPU: {gpu_name}", fontsize=12)
+        else:
+            fig3.suptitle("Per-step walltime (HOLO vs Picard)", fontsize=12)
 
         if wall_legend_handles:
             fig3.legend(
@@ -1619,7 +1324,7 @@ class BGK1DPlotMixin:
                 fontsize=8,
             )
 
-        fig3.tight_layout(rect=[0.05, 0.05, 0.95, 0.95])
+        fig3.tight_layout(rect=[0.02, 0.05, 0.95, 0.9])
 
         # --------------------------------------------------
         # 表示 & 保存
@@ -1646,7 +1351,6 @@ class BGK1DPlotMixin:
         print(f"収束性テストの図を保存: {filename}")
         print(f"HOLO-only 図を保存: {holo_filename}")
         print(f"Walltime 図を保存: {wall_filename}")
-
 
     # ベンチマーク結果の保存・読み込みユーティリティ
     def save_benchmark_results(self, bench_results: dict | None = None, filename: str = "benchmark_results.pkl") -> str:

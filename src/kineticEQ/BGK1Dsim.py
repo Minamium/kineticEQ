@@ -346,6 +346,12 @@ class BGK1D:
                     if isinstance(self.device, torch.device)
                     else str(self.device)
                 ),
+                "gpu_name": (
+                    torch.cuda.get_device_name(0)
+                    if isinstance(self.device, torch.device)
+                    and self.device.type == "cuda"
+                    else None
+                ),
             },
             "records": [],  # 実際の1%サンプリング結果はここに append していく
         }
