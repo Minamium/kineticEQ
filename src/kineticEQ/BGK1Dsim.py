@@ -3,6 +3,7 @@ import numpy as np
 import math
 from scipy.interpolate import interp1d
 from typing import Any, Union
+import time
 
 from .progress_bar import get_progress_bar, progress_write
 
@@ -317,8 +318,37 @@ class BGK1D:
                      lo_block=True)
         print(f"--- Convergence Test Start ---")
         
-        # 結果保存用辞書
-        self.convergence_results = []
+        # 結果保存用コンテナ (meta + records)
+        self.convergence_results = {
+            "meta": {
+                # タイトルに使っている実行条件をここにまとめておく
+                "dt": float(self.dt),
+                "nx": int(self.nx),
+                "nv": int(self.nv),
+                "Lx": float(self.Lx),
+                "T_total": float(self.T_total),
+                "v_max": float(self.v_max),
+
+                "picard_tol": float(self.picard_tol),
+                "ho_tol": float(self.ho_tol),
+                "lo_tol": float(self.lo_tol),
+                "picard_iter": int(self.picard_iter),
+                "ho_iter": int(self.ho_iter),
+                "lo_iter": int(self.lo_iter),
+
+                # どの tau_tilde を回したかも残しておく
+                "tau_tilde_list": [float(t) for t in tau_tilde_list],
+
+                # あると便利そうなもの（必要に応じて削ってよい）
+                "dtype": str(self.dtype),
+                "device": (
+                    self.device.type
+                    if isinstance(self.device, torch.device)
+                    else str(self.device)
+                ),
+            },
+            "records": [],  # 実際の1%サンプリング結果はここに append していく
+        }
 
         # tau_tilde_listに従って収束性テストを実行
         for tau in tau_tilde_list:
@@ -349,12 +379,22 @@ class BGK1D:
                   bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
 
             for step in range(self.nt):
+                # ここから計測開始
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize()
+                t0 = time.perf_counter()
+
                 #更新実行
                 ho_iter, ho_residual, lo_iter_list, lo_residual = self._implicit_update_holo()
 
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize()
+                step_walltime = time.perf_counter() - t0
+                # ここまで 1 step の walltime 計測
+
                 # 進捗1%ごとに収集
                 if step % progress_interval == 0 or (step == self.nt - 1):
-                    self.convergence_results.append({
+                    self.convergence_results["records"].append({
                         "scheme": "holo",
                         "tau_tilde": self.tau_tilde,
                         "step": step,
@@ -362,12 +402,14 @@ class BGK1D:
                         "ho_iter": ho_iter,
                         "ho_residual": ho_residual,
                         "lo_iter_list": lo_iter_list,
-                        "lo_residual": lo_residual
+                        "lo_residual": lo_residual,
+                        "walltime": step_walltime,
                     })
 
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
                 pbar.update(1)
+
     
     def _run_picard_test(self):
         print("--- PICARD ---")
@@ -384,23 +426,35 @@ class BGK1D:
                   bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
 
             for step in range(self.nt):
+                # ここから計測開始
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize()
+                t0 = time.perf_counter()
+
                 #更新実行
                 picard_iter, picard_residual = self._implicit_update_cuda_backend()
 
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize()
+                step_walltime = time.perf_counter() - t0
+                # ここまで 1 step の walltime 計測
+
                 # 進捗1%ごとに収集
                 if step % progress_interval == 0 or (step == self.nt - 1):
-                    self.convergence_results.append({
+                    self.convergence_results["records"].append({
                         "scheme": "implicit_picard",
                         "tau_tilde": self.tau_tilde,
                         "step": step,
                         "time": step * self.dt,
                         "picard_iter": picard_iter,
-                        "picard_residual": picard_residual
+                        "picard_residual": picard_residual,
+                        "walltime": step_walltime,
                     })
 
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
                 pbar.update(1)
+
     
     #空間差分ベンチマーク
     def _run_benchmark_space(self, grid_list):
