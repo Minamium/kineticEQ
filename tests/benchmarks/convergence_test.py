@@ -63,4 +63,4 @@ if not args.no_run:
     )
 
 tmp = sim.load_benchmark_results(filename=f"{args.output}.pkl")
-sim.plot_convergence_results(tmp, figsize=(12, 10), show_plots=True, filename=f"{args.output}.png")
+sim.plot_convergence_results(tmp, figsize=(12, 6), show_plots=True, filename=f"{args.output}.png")
