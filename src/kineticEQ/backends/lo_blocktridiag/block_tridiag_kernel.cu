@@ -5,13 +5,13 @@
 #include <ATen/cuda/CUDAContext.h>
 
 template <typename T>
-__device__ inline void mat3_mul(const T* A, const T* B, T* C) {
+__device__ __forceinline__ void mat3_mul(const T* A, const T* B, T* C) {
     // C = A * B, row-major 3x3
     #pragma unroll
     for (int i = 0; i < 3; ++i) {
-        T a0 = A[3*i + 0];
-        T a1 = A[3*i + 1];
-        T a2 = A[3*i + 2];
+        const T a0 = A[3*i + 0];
+        const T a1 = A[3*i + 1];
+        const T a2 = A[3*i + 2];
         C[3*i + 0] = a0 * B[0]  + a1 * B[3]  + a2 * B[6];
         C[3*i + 1] = a0 * B[1]  + a1 * B[4]  + a2 * B[7];
         C[3*i + 2] = a0 * B[2]  + a1 * B[5]  + a2 * B[8];
@@ -19,7 +19,7 @@ __device__ inline void mat3_mul(const T* A, const T* B, T* C) {
 }
 
 template <typename T>
-__device__ inline void mat3_vec_mul(const T* A, const T* x, T* y) {
+__device__ __forceinline__ void mat3_vec_mul(const T* A, const T* x, T* y) {
     // y = A * x, A: 3x3, x:3
     y[0] = A[0] * x[0] + A[1] * x[1] + A[2] * x[2];
     y[1] = A[3] * x[0] + A[4] * x[1] + A[5] * x[2];
@@ -27,7 +27,7 @@ __device__ inline void mat3_vec_mul(const T* A, const T* x, T* y) {
 }
 
 template <typename T>
-__device__ inline bool invert3x3(const T* M, T* Minv) {
+__device__ __forceinline__ bool invert3x3(const T* M, T* Minv) {
     const T a00 = M[0], a01 = M[1], a02 = M[2];
     const T a10 = M[3], a11 = M[4], a12 = M[5];
     const T a20 = M[6], a21 = M[7], a22 = M[8];
@@ -45,10 +45,11 @@ __device__ inline bool invert3x3(const T* M, T* Minv) {
     const T c22 =  (a00 * a11 - a01 * a10);
 
     const T det = a00 * c00 + a01 * c01 + a02 * c02;
-    if (fabs((double)det) < 1e-30) {
+    // det が極端に小さいときは false を返す（その場合は何も解かない）
+    if (::fabs((double)det) < 1e-30) {
         return false;
     }
-    const T inv_det = 1.0 / det;
+    const T inv_det = T(1.0) / det;
 
     // adjugate^T * (1/det)
     Minv[0] = c00 * inv_det;
@@ -75,21 +76,22 @@ __global__ void block_tridiag_kernel(
     int n,
     int batch
 ) {
-    const int b = blockIdx.x;
-    if (b >= batch) return;
+    // ★ ここを変更: 1スレッド＝1系列
+    const int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= batch || n <= 0) {
+        return;
+    }
 
-    const int mat_stride = n * 9;  // 3x3=9
-    const int vec_stride = n * 3;
+    const int  mat_stride = n * 9;  // 3x3=9
+    const int  vec_stride = n * 3;
 
-    const T* Ab = A + (size_t)b * mat_stride;
-          T* Bb = B + (size_t)b * mat_stride;
-          T* Cb = C + (size_t)b * mat_stride;
-          T* Db = D + (size_t)b * vec_stride;
-          T* Xb = X + (size_t)b * vec_stride;
+    const T* Ab = A + static_cast<size_t>(b) * mat_stride;
+          T* Bb = B + static_cast<size_t>(b) * mat_stride;
+          T* Cb = C + static_cast<size_t>(b) * mat_stride;
+          T* Db = D + static_cast<size_t>(b) * vec_stride;
+          T* Xb = X + static_cast<size_t>(b) * vec_stride;
 
-    if (n <= 0) return;
-
-    // Forward elimination
+    // Forward elimination (Thomas 法・ブロック版)
     T denom[9];
     T denom_inv[9];
     T tmp3[3];
@@ -99,8 +101,8 @@ __global__ void block_tridiag_kernel(
     if (!invert3x3(&Bb[0], denom_inv)) {
         return;
     }
-    mat3_mul(denom_inv, &Cb[0], &Cb[0]);
-    mat3_vec_mul(denom_inv, &Db[0], &Db[0]);
+    mat3_mul(denom_inv, &Cb[0], &Cb[0]);   // C'_0 = B_0^{-1} C_0
+    mat3_vec_mul(denom_inv, &Db[0], &Db[0]); // D'_0 = B_0^{-1} D_0
 
     // k = 1..n-1
     for (int k = 1; k < n; ++k) {
@@ -126,10 +128,10 @@ __global__ void block_tridiag_kernel(
             return;
         }
 
+        // C'_k, D'_k の更新
         if (k < n - 1) {
             mat3_mul(denom_inv, &Cb[idx_k], &Cb[idx_k]);
         }
-
         mat3_vec_mul(denom_inv, tmp3, &Db[idv_k]);
     }
 
@@ -163,8 +165,12 @@ void launch_block_tridiag_kernel(
     int batch,
     cudaStream_t stream
 ) {
-    const dim3 blocks(batch);
-    const int  threads = 1;
+    if (batch <= 0 || n <= 0) return;
+
+    // ★ 並列度を上げる: 1 thread = 1 系列
+    const int threads = 128;
+    const int blocks  = (batch + threads - 1) / threads;
+
     block_tridiag_kernel<scalar_t><<<blocks, threads, 0, stream>>>(
         A, B, C, D, X, n, batch
     );
