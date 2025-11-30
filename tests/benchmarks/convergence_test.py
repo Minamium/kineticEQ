@@ -16,7 +16,13 @@ parser.add_argument('--ho_tol', type=float, default=1e-6, help='Tolerance for ho
 parser.add_argument('--lo_tol', type=float, default=1e-6, help='Tolerance for lo iterations')
 parser.add_argument('--use_tqdm', type=bool, default=True, help='Use tqdm')
 parser.add_argument('--no_run', type=bool, default=False, help='Do not run the simulation')
-parser.add_argument('--tau_tilde_list', type=list, default=[5e-3, 5e-4, 5e-5, 5e-6], help='List of tau_tilde values')
+parser.add_argument(
+    '--tau_tilde_list',
+    type=float,
+    nargs='+',  # 1個以上の float を受け取る
+    default=[5e-3, 5e-4, 5e-5, 5e-6],
+    help='List of tau_tilde values'
+)
 args = parser.parse_args()
 
 config = {
