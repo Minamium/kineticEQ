@@ -3,29 +3,31 @@
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <cmath>
 
+// 3x3 行列積: C = A * B
 template <typename T>
 __device__ __forceinline__ void mat3_mul(const T* A, const T* B, T* C) {
-    // C = A * B, row-major 3x3
     #pragma unroll
     for (int i = 0; i < 3; ++i) {
-        const T a0 = A[3*i + 0];
-        const T a1 = A[3*i + 1];
-        const T a2 = A[3*i + 2];
-        C[3*i + 0] = a0 * B[0]  + a1 * B[3]  + a2 * B[6];
-        C[3*i + 1] = a0 * B[1]  + a1 * B[4]  + a2 * B[7];
-        C[3*i + 2] = a0 * B[2]  + a1 * B[5]  + a2 * B[8];
+        const T a0 = A[3 * i + 0];
+        const T a1 = A[3 * i + 1];
+        const T a2 = A[3 * i + 2];
+        C[3 * i + 0] = a0 * B[0] + a1 * B[3] + a2 * B[6];
+        C[3 * i + 1] = a0 * B[1] + a1 * B[4] + a2 * B[7];
+        C[3 * i + 2] = a0 * B[2] + a1 * B[5] + a2 * B[8];
     }
 }
 
+// 3x3 行列と 3 ベクトルの積: y = A * x
 template <typename T>
 __device__ __forceinline__ void mat3_vec_mul(const T* A, const T* x, T* y) {
-    // y = A * x, A: 3x3, x:3
     y[0] = A[0] * x[0] + A[1] * x[1] + A[2] * x[2];
     y[1] = A[3] * x[0] + A[4] * x[1] + A[5] * x[2];
     y[2] = A[6] * x[0] + A[7] * x[1] + A[8] * x[2];
 }
 
+// 3x3 行列の逆行列（単純な adjugate / det 実装）
 template <typename T>
 __device__ __forceinline__ bool invert3x3(const T* M, T* Minv) {
     const T a00 = M[0], a01 = M[1], a02 = M[2];
@@ -45,7 +47,6 @@ __device__ __forceinline__ bool invert3x3(const T* M, T* Minv) {
     const T c22 =  (a00 * a11 - a01 * a10);
 
     const T det = a00 * c00 + a01 * c01 + a02 * c02;
-    // det が極端に小さいときは false を返す（その場合は何も解かない）
     if (::fabs((double)det) < 1e-30) {
         return false;
     }
@@ -66,118 +67,242 @@ __device__ __forceinline__ bool invert3x3(const T* M, T* Minv) {
     return true;
 }
 
+/**
+ * Parallel Cyclic Reduction (PCR) ベースの 3x3 ブロック三重対角ソルバー
+ *
+ * A0,B0,C0,D0 : ステージ 0 の係数 (batch, n, 3x3 or 3)
+ * A1,B1,C1,D1 : ping-pong 用ワークバッファ (batch, n, 3x3 or 3)
+ * X           : 解 (batch, n, 3)
+ *
+ * 1 block = 1 系列 (バッチの 1 系列)、block 内で i (= 0..n-1) を並列処理。
+ */
 template <typename T>
-__global__ void block_tridiag_kernel(
-    const T* __restrict__ A,   // (batch, n, 3, 3)
-    T* __restrict__       B,   // (batch, n, 3, 3) ← in-place
-    T* __restrict__       C,   // (batch, n, 3, 3) ← in-place (C')
-    T* __restrict__       D,   // (batch, n, 3)    ← in-place (D')
-    T* __restrict__       X,   // (batch, n, 3)    ← solution
+__global__ void block_tridiag_pcr_kernel(
+    T* __restrict__ A0,
+    T* __restrict__ B0,
+    T* __restrict__ C0,
+    T* __restrict__ D0,
+    T* __restrict__ A1,
+    T* __restrict__ B1,
+    T* __restrict__ C1,
+    T* __restrict__ D1,
+    T* __restrict__ X,
     int n,
-    int batch
+    int batch,
+    int max_stage
 ) {
-    // ★ ここを変更: 1スレッド＝1系列
-    const int b = blockIdx.x * blockDim.x + threadIdx.x;
+    const int b = blockIdx.x;
     if (b >= batch || n <= 0) {
         return;
     }
 
-    const int  mat_stride = n * 9;  // 3x3=9
-    const int  vec_stride = n * 3;
+    const size_t mat_stride = static_cast<size_t>(n) * 9;  // 3x3 = 9
+    const size_t vec_stride = static_cast<size_t>(n) * 3;
 
-    const T* Ab = A + static_cast<size_t>(b) * mat_stride;
-          T* Bb = B + static_cast<size_t>(b) * mat_stride;
-          T* Cb = C + static_cast<size_t>(b) * mat_stride;
-          T* Db = D + static_cast<size_t>(b) * vec_stride;
-          T* Xb = X + static_cast<size_t>(b) * vec_stride;
+    // このバッチの先頭ポインタ
+    T* A_curr = A0 + b * mat_stride;
+    T* B_curr = B0 + b * mat_stride;
+    T* C_curr = C0 + b * mat_stride;
+    T* D_curr = D0 + b * vec_stride;
 
-    // Forward elimination (Thomas 法・ブロック版)
-    T denom[9];
-    T denom_inv[9];
-    T tmp3[3];
-    T mat_tmp[9];
+    T* A_next = A1 + b * mat_stride;
+    T* B_next = B1 + b * mat_stride;
+    T* C_next = C1 + b * mat_stride;
+    T* D_next = D1 + b * vec_stride;
 
-    // k = 0
-    if (!invert3x3(&Bb[0], denom_inv)) {
-        return;
+    T* Xb     = X  + b * vec_stride;
+
+    const int tid  = threadIdx.x;
+    const int step = blockDim.x;
+
+    // ステージループ：s = 0..max_stage-1, stride = 2^s
+    for (int s = 0; s < max_stage; ++s) {
+        const int m = 1 << s;
+        if (m >= n) {
+            break;
+        }
+
+        // 各 i を block 内で並列処理
+        for (int i = tid; i < n; i += step) {
+            const int left  = i - m;
+            const int right = i + m;
+
+            const T* Ai = &A_curr[9 * i];
+            const T* Bi = &B_curr[9 * i];
+            const T* Ci = &C_curr[9 * i];
+            const T* Di = &D_curr[3 * i];
+
+            T alpha[9] = {T(0)};
+            T gamma[9] = {T(0)};
+
+            // alpha = A_i * (B_left)^{-1} (left が存在する場合)
+            if (left >= 0) {
+                const T* B_left = &B_curr[9 * left];
+                T B_left_inv[9];
+                if (invert3x3(B_left, B_left_inv)) {
+                    mat3_mul(Ai, B_left_inv, alpha);
+                }
+            }
+
+            // gamma = C_i * (B_right)^{-1} (right が存在する場合)
+            if (right < n) {
+                const T* B_right = &B_curr[9 * right];
+                T B_right_inv[9];
+                if (invert3x3(B_right, B_right_inv)) {
+                    mat3_mul(Ci, B_right_inv, gamma);
+                }
+            }
+
+            // A_next[i] = - alpha * A_left
+            if (left >= 0) {
+                const T* A_left = &A_curr[9 * left];
+                T tmpA[9];
+                mat3_mul(alpha, A_left, tmpA);
+                #pragma unroll
+                for (int k = 0; k < 9; ++k) {
+                    A_next[9 * i + k] = -tmpA[k];
+                }
+            } else {
+                #pragma unroll
+                for (int k = 0; k < 9; ++k) {
+                    A_next[9 * i + k] = T(0);
+                }
+            }
+
+            // C_next[i] = - gamma * C_right
+            if (right < n) {
+                const T* C_right = &C_curr[9 * right];
+                T tmpC[9];
+                mat3_mul(gamma, C_right, tmpC);
+                #pragma unroll
+                for (int k = 0; k < 9; ++k) {
+                    C_next[9 * i + k] = -tmpC[k];
+                }
+            } else {
+                #pragma unroll
+                for (int k = 0; k < 9; ++k) {
+                    C_next[9 * i + k] = T(0);
+                }
+            }
+
+            // B_next[i] = B_i - alpha * C_left - gamma * A_right
+            {
+                T tmp1[9] = {T(0)};
+                T tmp2[9] = {T(0)};
+
+                if (left >= 0) {
+                    const T* C_left = &C_curr[9 * left];
+                    mat3_mul(alpha, C_left, tmp1);
+                }
+                if (right < n) {
+                    const T* A_right = &A_curr[9 * right];
+                    mat3_mul(gamma, A_right, tmp2);
+                }
+
+                #pragma unroll
+                for (int k = 0; k < 9; ++k) {
+                    B_next[9 * i + k] = Bi[k] - tmp1[k] - tmp2[k];
+                }
+            }
+
+            // D_next[i] = D_i - alpha * D_left - gamma * D_right
+            {
+                T tmpL[3] = {T(0)};
+                T tmpR[3] = {T(0)};
+
+                if (left >= 0) {
+                    const T* D_left = &D_curr[3 * left];
+                    mat3_vec_mul(alpha, D_left, tmpL);
+                }
+                if (right < n) {
+                    const T* D_right = &D_curr[3 * right];
+                    mat3_vec_mul(gamma, D_right, tmpR);
+                }
+
+                D_next[3 * i + 0] = Di[0] - tmpL[0] - tmpR[0];
+                D_next[3 * i + 1] = Di[1] - tmpL[1] - tmpR[1];
+                D_next[3 * i + 2] = Di[2] - tmpL[2] - tmpR[2];
+            }
+        }
+
+        __syncthreads();
+
+        // ping-pong: curr と next のポインタを入れ替える
+        T* tmp;
+        tmp = A_curr; A_curr = A_next; A_next = tmp;
+        tmp = B_curr; B_curr = B_next; B_next = tmp;
+        tmp = C_curr; C_curr = C_next; C_next = tmp;
+        tmp = D_curr; D_curr = D_next; D_next = tmp;
+
+        __syncthreads();
     }
-    mat3_mul(denom_inv, &Cb[0], &Cb[0]);   // C'_0 = B_0^{-1} C_0
-    mat3_vec_mul(denom_inv, &Db[0], &Db[0]); // D'_0 = B_0^{-1} D_0
 
-    // k = 1..n-1
-    for (int k = 1; k < n; ++k) {
-        const int idx_k  = k * 9;
-        const int idx_km = (k - 1) * 9;
-        const int idv_k  = k * 3;
-        const int idv_km = (k - 1) * 3;
+    // 最終ステージ後: B_curr[i] x_i = D_curr[i] を各 i で独立に解く
+    for (int i = tid; i < n; i += step) {
+        const T* Bi = &B_curr[9 * i];
+        const T* Di = &D_curr[3 * i];
 
-        // rhs_tmp = D_k - A_k * D'_{k-1}
-        mat3_vec_mul(&Ab[idx_k], &Db[idv_km], tmp3);
-        tmp3[0] = Db[idv_k + 0] - tmp3[0];
-        tmp3[1] = Db[idv_k + 1] - tmp3[1];
-        tmp3[2] = Db[idv_k + 2] - tmp3[2];
+        T Bi_inv[9];
+        T xi[3];
 
-        // denom = B_k - A_k * C'_{k-1}
-        mat3_mul(&Ab[idx_k], &Cb[idx_km], mat_tmp);
-        #pragma unroll
-        for (int i = 0; i < 9; ++i) {
-            denom[i] = Bb[idx_k + i] - mat_tmp[i];
+        if (!invert3x3(Bi, Bi_inv)) {
+            xi[0] = xi[1] = xi[2] = T(0);
+        } else {
+            mat3_vec_mul(Bi_inv, Di, xi);
         }
 
-        if (!invert3x3(denom, denom_inv)) {
-            return;
-        }
-
-        // C'_k, D'_k の更新
-        if (k < n - 1) {
-            mat3_mul(denom_inv, &Cb[idx_k], &Cb[idx_k]);
-        }
-        mat3_vec_mul(denom_inv, tmp3, &Db[idv_k]);
-    }
-
-    // Back substitution
-    Xb[(n - 1)*3 + 0] = Db[(n - 1)*3 + 0];
-    Xb[(n - 1)*3 + 1] = Db[(n - 1)*3 + 1];
-    Xb[(n - 1)*3 + 2] = Db[(n - 1)*3 + 2];
-
-    for (int k = n - 2; k >= 0; --k) {
-        const int idx_k  = k * 9;
-        const int idv_k  = k * 3;
-        const int idv_kp = (k + 1) * 3;
-
-        mat3_vec_mul(&Cb[idx_k], &Xb[idv_kp], tmp3);
-
-        Xb[idv_k + 0] = Db[idv_k + 0] - tmp3[0];
-        Xb[idv_k + 1] = Db[idv_k + 1] - tmp3[1];
-        Xb[idv_k + 2] = Db[idv_k + 2] - tmp3[2];
+        Xb[3 * i + 0] = xi[0];
+        Xb[3 * i + 1] = xi[1];
+        Xb[3 * i + 2] = xi[2];
     }
 }
 
 // nvcc 側でカーネルを起動するランチャ関数
 template <typename scalar_t>
 void launch_block_tridiag_kernel(
-    const scalar_t* A,
-    scalar_t* B,
-    scalar_t* C,
-    scalar_t* D,
+    scalar_t* A0,
+    scalar_t* B0,
+    scalar_t* C0,
+    scalar_t* D0,
+    scalar_t* A1,
+    scalar_t* B1,
+    scalar_t* C1,
+    scalar_t* D1,
     scalar_t* X,
     int n,
     int batch,
     cudaStream_t stream
 ) {
-    if (batch <= 0 || n <= 0) return;
+    if (batch <= 0 || n <= 0) {
+        return;
+    }
 
-    // ★ 並列度を上げる: 1 thread = 1 系列
-    const int threads = 128;
-    const int blocks  = (batch + threads - 1) / threads;
+    // log2(n) 程度のステージ数
+    int max_stage = 0;
+    while ((1 << max_stage) < n) {
+        ++max_stage;
+    }
 
-    block_tridiag_kernel<scalar_t><<<blocks, threads, 0, stream>>>(
-        A, B, C, D, X, n, batch
+    const int threads = (n < 128) ? n : 128;  // 1 系列あたりのスレッド数
+    const dim3 blocks(batch);                 // 1 block = 1 系列
+
+    block_tridiag_pcr_kernel<scalar_t><<<blocks, threads, 0, stream>>>(
+        A0, B0, C0, D0,
+        A1, B1, C1, D1,
+        X,
+        n,
+        batch,
+        max_stage
     );
 }
 
 // 明示的インスタンス化
 template void launch_block_tridiag_kernel<float>(
-    const float*, float*, float*, float*, float*, int, int, cudaStream_t);
+    float*, float*, float*, float*,
+    float*, float*, float*, float*,
+    float*, int, int, cudaStream_t);
+
 template void launch_block_tridiag_kernel<double>(
-    const double*, double*, double*, double*, double*, int, int, cudaStream_t);
+    double*, double*, double*, double*,
+    double*, double*, double*, double*,
+    double*, int, int, cudaStream_t);
