@@ -466,6 +466,7 @@ class BGK1D:
 
             else:
                 raise ValueError(f"Unknown scheme: {scheme}")
+        return self.cross_scheme_test_results
 
     # クロステスト(explicit scheme)
     def _cross_scheme_test_explicit(self, delta_t):
