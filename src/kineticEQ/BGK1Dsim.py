@@ -1738,7 +1738,7 @@ class BGK1D:
     @torch.no_grad()
     def _HO_calculate_moments(self, f_z: torch.Tensor):
         """
-        HO 系で使う高次モーメント S_1, S_2, S_3 を、
+        LO 系で使う高次モーメント S_1, S_2, S_3 を、
         分布 f_z と速度 v による **風上 upwind スキーム** で
         「界面 i+1/2 のフラックス」として計算する。
 
@@ -1770,6 +1770,8 @@ class BGK1D:
         S_1_HO = torch.sum(f_up * w1[None, :], dim=1) * dv  # (nx-1,)
         S_2_HO = torch.sum(f_up * w2[None, :], dim=1) * dv  # (nx-1,)
         S_3_HO = torch.sum(f_up * w3[None, :], dim=1) * dv  # (nx-1,)
+
+        S_1_HO, S_2_HO, S_3_HO = 0, 0, 0
 
         return S_1_HO, S_2_HO, S_3_HO
 
