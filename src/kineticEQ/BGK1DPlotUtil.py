@@ -1352,36 +1352,30 @@ class BGK1DPlotMixin:
         print(f"HOLO-only 図を保存: {holo_filename}")
         print(f"Walltime 図を保存: {wall_filename}")
 
-    def plot_cross_scheme_results(self, ref_scheme: str = "explicit"):
+    def plot_cross_scheme_results(self, records, ref_scheme: str = "explicit"):
         """
-        cross_scheme_test_results に保存されたスキーム同士を比較プロットするメソッド。
+        cross-scheme の結果リスト（records）を比較プロットするメソッド。
 
         引数で与えた ref_scheme を基準として、
-        - 図1: n, u, T を 1x3 サブプロットで、ref と比較対象スキームを同じ軸にプロット
-        - 図2: n, u, T の L2 型誤差（点ごとの差の絶対値）を 1x3 サブプロットでプロット
-        これを ref 以外の各スキームについて個別に行う。
+        - 図1群: n, u, T を 1x3 サブプロットで、ref と比較対象スキームを同じ軸にプロット（スキームごとに個別の Figure）
+        - 図2:    n, u, T の誤差 |q - q_ref| を 1x3 サブプロットに、全スキームを重ねてプロットする単一の Figure
 
         Parameters
         ----------
+        records : list[dict]
+            _run_scheme_comparison_test() などで保存した各スキームの結果のリスト。
+            各要素は少なくとも keys: ["scheme", "n", "u", "T"] を持つことを想定。
         ref_scheme : str
-            cross_scheme_test_results["records"][i]["scheme"] に対応するスキーム名。
+            ref とするスキーム名（records[i]["scheme"] に対応）。
             例: "explicit", "implicit", "holo"
         """
         import matplotlib.pyplot as plt
         import numpy as np
 
-        # cross_scheme_test_results が存在するかチェック
-        if not hasattr(self, "cross_scheme_test_results"):
-            raise RuntimeError(
-                "cross_scheme_test_results が存在しません。"
-                "先に _run_scheme_comparison_test(...) を実行してください。"
-            )
-
-        records = self.cross_scheme_test_results.get("records", None)
+        # records が有効かチェック
         if records is None or len(records) == 0:
             raise RuntimeError(
-                "cross_scheme_test_results['records'] が空です。"
-                "スキーム比較テストが正しく実行されているか確認してください。"
+                "records が空です。スキーム比較テストが正しく実行されているか確認してください。"
             )
 
         # scheme 名で引けるように辞書化
@@ -1396,8 +1390,7 @@ class BGK1DPlotMixin:
         if ref_scheme not in scheme_to_record:
             raise ValueError(
                 f"指定された ref_scheme='{ref_scheme}' に対応する結果が "
-                "cross_scheme_test_results に存在しません。"
-                f" 利用可能なスキーム: {list(scheme_to_record.keys())}"
+                f"records に存在しません。利用可能なスキーム: {list(scheme_to_record.keys())}"
             )
 
         # 参照スキームの結果
@@ -1414,7 +1407,16 @@ class BGK1DPlotMixin:
                 f"(len(n_ref)={n_ref.shape[0]}) が一致していません。"
             )
 
-        # ref 以外のスキームについて順次プロット
+        # =====================================================
+        # 誤差プロット用 Figure（全スキームまとめて重ね描き）
+        # =====================================================
+        fig2, axes2 = plt.subplots(1, 3, figsize=(15, 4), sharex=True)
+        fig2.suptitle(
+            f"error of moments: all schemes vs ref='{ref_scheme}'",
+            fontsize=14
+        )
+
+        # ref 以外のスキームについて順次処理
         for scheme_name, rec in scheme_to_record.items():
             if scheme_name == ref_scheme:
                 continue  # ref 自身はスキップ
@@ -1431,7 +1433,7 @@ class BGK1DPlotMixin:
                 )
 
             # =====================================================
-            # 1. モーメント比較プロット (n, u, T)
+            # 1. モーメント比較プロット (n, u, T)  ※スキームごとに個別の Figure
             # =====================================================
             fig1, axes1 = plt.subplots(1, 3, figsize=(15, 4), sharex=True)
             fig1.suptitle(
@@ -1470,48 +1472,44 @@ class BGK1DPlotMixin:
             ax.legend()
 
             fig1.tight_layout(rect=[0, 0.0, 1, 0.95])
+            plt.show()
 
             # =====================================================
-            # 2. L2 型誤差プロット (|q - q_ref| を「L2ノルム」として扱う)
+            # 2. 誤差プロファイル |q - q_ref| を共通 Figure に重ね描き
             # =====================================================
-            l2_n = np.sqrt((n_s - n_ref) ** 2)
-            l2_u = np.sqrt((u_s - u_ref) ** 2)
-            l2_T = np.sqrt((T_s - T_ref) ** 2)
-
-            fig2, axes2 = plt.subplots(1, 3, figsize=(15, 4), sharex=True)
-            fig2.suptitle(
-                f"error of moments: scheme='{scheme_name}' vs ref='{ref_scheme}'",
-                fontsize=14
-            )
+            err_n = np.abs(n_s - n_ref)
+            err_u = np.abs(u_s - u_ref)
+            err_T = np.abs(T_s - T_ref)
 
             # n 誤差
-            ax = axes2[0]
-            ax.plot(x, l2_n)
-            ax.set_xlabel("x")
-            ax.set_ylabel(r"$|n - n_{\mathrm{ref}}|$")
-            ax.set_title("error of n")
-            ax.grid(True, linestyle=":")
-
+            axes2[0].plot(x, err_n, label=f"{scheme_name}")
             # u 誤差
-            ax = axes2[1]
-            ax.plot(x, l2_u)
-            ax.set_xlabel("x")
-            ax.set_ylabel(r"$|u - u_{\mathrm{ref}}|$")
-            ax.set_title("error of u")
-            ax.grid(True, linestyle=":")
-
+            axes2[1].plot(x, err_u, label=f"{scheme_name}")
             # T 誤差
-            ax = axes2[2]
-            ax.plot(x, l2_T)
-            ax.set_xlabel("x")
-            ax.set_ylabel(r"$|T - T_{\mathrm{ref}}|$")
-            ax.set_title("error of T")
-            ax.grid(True, linestyle=":")
+            axes2[2].plot(x, err_T, label=f"{scheme_name}")
 
-            fig2.tight_layout(rect=[0, 0.0, 1, 0.95])
+        # 誤差図の体裁を整える
+        axes2[0].set_xlabel("x")
+        axes2[0].set_ylabel(r"$|n - n_{\mathrm{ref}}|$")
+        axes2[0].set_title("error of n")
+        axes2[0].grid(True, linestyle=":")
+        axes2[0].legend()
 
-            # 対話環境向けに即座に表示
-            plt.show()
+        axes2[1].set_xlabel("x")
+        axes2[1].set_ylabel(r"$|u - u_{\mathrm{ref}}|$")
+        axes2[1].set_title("error of u")
+        axes2[1].grid(True, linestyle=":")
+        axes2[1].legend()
+
+        axes2[2].set_xlabel("x")
+        axes2[2].set_ylabel(r"$|T - T_{\mathrm{ref}}|$")
+        axes2[2].set_title("error of T")
+        axes2[2].grid(True, linestyle=":")
+        axes2[2].legend()
+
+        fig2.tight_layout(rect=[0, 0.0, 1, 0.95])
+        plt.show()
+
 
     # ベンチマーク結果の保存・読み込みユーティリティ
     def save_benchmark_results(self, bench_results: dict | None = None, filename: str = "benchmark_results.pkl") -> str:
