@@ -368,7 +368,174 @@ class BGK1D:
 
         print("--- Convergence Test Completed ---")
         return self.convergence_results
-            
+    
+    # スキーム別比較テスト
+    def _run_scheme_comparison_test(self, 
+                                    scheme_list = ["explicit", "holo", "implicit"],
+                                    scheme_delta_t_list = [5e-7, 5e-4, 5e-7],
+                                    ):
+        """
+        指定されたスキームリストで比較テストを実行する
+        scheme_list: スキームリスト
+        scheme_delta_t_list: 各スキームに対応する時間刻み幅のリスト
+        """
+        # 必要なバイナリをコンパイル
+        self.compile(cuSOLVER=True,
+                     fused_explicit=True,
+                     fused_implicit=True,
+                     lo_block=True)
+        print(f"Running scheme comparison test with schemes: {scheme_list}")
+        print(f"Time step sizes: {scheme_delta_t_list}")
+
+        # 結果保存用コンテナ (meta + records)
+        self.cross_scheme_test_results = {
+            "meta": {
+                # テストメタデータ
+                "scheme_list": scheme_list,
+                "scheme_delta_t_list": [float(dt) for dt in scheme_delta_t_list],
+
+                # 実行条件（dt はスキームごとに変えるのでここは初期値）
+                "dt": float(self.dt),
+                "nx": int(self.nx),
+                "nv": int(self.nv),
+                "Lx": float(self.Lx),
+                "T_total": float(self.T_total),
+                "v_max": float(self.v_max),
+                "tau_tilde": float(self.tau_tilde),
+
+                "picard_tol": float(self.picard_tol),
+                "ho_tol": float(self.ho_tol),
+                "lo_tol": float(self.lo_tol),
+                "picard_iter": int(self.picard_iter),
+                "ho_iter": int(self.ho_iter),
+                "lo_iter": int(self.lo_iter),
+
+                # cudaデバイス名
+                "gpu_name": (
+                    torch.cuda.get_device_name(0)
+                    if isinstance(self.device, torch.device)
+                    and self.device.type == "cuda"
+                    else None
+                ),
+            },
+            "records": [],  # 各スキームの実行結果はここに append していく
+        }
+        
+        # スキームごとにテストを実行
+        for scheme, dt_scheme in zip(scheme_list, scheme_delta_t_list):
+            dt_scheme = float(dt_scheme)
+
+            if scheme == "explicit":
+                print(f"  Running explicit scheme (dt={dt_scheme})")
+                self._cross_scheme_test_explicit(dt_scheme)
+                n, u, T = self.calculate_moments()
+                self.cross_scheme_test_results["records"].append({
+                    "scheme": "explicit",
+                    "dt": dt_scheme,
+                    "f": self.f.cpu().numpy().copy(),
+                    "n": n.cpu().numpy().copy(),
+                    "u": u.cpu().numpy().copy(),
+                    "T": T.cpu().numpy().copy(),
+                })
+
+            elif scheme == "implicit":
+                print(f"  Running implicit scheme (dt={dt_scheme})")
+                self._cross_scheme_test_implicit(dt_scheme)
+                n, u, T = self.calculate_moments()
+                self.cross_scheme_test_results["records"].append({
+                    "scheme": "implicit",
+                    "dt": dt_scheme,
+                    "f": self.f.cpu().numpy().copy(),
+                    "n": n.cpu().numpy().copy(),
+                    "u": u.cpu().numpy().copy(),
+                    "T": T.cpu().numpy().copy(),
+                })
+
+            elif scheme == "holo":
+                print(f"  Running HOLO scheme (dt={dt_scheme})")
+                self._cross_scheme_test_holo(dt_scheme)
+                n, u, T = self.calculate_moments()
+                self.cross_scheme_test_results["records"].append({
+                    "scheme": "holo",
+                    "dt": dt_scheme,
+                    "f": self.f.cpu().numpy().copy(),
+                    "n": n.cpu().numpy().copy(),
+                    "u": u.cpu().numpy().copy(),
+                    "T": T.cpu().numpy().copy(),
+                })
+
+            else:
+                raise ValueError(f"Unknown scheme: {scheme}")
+
+    # クロステスト(explicit scheme)
+    def _cross_scheme_test_explicit(self, delta_t):
+        print("--- explicit ---")
+
+        # dt設定 + nt更新
+        self.dt = float(delta_t)
+        self.nt = int(self.T_total / self.dt) + 1
+
+        # 配列確保
+        self.Array_allocation()
+        self.set_initial_condition()
+        self.apply_boundary_condition()
+
+        # 1% 間隔
+        progress_interval = max(1, self.nt // 100)
+
+        with get_progress_bar(self.use_tqdm,total=self.nt, desc="Progress(explicit)", 
+                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+
+            for step in range(self.nt):
+                # 更新実行
+                self._explicit_update_cuda_backend()
+
+                # 配列交換
+                self.f, self.f_new = self.f_new, self.f
+                pbar.update(1)
+
+    # クロステスト(implicit scheme: Picard)
+    def _cross_scheme_test_implicit(self, delta_t):
+        print("--- implicit ---")
+
+        self.dt = float(delta_t)
+        self.nt = int(self.T_total / self.dt) + 1
+
+        self.Array_allocation()
+        self.set_initial_condition()
+        self.apply_boundary_condition()
+
+        progress_interval = max(1, self.nt // 100)
+
+        with get_progress_bar(self.use_tqdm,total=self.nt, desc="Progress(implicit)", 
+                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+
+            for step in range(self.nt):
+                self._implicit_update_cuda_backend()
+                self.f, self.f_new = self.f_new, self.f
+                pbar.update(1)
+
+    # クロステスト(HOLO scheme)
+    def _cross_scheme_test_holo(self, delta_t):
+        print("--- HOLO ---")
+
+        self.dt = float(delta_t)
+        self.nt = int(self.T_total / self.dt) + 1
+
+        self.Array_allocation()
+        self.set_initial_condition()
+        self.apply_boundary_condition()
+
+        progress_interval = max(1, self.nt // 100)
+
+        with get_progress_bar(self.use_tqdm,total=self.nt, desc="Progress(HOLO)", 
+                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+
+            for step in range(self.nt):
+                self._implicit_update_holo()
+                self.f, self.f_new = self.f_new, self.f
+                pbar.update(1)
+
     # HOLO収束性テスト
     def _run_holo_test(self):
         print("--- HOLO ---")
@@ -416,7 +583,7 @@ class BGK1D:
                 self.f, self.f_new = self.f_new, self.f
                 pbar.update(1)
 
-    
+    # Implicit + picard収束性テスト
     def _run_picard_test(self):
         print("--- PICARD ---")
 
@@ -461,7 +628,6 @@ class BGK1D:
                 self.f, self.f_new = self.f_new, self.f
                 pbar.update(1)
 
-    
     #空間差分ベンチマーク
     def _run_benchmark_space(self, grid_list):
 

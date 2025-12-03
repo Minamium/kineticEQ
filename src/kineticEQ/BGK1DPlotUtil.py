@@ -1352,6 +1352,167 @@ class BGK1DPlotMixin:
         print(f"HOLO-only 図を保存: {holo_filename}")
         print(f"Walltime 図を保存: {wall_filename}")
 
+    def plot_cross_scheme_results(self, ref_scheme: str = "explicit"):
+        """
+        cross_scheme_test_results に保存されたスキーム同士を比較プロットするメソッド。
+
+        引数で与えた ref_scheme を基準として、
+        - 図1: n, u, T を 1x3 サブプロットで、ref と比較対象スキームを同じ軸にプロット
+        - 図2: n, u, T の L2 型誤差（点ごとの差の絶対値）を 1x3 サブプロットでプロット
+        これを ref 以外の各スキームについて個別に行う。
+
+        Parameters
+        ----------
+        ref_scheme : str
+            cross_scheme_test_results["records"][i]["scheme"] に対応するスキーム名。
+            例: "explicit", "implicit", "holo"
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        # cross_scheme_test_results が存在するかチェック
+        if not hasattr(self, "cross_scheme_test_results"):
+            raise RuntimeError(
+                "cross_scheme_test_results が存在しません。"
+                "先に _run_scheme_comparison_test(...) を実行してください。"
+            )
+
+        records = self.cross_scheme_test_results.get("records", None)
+        if records is None or len(records) == 0:
+            raise RuntimeError(
+                "cross_scheme_test_results['records'] が空です。"
+                "スキーム比較テストが正しく実行されているか確認してください。"
+            )
+
+        # scheme 名で引けるように辞書化
+        scheme_to_record = {}
+        for rec in records:
+            scheme_name = rec.get("scheme", None)
+            if scheme_name is None:
+                continue
+            # 同じ scheme 名が複数ある場合は最後を上書き（基本想定は一意）
+            scheme_to_record[scheme_name] = rec
+
+        if ref_scheme not in scheme_to_record:
+            raise ValueError(
+                f"指定された ref_scheme='{ref_scheme}' に対応する結果が "
+                "cross_scheme_test_results に存在しません。"
+                f" 利用可能なスキーム: {list(scheme_to_record.keys())}"
+            )
+
+        # 参照スキームの結果
+        ref_rec = scheme_to_record[ref_scheme]
+        n_ref = np.asarray(ref_rec["n"])
+        u_ref = np.asarray(ref_rec["u"])
+        T_ref = np.asarray(ref_rec["T"])
+
+        # x 座標（Torch → NumPy）
+        x = self.x.detach().cpu().numpy()
+        if x.shape[0] != n_ref.shape[0]:
+            raise RuntimeError(
+                f"x の長さ (len(x)={x.shape[0]}) と ref n の長さ "
+                f"(len(n_ref)={n_ref.shape[0]}) が一致していません。"
+            )
+
+        # ref 以外のスキームについて順次プロット
+        for scheme_name, rec in scheme_to_record.items():
+            if scheme_name == ref_scheme:
+                continue  # ref 自身はスキップ
+
+            n_s = np.asarray(rec["n"])
+            u_s = np.asarray(rec["u"])
+            T_s = np.asarray(rec["T"])
+
+            # 安全のため次元チェック
+            if not (len(n_s) == len(u_s) == len(T_s) == len(x)):
+                raise RuntimeError(
+                    f"スキーム '{scheme_name}' のモーメント配列の長さが不一致です:"
+                    f" len(x)={len(x)}, len(n)={len(n_s)}, len(u)={len(u_s)}, len(T)={len(T_s)}"
+                )
+
+            # =====================================================
+            # 1. モーメント比較プロット (n, u, T)
+            # =====================================================
+            fig1, axes1 = plt.subplots(1, 3, figsize=(15, 4), sharex=True)
+            fig1.suptitle(
+                f"Moments comparison: scheme='{scheme_name}' vs ref='{ref_scheme}'",
+                fontsize=14
+            )
+
+            # n
+            ax = axes1[0]
+            ax.plot(x, n_ref, label=f"{ref_scheme} (ref)")
+            ax.plot(x, n_s, linestyle="--", label=f"{scheme_name}")
+            ax.set_xlabel("x")
+            ax.set_ylabel("n(x)")
+            ax.set_title("Density n")
+            ax.grid(True, linestyle=":")
+            ax.legend()
+
+            # u
+            ax = axes1[1]
+            ax.plot(x, u_ref, label=f"{ref_scheme} (ref)")
+            ax.plot(x, u_s, linestyle="--", label=f"{scheme_name}")
+            ax.set_xlabel("x")
+            ax.set_ylabel("u(x)")
+            ax.set_title("Velocity u")
+            ax.grid(True, linestyle=":")
+            ax.legend()
+
+            # T
+            ax = axes1[2]
+            ax.plot(x, T_ref, label=f"{ref_scheme} (ref)")
+            ax.plot(x, T_s, linestyle="--", label=f"{scheme_name}")
+            ax.set_xlabel("x")
+            ax.set_ylabel("T(x)")
+            ax.set_title("Temperature T")
+            ax.grid(True, linestyle=":")
+            ax.legend()
+
+            fig1.tight_layout(rect=[0, 0.0, 1, 0.95])
+
+            # =====================================================
+            # 2. L2 型誤差プロット (|q - q_ref| を「L2ノルム」として扱う)
+            # =====================================================
+            l2_n = np.sqrt((n_s - n_ref) ** 2)
+            l2_u = np.sqrt((u_s - u_ref) ** 2)
+            l2_T = np.sqrt((T_s - T_ref) ** 2)
+
+            fig2, axes2 = plt.subplots(1, 3, figsize=(15, 4), sharex=True)
+            fig2.suptitle(
+                f"L2-like error of moments: scheme='{scheme_name}' vs ref='{ref_scheme}'",
+                fontsize=14
+            )
+
+            # n 誤差
+            ax = axes2[0]
+            ax.plot(x, l2_n)
+            ax.set_xlabel("x")
+            ax.set_ylabel(r"$|n - n_{\mathrm{ref}}|$")
+            ax.set_title("L2 error of n")
+            ax.grid(True, linestyle=":")
+
+            # u 誤差
+            ax = axes2[1]
+            ax.plot(x, l2_u)
+            ax.set_xlabel("x")
+            ax.set_ylabel(r"$|u - u_{\mathrm{ref}}|$")
+            ax.set_title("L2 error of u")
+            ax.grid(True, linestyle=":")
+
+            # T 誤差
+            ax = axes2[2]
+            ax.plot(x, l2_T)
+            ax.set_xlabel("x")
+            ax.set_ylabel(r"$|T - T_{\mathrm{ref}}|$")
+            ax.set_title("L2 error of T")
+            ax.grid(True, linestyle=":")
+
+            fig2.tight_layout(rect=[0, 0.0, 1, 0.95])
+
+            # 対話環境向けに即座に表示
+            plt.show()
+
     # ベンチマーク結果の保存・読み込みユーティリティ
     def save_benchmark_results(self, bench_results: dict | None = None, filename: str = "benchmark_results.pkl") -> str:
         """ベンチマーク結果 dict を pickle 形式で保存
