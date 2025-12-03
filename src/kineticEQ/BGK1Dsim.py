@@ -1763,15 +1763,13 @@ class BGK1D:
         f_up[:, self._neg_mask] = fR[:, self._neg_mask]
 
         # 界面フラックス
-        w1 = torch.ones_like(v)  # 1
-        w2 = v                   # v
-        w3 = 0.5 * v * v         # 0.5 v^2
+        w1 = 0.0 * torch.ones_like(v)  # 1
+        w2 = 0.0 * v                   # v
+        w3 = 0.0 * 0.5 * v * v         # 0.5 v^2
 
         S_1_HO = torch.sum(f_up * w1[None, :], dim=1) * dv  # (nx-1,)
         S_2_HO = torch.sum(f_up * w2[None, :], dim=1) * dv  # (nx-1,)
         S_3_HO = torch.sum(f_up * w3[None, :], dim=1) * dv  # (nx-1,)
-
-        S_1_HO, S_2_HO, S_3_HO = 0, 0, 0
 
         return S_1_HO, S_2_HO, S_3_HO
 
