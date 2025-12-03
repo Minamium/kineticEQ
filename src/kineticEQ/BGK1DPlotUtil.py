@@ -1352,45 +1352,62 @@ class BGK1DPlotMixin:
         print(f"HOLO-only 図を保存: {holo_filename}")
         print(f"Walltime 図を保存: {wall_filename}")
 
-    def plot_cross_scheme_results(self, records, ref_scheme: str = "explicit"):
+    def plot_cross_scheme_results(self, results, ref_scheme: str = "explicit"):
         """
-        cross-scheme の結果リスト（records）を比較プロットするメソッド。
+        cross_scheme_test_results に保存されたスキーム同士を比較プロットするメソッド。
 
         引数で与えた ref_scheme を基準として、
-        - 図1群: n, u, T を 1x3 サブプロットで、ref と比較対象スキームを同じ軸にプロット（スキームごとに個別の Figure）
-        - 図2:    n, u, T の誤差 |q - q_ref| を 1x3 サブプロットに、全スキームを重ねてプロットする単一の Figure
+        - 図1群: n, u, T を 1x3 サブプロットで、ref と比較対象スキームを同じ軸にプロット
+                （これは ref 以外の各スキームごとに個別に生成）
+        - 図2: n, u, T の点ごとの誤差 |q - q_ref| を 1x3 サブプロットで、
+               ref 以外の全スキームを重ね描きする。
 
         Parameters
         ----------
-        records : list[dict]
-            _run_scheme_comparison_test() などで保存した各スキームの結果のリスト。
-            各要素は少なくとも keys: ["scheme", "n", "u", "T"] を持つことを想定。
+        results : dict または list[dict]
+            run_scheme_comparison_test(...) が返す dict
+            （{"meta":..., "records":[...]}）か、その中の "records" の list。
         ref_scheme : str
-            ref とするスキーム名（records[i]["scheme"] に対応）。
+            records[i]["scheme"] に対応するスキーム名。
             例: "explicit", "implicit", "holo"
         """
         import matplotlib.pyplot as plt
         import numpy as np
 
-        # records が有効かチェック
-        if records is None or len(records) == 0:
+        # results が {"meta":..., "records":[...]} 形式の場合に分解
+        if isinstance(results, dict):
+            meta = results.get("meta", {})
+            records = results.get("records", None)
+        else:
+            meta = {}
+            records = results
+
+        if records is None or not isinstance(records, (list, tuple)) or len(records) == 0:
             raise RuntimeError(
-                "records が空です。スキーム比較テストが正しく実行されているか確認してください。"
+                "results 内に有効な records がありません。"
+                "run_scheme_comparison_test(...) の戻り値、"
+                "またはその ['records'] を渡してください。"
             )
 
         # scheme 名で引けるように辞書化
         scheme_to_record = {}
         for rec in records:
+            if not isinstance(rec, dict):
+                raise RuntimeError(
+                    "records 内の要素が dict ではありません。"
+                    f" 要素の型: {type(rec)}"
+                )
             scheme_name = rec.get("scheme", None)
             if scheme_name is None:
                 continue
-            # 同じ scheme 名が複数ある場合は最後を上書き（基本想定は一意）
+            # 同じ scheme 名が複数ある場合は最後を採用（通常は一意）
             scheme_to_record[scheme_name] = rec
 
         if ref_scheme not in scheme_to_record:
             raise ValueError(
                 f"指定された ref_scheme='{ref_scheme}' に対応する結果が "
-                f"records に存在しません。利用可能なスキーム: {list(scheme_to_record.keys())}"
+                "records に存在しません。"
+                f" 利用可能なスキーム: {list(scheme_to_record.keys())}"
             )
 
         # 参照スキームの結果
@@ -1399,24 +1416,28 @@ class BGK1DPlotMixin:
         u_ref = np.asarray(ref_rec["u"])
         T_ref = np.asarray(ref_rec["T"])
 
-        # x 座標（Torch → NumPy）
-        x = self.x.detach().cpu().numpy()
+        # x 座標を meta から再構成（self は一切使わない）
+        nx_meta = int(meta["nx"]) if "nx" in meta else len(n_ref)
+        Lx_meta = float(meta["Lx"]) if "Lx" in meta else 1.0
+
+        # nx_meta と n_ref の長さが食い違っていたら n_ref に合わせる
+        if nx_meta != len(n_ref):
+            nx = len(n_ref)
+        else:
+            nx = nx_meta
+        x = np.linspace(0.0, Lx_meta, nx)
+
         if x.shape[0] != n_ref.shape[0]:
             raise RuntimeError(
                 f"x の長さ (len(x)={x.shape[0]}) と ref n の長さ "
                 f"(len(n_ref)={n_ref.shape[0]}) が一致していません。"
             )
 
-        # =====================================================
-        # 誤差プロット用 Figure（全スキームまとめて重ね描き）
-        # =====================================================
-        fig2, axes2 = plt.subplots(1, 3, figsize=(15, 4), sharex=True)
-        fig2.suptitle(
-            f"error of moments: all schemes vs ref='{ref_scheme}'",
-            fontsize=14
-        )
+        # 誤差曲線をまとめて描くためのバッファ
+        #   err_curves[scheme_name] = (err_n, err_u, err_T)
+        err_curves = {}
 
-        # ref 以外のスキームについて順次処理
+        # ref 以外のスキームについて順次プロット
         for scheme_name, rec in scheme_to_record.items():
             if scheme_name == ref_scheme:
                 continue  # ref 自身はスキップ
@@ -1433,7 +1454,7 @@ class BGK1DPlotMixin:
                 )
 
             # =====================================================
-            # 1. モーメント比較プロット (n, u, T)  ※スキームごとに個別の Figure
+            # 1. モーメント比較プロット (各スキームごとに 1 図)
             # =====================================================
             fig1, axes1 = plt.subplots(1, 3, figsize=(15, 4), sharex=True)
             fig1.suptitle(
@@ -1475,41 +1496,56 @@ class BGK1DPlotMixin:
             plt.show()
 
             # =====================================================
-            # 2. 誤差プロファイル |q - q_ref| を共通 Figure に重ね描き
+            # 2. 誤差配列を計算してバッファに保存（プロットは後でまとめて）
             # =====================================================
             err_n = np.abs(n_s - n_ref)
             err_u = np.abs(u_s - u_ref)
             err_T = np.abs(T_s - T_ref)
 
+            err_curves[scheme_name] = (err_n, err_u, err_T)
+
+        # =========================================================
+        # 3. 誤差 |q - q_ref| を 1 枚に重ねてプロット
+        # =========================================================
+        if err_curves:
+            fig2, axes2 = plt.subplots(1, 3, figsize=(15, 4), sharex=True)
+            fig2.suptitle(
+                f"Error of moments vs ref='{ref_scheme}'",
+                fontsize=14
+            )
+
             # n 誤差
-            axes2[0].plot(x, err_n, label=f"{scheme_name}")
+            ax = axes2[0]
+            for scheme_name, (err_n, _, _) in err_curves.items():
+                ax.plot(x, err_n, label=scheme_name)
+            ax.set_xlabel("x")
+            ax.set_ylabel(r"$|n - n_{\mathrm{ref}}|$")
+            ax.set_title("error of n")
+            ax.grid(True, linestyle=":")
+            ax.legend()
+
             # u 誤差
-            axes2[1].plot(x, err_u, label=f"{scheme_name}")
+            ax = axes2[1]
+            for scheme_name, (_, err_u, _) in err_curves.items():
+                ax.plot(x, err_u, label=scheme_name)
+            ax.set_xlabel("x")
+            ax.set_ylabel(r"$|u - u_{\mathrm{ref}}|$")
+            ax.set_title("error of u")
+            ax.grid(True, linestyle=":")
+            ax.legend()
+
             # T 誤差
-            axes2[2].plot(x, err_T, label=f"{scheme_name}")
+            ax = axes2[2]
+            for scheme_name, (_, _, err_T) in err_curves.items():
+                ax.plot(x, err_T, label=scheme_name)
+            ax.set_xlabel("x")
+            ax.set_ylabel(r"$|T - T_{\mathrm{ref}}|$")
+            ax.set_title("error of T")
+            ax.grid(True, linestyle=":")
+            ax.legend()
 
-        # 誤差図の体裁を整える
-        axes2[0].set_xlabel("x")
-        axes2[0].set_ylabel(r"$|n - n_{\mathrm{ref}}|$")
-        axes2[0].set_title("error of n")
-        axes2[0].grid(True, linestyle=":")
-        axes2[0].legend()
-
-        axes2[1].set_xlabel("x")
-        axes2[1].set_ylabel(r"$|u - u_{\mathrm{ref}}|$")
-        axes2[1].set_title("error of u")
-        axes2[1].grid(True, linestyle=":")
-        axes2[1].legend()
-
-        axes2[2].set_xlabel("x")
-        axes2[2].set_ylabel(r"$|T - T_{\mathrm{ref}}|$")
-        axes2[2].set_title("error of T")
-        axes2[2].grid(True, linestyle=":")
-        axes2[2].legend()
-
-        fig2.tight_layout(rect=[0, 0.0, 1, 0.95])
-        plt.show()
-
+            fig2.tight_layout(rect=[0, 0.0, 1, 0.95])
+            plt.show()
 
     # ベンチマーク結果の保存・読み込みユーティリティ
     def save_benchmark_results(self, bench_results: dict | None = None, filename: str = "benchmark_results.pkl") -> str:
