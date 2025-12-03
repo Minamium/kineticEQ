@@ -1501,9 +1501,12 @@ class BGK1D:
             # z-1ステップのfk+1を用いて熱流束を計算
             Q_HO = self._HO_calculate_fluxes(self._fz)
 
+            # y_i整合項を計算
+            Y_I_terms = self._compute_Y_I_terms(self._fz, n_HO, u_HO, T_HO, Q_HO, theta)
+
             # LO_calculate_momentsによる次状態のモーメントの近似(線形化反復を含む)
             n_lo, u_lo, T_lo, tau_lo, lo_residual, lo_iter = self._LO_calculate_moments(n_HO, u_HO, T_HO, Q_HO,
-                                                                                        S_1_HO, S_2_HO, S_3_HO)
+                                                                                        S_1_HO, S_2_HO, S_3_HO, Y_I_terms)
 
             # LO反復回数を保存
             lo_iter_list.append(lo_iter)
@@ -1574,12 +1577,13 @@ class BGK1D:
         return (z + 1), ho_residual, lo_iter_list, lo_residual_list
 
     # LO系のモーメント方程式をPicard反復により線形化して解く
-    def _LO_calculate_moments(self, n_HO, u_HO, T_HO, Q_HO, S_1_HO, S_2_HO, S_3_HO):
+    def _LO_calculate_moments(self, n_HO, u_HO, T_HO, Q_HO, S_1_HO, S_2_HO, S_3_HO, Y_I_terms):
         """
         LO系のモーメント方程式をPicard反復により線形化して解く（GPU版）。
         3×3ブロック三重対角系は CUDA 拡張 lo_blocktridiag を用いて解く。
 
         入力はすべて (nx,) or (nx-1,) の torch.Tensor (self.device, self.dtype) を想定。
+        Y_I_terms: 右辺整合項ベクトル
         戻り値:
             n_lo, u_lo, T_lo, tau_lo : torch.Tensor (nx,)
             lo_residual              : float
@@ -1596,6 +1600,7 @@ class BGK1D:
         S_1_HO = S_1_HO.to(device=device, dtype=dtype)
         S_2_HO = S_2_HO.to(device=device, dtype=dtype)
         S_3_HO = S_3_HO.to(device=device, dtype=dtype)
+        Y_I_terms = Y_I_terms.to(device=device, dtype=dtype)
 
         nx        = self.nx
         dt        = self.dt
@@ -1695,6 +1700,7 @@ class BGK1D:
                     W_HO[1:-1] 
                     - dt_over_2dx * F_diff
                     - dt_over_2dx * b_diff
+                    + Y_I_terms[1:-1]   # 右辺整合項ベクトル
                 )  # (n_inner,3)
 
                 # ── CUDA ブロック三重対角ソルバ呼び出し ───────
@@ -1763,9 +1769,9 @@ class BGK1D:
         f_up[:, self._neg_mask] = fR[:, self._neg_mask]
 
         # 界面フラックス
-        w1 = v                      # 1
-        w2 = v * v                  # v
-        w3 = 0.5 * v * v * v        # 0.5 v^2
+        w1 = torch.ones_like(v) # 1
+        w2 = v                  # v
+        w3 = 0.5 * v * v        # 0.5 v^2
 
         S_1_HO = torch.sum(f_up * w1[None, :], dim=1) * dv  # (nx-1,)
         S_2_HO = torch.sum(f_up * w2[None, :], dim=1) * dv  # (nx-1,)
@@ -1822,3 +1828,134 @@ class BGK1D:
         # f^{k+1} - θΔt R^{k+1} = f^k + (1-θ)Δt R^k の右辺を Explicit_term として返す
         Explicit_term = self.f + (1.0 - theta) * self.dt * rhs  # (nx, nv)
         return Explicit_term
+
+    # 右辺整合項ベクトルY_I_termsの計算
+    def _compute_Y_I_terms(self,
+                           f_z: torch.Tensor,
+                           n_HO: torch.Tensor,
+                           u_HO: torch.Tensor,
+                           T_HO: torch.Tensor,
+                           Q_HO: torch.Tensor,
+                           theta: float):
+        """
+        右辺整合項 Y_I_terms (= Δt * (y_i + I_i)) を計算する。
+
+        Parameters
+        ----------
+        f_z : (nx, nv)
+            HO 系の現在の反復解 f^{HO, k+1, z-1}（または z の値に対応するもの）
+        n_HO, u_HO, T_HO : (nx,)
+            HO 系旧時刻 k のモーメント (n^{HO,k}, u^{HO,k}, T^{HO,k})
+        Q_HO : (nx,)
+            HO 系の熱流束 Q_i^{HO,k+1,z} （_HO_calculate_fluxes で計算されたもの）
+        theta : float
+            BGK の θ スキームのパラメータ（ここでは Crank–Nicolson: 0.5）
+
+        Returns
+        -------
+        Y_I_terms : (nx, 3)
+            各セル i に対する [Y_I^n, Y_I^{nu}, Y_I^U]
+            （離散式上は Δt * (y_i + I_i) に対応するソースベクトル）
+        """
+        device = self.device
+        dtype  = self.dtype
+
+        nx = self.nx
+        dv = self.dv
+        dt = self.dt
+        dx = self.dx
+
+        # 返り値用バッファ
+        Y_I_terms = torch.zeros((nx, 3), dtype=dtype, device=device)
+
+        # ============================================================
+        # 1. フラックス整合ベクトル y_i  ≈ (1/(2Δx))[(F_HO - F_LO)_{i+1/2} - (F_HO - F_LO)_{i-1/2}]
+        # ============================================================
+
+        # --- (a) HO 側の界面フラックス F_{i+1/2}^{HO} ---
+        # S1, S2, S3 は「界面 i+1/2 における upwind モーメント」
+        S1_face, S2_face, S3_face = self._HO_calculate_moments(f_z)  # (nx-1,)
+
+        # Q_{i+1/2} ≈ 0.5 (Q_i + Q_{i+1})
+        Q_half = 0.5 * (Q_HO[:-1] + Q_HO[1:])  # (nx-1,)
+
+        # 保守変数フラックス F^{HO}_{i+1/2} = [S1, S2, S3 + 2 Q_half]
+        F_HO_half = torch.empty((nx - 1, 3), dtype=dtype, device=device)
+        F_HO_half[:, 0] = S1_face
+        F_HO_half[:, 1] = S2_face
+        F_HO_half[:, 2] = S3_face + 2.0 * Q_half
+
+        # --- (b) HO モーメントから構成した LO 側の界面フラックス F^{LO}_{i+1/2} ---
+        # W_HO = [ n, nu, U ]
+        W_HO = torch.empty((nx, 3), dtype=dtype, device=device)
+        W_HO[:, 0] = n_HO
+        W_HO[:, 1] = n_HO * u_HO                           # nu
+        W_HO[:, 2] = 0.5 * n_HO * (u_HO * u_HO + T_HO)     # U
+
+        # W_HO から u*, T*, P* を復元（LO Picard の m=0 と同じ処理）
+        denom = n_HO + 1e-30
+        u_star = W_HO[:, 1] / denom
+        T_star = 2.0 * (W_HO[:, 2] / denom - 0.5 * u_star * u_star)
+        T_star = torch.clamp(T_star, min=1e-30)
+        P_star = n_HO * T_star
+
+        # 界面値 (central average)
+        n_half  = 0.5 * (n_HO[:-1]     + n_HO[1:])
+        nu_half = 0.5 * (W_HO[:-1, 1]  + W_HO[1:, 1])
+        U_half  = 0.5 * (W_HO[:-1, 2]  + W_HO[1:, 2])
+        u_half  = 0.5 * (u_star[:-1]   + u_star[1:])
+        P_half  = 0.5 * (P_star[:-1]   + P_star[1:])
+
+        # LO 側の界面フラックス:
+        #   F1 = nu
+        #   F2 = nu^2 / n + P
+        #   F3 = (U + P) u + Q
+        F_LO_half = torch.empty_like(F_HO_half)
+        F_LO_half[:, 0] = nu_half
+        F_LO_half[:, 1] = nu_half * nu_half / (n_half + 1e-30) + P_half
+        F_LO_half[:, 2] = (U_half + P_half) * u_half + Q_half   # エネルギーフラックス
+
+        # HO と LO の差
+        delta_F_half = F_HO_half - F_LO_half  # (nx-1,3)
+
+        # セル中心 i に対応する y_i ≈ (1/(2Δx))[(ΔF)_{i+1/2} - (ΔF)_{i-1/2}]
+        if nx > 2:
+            y_internal = (delta_F_half[1:, :] - delta_F_half[:-1, :]) / (2.0 * dx)  # (nx-2,3)
+            # ここでは式の右辺 Δt * y_i をまとめて入れる
+            Y_I_terms[1:-1, :] += dt * y_internal
+
+        # ============================================================
+        # 2. 衝突整合ベクトル I_i  ≈ - Σ ψ ( θ C^{k+1} + (1-θ) C^k ) Δv
+        # ============================================================
+
+        # --- (a) 新しい HO 解 f_z に対する BGK 衝突項 C^{new} ---
+        n_new, u_new, T_new = self.calculate_moments(f_z)
+        tau_new = self.tau_tilde / (n_new * torch.sqrt(T_new))
+        fM_new  = self.Maxwellian(n_new, u_new, T_new)
+        C_new   = (fM_new - f_z) / tau_new[:, None]  # (nx,nv)
+
+        # --- (b) 旧時刻 HO 解 self.f に対する BGK 衝突項 C^{old} ---
+        n_old, u_old, T_old = n_HO, u_HO, T_HO
+        tau_old = self.tau_tilde / (n_old * torch.sqrt(T_old))
+        fM_old  = self.Maxwellian(n_old, u_old, T_old)
+        C_old   = (fM_old - self.f) / tau_old[:, None]  # (nx,nv)
+
+        # --- (c) 衝突不変量の重み ψ = (1, v, 0.5 v^2) ---
+        v = self.v
+        w1 = torch.ones_like(v)          # ψ_1 = 1
+        w2 = v                           # ψ_2 = v
+        w3 = 0.5 * v * v                 # ψ_3 = 0.5 v^2
+
+        # 離散和 Σ_j Δv ψ(v_j) [ θ C_new + (1-θ) C_old ]
+        C_mix = theta * C_new + (1.0 - theta) * C_old  # (nx,nv)
+
+        I_n  = -torch.sum(C_mix * w1[None, :], dim=1) * dv  # (nx,)
+        I_nu = -torch.sum(C_mix * w2[None, :], dim=1) * dv
+        I_U  = -torch.sum(C_mix * w3[None, :], dim=1) * dv
+
+        # こちらも Δt * I_i をソースに加える
+        Y_I_terms[:, 0] += dt * I_n
+        Y_I_terms[:, 1] += dt * I_nu
+        Y_I_terms[:, 2] += dt * I_U
+
+        return Y_I_terms
