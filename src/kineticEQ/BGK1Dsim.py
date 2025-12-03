@@ -370,7 +370,7 @@ class BGK1D:
         return self.convergence_results
     
     # スキーム別比較テスト
-    def _run_scheme_comparison_test(self, 
+    def run_scheme_comparison_test(self, 
                                     scheme_list = ["explicit", "holo", "implicit"],
                                     scheme_delta_t_list = [5e-7, 5e-4, 5e-7],
                                     ):

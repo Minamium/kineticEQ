@@ -1352,156 +1352,166 @@ class BGK1DPlotMixin:
         print(f"HOLO-only 図を保存: {holo_filename}")
         print(f"Walltime 図を保存: {wall_filename}")
 
-    def plot_scheme_comparison(self, ref_scheme: str = "implicit") -> None:
+    def plot_cross_scheme_results(self, ref_scheme: str = "explicit"):
         """
-        run_scheme_comparison_test() で保存した最終状態を用いて、
-        あるスキームを基準(ref)に他スキームとの比較プロットを行う。
+        cross_scheme_test_results に保存されたスキーム同士を比較プロットするメソッド。
 
-        - 図1群: 各スキームごとに [n, u, T] を ref と重ねてプロット（スキーム別）
-        - 図2:    誤差 |q - q_ref| (q = n,u,T) をスキームごとに同じプロット上に重ねて表示
-                 横軸 x、縦軸は pointwise absolute error。
-                 凡例には L2 ノルム (スカラー) を併記する。
+        引数で与えた ref_scheme を基準として、
+        - 図1: n, u, T を 1x3 サブプロットで、ref と比較対象スキームを同じ軸にプロット
+        - 図2: n, u, T の L2 型誤差（点ごとの差の絶対値）を 1x3 サブプロットでプロット
+        これを ref 以外の各スキームについて個別に行う。
+
+        Parameters
+        ----------
+        ref_scheme : str
+            cross_scheme_test_results["records"][i]["scheme"] に対応するスキーム名。
+            例: "explicit", "implicit", "holo"
         """
-        import numpy as np
         import matplotlib.pyplot as plt
+        import numpy as np
 
-        # 結果が存在するかチェック
+        # cross_scheme_test_results が存在するかチェック
         if not hasattr(self, "cross_scheme_test_results"):
-            raise RuntimeError("cross_scheme_test_results がありません。先に _run_scheme_comparison_test() を実行してください。")
+            raise RuntimeError(
+                "cross_scheme_test_results が存在しません。"
+                "先に _run_scheme_comparison_test(...) を実行してください。"
+            )
 
-        records = self.cross_scheme_test_results.get("records", [])
-        if len(records) == 0:
-            raise RuntimeError("cross_scheme_test_results['records'] が空です。")
+        records = self.cross_scheme_test_results.get("records", None)
+        if records is None or len(records) == 0:
+            raise RuntimeError(
+                "cross_scheme_test_results['records'] が空です。"
+                "スキーム比較テストが正しく実行されているか確認してください。"
+            )
 
-        # scheme ごとに最後のレコードをまとめる
-        scheme_to_record: dict[str, dict] = {}
+        # scheme 名で引けるように辞書化
+        scheme_to_record = {}
         for rec in records:
-            scheme = rec["scheme"]
-            scheme_to_record[scheme] = rec  # 同名が複数あれば最後を採用
+            scheme_name = rec.get("scheme", None)
+            if scheme_name is None:
+                continue
+            # 同じ scheme 名が複数ある場合は最後を上書き（基本想定は一意）
+            scheme_to_record[scheme_name] = rec
 
         if ref_scheme not in scheme_to_record:
-            raise ValueError(f"ref_scheme='{ref_scheme}' の結果が cross_scheme_test_results に存在しません。"
-                             f" 利用可能な scheme: {list(scheme_to_record.keys())}")
+            raise ValueError(
+                f"指定された ref_scheme='{ref_scheme}' に対応する結果が "
+                "cross_scheme_test_results に存在しません。"
+                f" 利用可能なスキーム: {list(scheme_to_record.keys())}"
+            )
 
+        # 参照スキームの結果
         ref_rec = scheme_to_record[ref_scheme]
-        compare_schemes = [s for s in scheme_to_record.keys() if s != ref_scheme]
-        if len(compare_schemes) == 0:
-            print("ref 以外のスキームが無いため、プロットするものがありません。")
-            return
+        n_ref = np.asarray(ref_rec["n"])
+        u_ref = np.asarray(ref_rec["u"])
+        T_ref = np.asarray(ref_rec["T"])
 
-        # x 座標（空間格子）。全スキームで同じ nx を仮定
-        x = self.x.detach().cpu().numpy().copy()
-        dx = float(self.dx)
+        # x 座標（Torch → NumPy）
+        x = self.x.detach().cpu().numpy()
+        if x.shape[0] != n_ref.shape[0]:
+            raise RuntimeError(
+                f"x の長さ (len(x)={x.shape[0]}) と ref n の長さ "
+                f"(len(n_ref)={n_ref.shape[0]}) が一致していません。"
+            )
 
-        # ---------- 1. スキームごとの n, u, T プロファイル (ref と重ねる) ----------
-        for scheme in compare_schemes:
-            rec = scheme_to_record[scheme]
+        # ref 以外のスキームについて順次プロット
+        for scheme_name, rec in scheme_to_record.items():
+            if scheme_name == ref_scheme:
+                continue  # ref 自身はスキップ
 
-            n_ref = ref_rec["n"]
-            u_ref = ref_rec["u"]
-            T_ref = ref_rec["T"]
+            n_s = np.asarray(rec["n"])
+            u_s = np.asarray(rec["u"])
+            T_s = np.asarray(rec["T"])
 
-            n_s = rec["n"]
-            u_s = rec["u"]
-            T_s = rec["T"]
+            # 安全のため次元チェック
+            if not (len(n_s) == len(u_s) == len(T_s) == len(x)):
+                raise RuntimeError(
+                    f"スキーム '{scheme_name}' のモーメント配列の長さが不一致です:"
+                    f" len(x)={len(x)}, len(n)={len(n_s)}, len(u)={len(u_s)}, len(T)={len(T_s)}"
+                )
 
-            fig, axes = plt.subplots(1, 3, figsize=(15, 4), sharex=True)
-            fig.suptitle(f"Final moments: ref = {ref_scheme}, compare = {scheme}")
+            # =====================================================
+            # 1. モーメント比較プロット (n, u, T)
+            # =====================================================
+            fig1, axes1 = plt.subplots(1, 3, figsize=(15, 4), sharex=True)
+            fig1.suptitle(
+                f"Moments comparison: scheme='{scheme_name}' vs ref='{ref_scheme}'",
+                fontsize=14
+            )
 
-            # Density
-            ax = axes[0]
-            ax.plot(x, n_ref, label=f"{ref_scheme} (ref)")
-            ax.plot(x, n_s, "--", label=f"{scheme}")
-            ax.set_xlabel("x")
-            ax.set_ylabel("n")
-            ax.set_title("Density n")
-            ax.grid(True)
-            ax.legend()
-
-            # Velocity
-            ax = axes[1]
-            ax.plot(x, u_ref, label=f"{ref_scheme} (ref)")
-            ax.plot(x, u_s, "--", label=f"{scheme}")
-            ax.set_xlabel("x")
-            ax.set_ylabel("u")
-            ax.set_title("Velocity u")
-            ax.grid(True)
-            ax.legend()
-
-            # Temperature
-            ax = axes[2]
-            ax.plot(x, T_ref, label=f"{ref_scheme} (ref)")
-            ax.plot(x, T_s, "--", label=f"{scheme}")
-            ax.set_xlabel("x")
-            ax.set_ylabel("T")
-            ax.set_title("Temperature T")
-            ax.grid(True)
-            ax.legend()
-
-            plt.tight_layout()
-            plt.show()
-
-        # ---------- 2. 誤差プロファイルをスキームごとに同一図上へ重ねる ----------
-        fig_err, axes_err = plt.subplots(1, 3, figsize=(15, 4), sharex=True)
-        fig_err.suptitle(f"Pointwise absolute error vs ref = '{ref_scheme}'")
-
-        # ref 側のモーメント
-        n_ref = ref_rec["n"]
-        u_ref = ref_rec["u"]
-        T_ref = ref_rec["T"]
-
-        for scheme in compare_schemes:
-            rec = scheme_to_record[scheme]
-            n_s = rec["n"]
-            u_s = rec["u"]
-            T_s = rec["T"]
-
-            # 各モーメントの pointwise error と L2 ノルム
-            # L2 = sqrt(∑ |err|^2 dx)
             # n
-            err_n = n_s - n_ref
-            L2_n = float(np.sqrt(np.sum(err_n**2) * dx))
+            ax = axes1[0]
+            ax.plot(x, n_ref, label=f"{ref_scheme} (ref)")
+            ax.plot(x, n_s, linestyle="--", label=f"{scheme_name}")
+            ax.set_xlabel("x")
+            ax.set_ylabel("n(x)")
+            ax.set_title("Density n")
+            ax.grid(True, linestyle=":")
+            ax.legend()
+
             # u
-            err_u = u_s - u_ref
-            L2_u = float(np.sqrt(np.sum(err_u**2) * dx))
+            ax = axes1[1]
+            ax.plot(x, u_ref, label=f"{ref_scheme} (ref)")
+            ax.plot(x, u_s, linestyle="--", label=f"{scheme_name}")
+            ax.set_xlabel("x")
+            ax.set_ylabel("u(x)")
+            ax.set_title("Velocity u")
+            ax.grid(True, linestyle=":")
+            ax.legend()
+
             # T
-            err_T = T_s - T_ref
-            L2_T = float(np.sqrt(np.sum(err_T**2) * dx))
+            ax = axes1[2]
+            ax.plot(x, T_ref, label=f"{ref_scheme} (ref)")
+            ax.plot(x, T_s, linestyle="--", label=f"{scheme_name}")
+            ax.set_xlabel("x")
+            ax.set_ylabel("T(x)")
+            ax.set_title("Temperature T")
+            ax.grid(True, linestyle=":")
+            ax.legend()
 
-            # n の誤差プロファイル
-            ax = axes_err[0]
-            ax.plot(x, np.abs(err_n), label=f"{scheme} (L2={L2_n:.3e})")
+            fig1.tight_layout(rect=[0, 0.0, 1, 0.95])
 
-            # u の誤差プロファイル
-            ax = axes_err[1]
-            ax.plot(x, np.abs(err_u), label=f"{scheme} (L2={L2_u:.3e})")
+            # =====================================================
+            # 2. L2 型誤差プロット (|q - q_ref| を「L2ノルム」として扱う)
+            # =====================================================
+            l2_n = np.sqrt((n_s - n_ref) ** 2)
+            l2_u = np.sqrt((u_s - u_ref) ** 2)
+            l2_T = np.sqrt((T_s - T_ref) ** 2)
 
-            # T の誤差プロファイル
-            ax = axes_err[2]
-            ax.plot(x, np.abs(err_T), label=f"{scheme} (L2={L2_T:.3e})")
+            fig2, axes2 = plt.subplots(1, 3, figsize=(15, 4), sharex=True)
+            fig2.suptitle(
+                f"error of moments: scheme='{scheme_name}' vs ref='{ref_scheme}'",
+                fontsize=14
+            )
 
-        # 軸ラベル・タイトル等の整形
-        axes_err[0].set_xlabel("x")
-        axes_err[0].set_ylabel("|n - n_ref|")
-        axes_err[0].set_title("Density error")
-        axes_err[0].grid(True)
-        axes_err[0].legend()
+            # n 誤差
+            ax = axes2[0]
+            ax.plot(x, l2_n)
+            ax.set_xlabel("x")
+            ax.set_ylabel(r"$|n - n_{\mathrm{ref}}|$")
+            ax.set_title("error of n")
+            ax.grid(True, linestyle=":")
 
-        axes_err[1].set_xlabel("x")
-        axes_err[1].set_ylabel("|u - u_ref|")
-        axes_err[1].set_title("Velocity error")
-        axes_err[1].grid(True)
-        axes_err[1].legend()
+            # u 誤差
+            ax = axes2[1]
+            ax.plot(x, l2_u)
+            ax.set_xlabel("x")
+            ax.set_ylabel(r"$|u - u_{\mathrm{ref}}|$")
+            ax.set_title("error of u")
+            ax.grid(True, linestyle=":")
 
-        axes_err[2].set_xlabel("x")
-        axes_err[2].set_ylabel("|T - T_ref|")
-        axes_err[2].set_title("Temperature error")
-        axes_err[2].grid(True)
-        axes_err[2].legend()
+            # T 誤差
+            ax = axes2[2]
+            ax.plot(x, l2_T)
+            ax.set_xlabel("x")
+            ax.set_ylabel(r"$|T - T_{\mathrm{ref}}|$")
+            ax.set_title("error of T")
+            ax.grid(True, linestyle=":")
 
-        plt.tight_layout()
-        plt.show()
+            fig2.tight_layout(rect=[0, 0.0, 1, 0.95])
 
+            # 対話環境向けに即座に表示
+            plt.show()
 
     # ベンチマーク結果の保存・読み込みユーティリティ
     def save_benchmark_results(self, bench_results: dict | None = None, filename: str = "benchmark_results.pkl") -> str:
