@@ -43,7 +43,7 @@ config = {
         "ho_tol": args.ho_tol,
         "lo_tol": args.lo_tol,
         "Con_Terms_do": args.Con_Terms_do,
-        "flux_consistency_do": args.Con_Terms_do,
+        "flux_consistency_do": args.flux_consistency_do,
 
         # ハイパーパラメータ
         "tau_tilde": args.tau_tilde,
