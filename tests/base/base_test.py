@@ -16,13 +16,13 @@ parser.add_argument('--tau_tilde', type=float, default=5e-6, help='Hyperparamete
 parser.add_argument('--dt', type=float, default=5e-5, help='Time step')
 parser.add_argument('--T_total', type=float, default=0.01, help='Total simulation time')
 parser.add_argument('--device', type=str, default='cuda', help='Device')
-parser.add_argument('--use_tqdm', type=bool, default=True, help='Use tqdm')
+parser.add_argument('--use_tqdm', action='store_true', default=True, help='Use tqdm')
 parser.add_argument('--nx', type=int, default=1000, help='Number of grid points')
 parser.add_argument('--nv', type=int, default=200, help='Number of velocity points')
 parser.add_argument('--v_max', type=float, default=10.0, help='Maximum velocity')
 parser.add_argument('--ic_fn', type=str, default=None, help='Custom initial condition function')
-parser.add_argument('--Con_Terms_do', type=bool, default=False, help='Include collision terms')
-parser.add_argument('--flux_consistency_do', type=bool, default=False, help='Include flux consistency terms')
+parser.add_argument('--Con_Terms_do', action='store_true', default=False, help='Include collision terms')
+parser.add_argument('--flux_consistency_do', action='store_true', default=False, help='Include flux consistency terms')
 
 args = parser.parse_args()
 
