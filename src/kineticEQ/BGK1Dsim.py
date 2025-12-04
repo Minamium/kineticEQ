@@ -55,6 +55,7 @@ class BGK1D:
                  ho_tol=1e-4,
                  lo_tol=1e-4,
                  Con_Terms_do=False,
+                 flux_consistency_do=False,
 
                  # ハイパーパラメータ
                  tau_tilde=1.0,
@@ -135,7 +136,10 @@ class BGK1D:
 
         # tqdm設定
         self.use_tqdm = use_tqdm
+
+        # HOLO補正項オプション
         self.Con_Terms_do = Con_Terms_do
+        self.flux_consistency_do = flux_consistency_do
 
         # 派生パラメータ計算
         self.dx = self.Lx / (self.nx - 1)
@@ -162,6 +166,10 @@ class BGK1D:
                     print("  collision terms: included")
                 else:
                     print("  collision terms: excluded")
+                if self.flux_consistency_do:
+                    print("  flux consistency: enabled")
+                else:
+                    print("  flux consistency: disabled")
 
         print(" ---- hyperparameter ----")
         print(f"  hyperparameter: tau_tilde={self.tau_tilde}")
@@ -1922,7 +1930,10 @@ class BGK1D:
         # --- (1-6) セル中心の y_i = (γ_{i+1/2} - γ_{i-1/2}) / Δx ---
         if nx > 2:
             y_internal = (gamma_face[1:, :] - gamma_face[:-1, :]) / dx  # (nx-2,3)
-            # Y_I_terms[1:-1, :] += dt * y_internal  # Δt * y_i を右辺に加える
+            if self.flux_consistency_do:
+                Y_I_terms[1:-1, :] += dt * y_internal  # Δt * y_i を右辺に加える
+            else:
+                pass  # flux_consistency_do が False の場合は項を加えない
 
         # ============================================================
         # 2. 衝突整合 I_i : BGK 衝突項の離散モーメント残差
