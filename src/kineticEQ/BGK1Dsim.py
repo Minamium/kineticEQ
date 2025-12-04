@@ -56,6 +56,7 @@ class BGK1D:
                  lo_tol=1e-4,
                  Con_Terms_do=False,
                  flux_consistency_do=False,
+                 SVdown=False,
 
                  # ハイパーパラメータ
                  tau_tilde=1.0,
@@ -1786,10 +1787,15 @@ class BGK1D:
         f_up[:, self._neg_mask] = fR[:, self._neg_mask]
 
         # 界面フラックス
-        w1 = v                      # v
-        w2 = v * v                  # v^2
-        w3 = 0.5 * v * v * v        # 0.5 v^3
-
+        if self.SVdown:
+            w1 = torch.ones_like(v)
+            w2 = v
+            w3 = 0.5 * v * v
+        else:
+            w1 = v
+            w2 = v * v
+            w3 = 0.5 * v * v * v
+            
         S_1_HO = torch.sum(f_up * w1[None, :], dim=1) * dv  # (nx-1,)
         S_2_HO = torch.sum(f_up * w2[None, :], dim=1) * dv  # (nx-1,)
         S_3_HO = torch.sum(f_up * w3[None, :], dim=1) * dv  # (nx-1,)

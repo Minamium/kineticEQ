@@ -23,7 +23,7 @@ parser.add_argument('--v_max', type=float, default=10.0, help='Maximum velocity'
 parser.add_argument('--ic_fn', type=str, default=None, help='Custom initial condition function')
 parser.add_argument('--Con_Terms_do', action='store_true', default=False, help='Include collision terms')
 parser.add_argument('--flux_consistency_do', action='store_true', default=False, help='Include flux consistency terms')
-
+parser.add_argument('--SVdown_do', action='store_true', default=False, help='Include SVdown terms')
 args = parser.parse_args()
 
 config = {
@@ -44,6 +44,7 @@ config = {
         "lo_tol": args.lo_tol,
         "Con_Terms_do": args.Con_Terms_do,
         "flux_consistency_do": args.flux_consistency_do,
+        "SVdown": args.SVdown_do,
 
         # ハイパーパラメータ
         "tau_tilde": args.tau_tilde,
