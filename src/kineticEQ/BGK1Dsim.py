@@ -1938,7 +1938,7 @@ class BGK1D:
         if nx > 2:
             y_internal = (gamma_face[1:, :] - gamma_face[:-1, :]) / dx  # (nx-2,3)
             if self.flux_consistency_do:
-                Y_I_terms[1:-1, :] += -dt * y_internal  # Δt * y_i を右辺に加える（符号反転テスト）
+                Y_I_terms[1:-1, :] += dt * y_internal  # Δt * y_i を右辺に加える
             else:
                 pass  # flux_consistency_do が False の場合は項を加えない
 
