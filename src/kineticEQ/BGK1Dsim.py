@@ -54,6 +54,7 @@ class BGK1D:
                  lo_iter=10,
                  ho_tol=1e-4,
                  lo_tol=1e-4,
+                 Con_Terms_do=False,
 
                  # ハイパーパラメータ
                  tau_tilde=1.0,
@@ -134,6 +135,7 @@ class BGK1D:
 
         # tqdm設定
         self.use_tqdm = use_tqdm
+        self.Con_Terms_do = Con_Terms_do
 
         # 派生パラメータ計算
         self.dx = self.Lx / (self.nx - 1)
@@ -1502,7 +1504,10 @@ class BGK1D:
             Q_HO = self._HO_calculate_fluxes(self._fz)
 
             # y_i整合項を計算
-            Y_I_terms = self._compute_Y_I_terms(self._fz, n_HO, u_HO, T_HO, Q_HO, theta)
+            if self.Con_Terms_do:
+                Y_I_terms = self._compute_Y_I_terms(self._fz, n_HO, u_HO, T_HO, Q_HO, theta)
+            else:
+                Y_I_terms = torch.zeros_like(self._fz[1:-1, :])
 
             # LO_calculate_momentsによる次状態のモーメントの近似(線形化反復を含む)
             n_lo, u_lo, T_lo, tau_lo, lo_residual, lo_iter = self._LO_calculate_moments(n_HO, u_HO, T_HO, Q_HO,
