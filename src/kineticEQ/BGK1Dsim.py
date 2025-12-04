@@ -158,6 +158,10 @@ class BGK1D:
             if self.implicit_solver == 'holo':
                 print(f"  ho_iter: {self.ho_iter}, ho_tol: {self.ho_tol}")
                 print(f"  lo_iter: {self.lo_iter}, lo_tol: {self.lo_tol}")
+                if self.Con_Terms_do:
+                    print("  collision terms: included")
+                else:
+                    print("  collision terms: excluded")
 
         print(" ---- hyperparameter ----")
         print(f"  hyperparameter: tau_tilde={self.tau_tilde}")
