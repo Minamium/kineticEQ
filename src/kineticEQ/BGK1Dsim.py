@@ -141,6 +141,7 @@ class BGK1D:
         # HOLO補正項オプション
         self.Con_Terms_do = Con_Terms_do
         self.flux_consistency_do = flux_consistency_do
+        self.SVdown = SVdown
 
         # 派生パラメータ計算
         self.dx = self.Lx / (self.nx - 1)
