@@ -1974,9 +1974,9 @@ class BGK1D:
 
         # I_i を「BGK モーメント残差のマイナス」として LO 系に与える
         # （連続極限では M_i → 0, I_i → 0 になる）
-        Y_I_terms[:, 0] += -dt * M_n
-        Y_I_terms[:, 1] += -dt * M_nu
-        Y_I_terms[:, 2] += -dt * M_U
+        Y_I_terms[:, 0] += dt * M_n
+        Y_I_terms[:, 1] += dt * M_nu
+        Y_I_terms[:, 2] += dt * M_U
 
         return Y_I_terms
 
