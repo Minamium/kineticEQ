@@ -1847,51 +1847,100 @@ class BGK1D:
                            Q_HO: torch.Tensor,
                            theta: float):
         """
-        右辺整合項 Y_I_terms (= Δt * I_i) を計算する。
-        ここではまず衝突整合ベクトル I_i のみを入れる。
-        （フラックス整合 y_i は 0 とする）
+        右辺整合項 Y_I_terms (= Δt * (y_i + I_i)) を計算する。
 
         Parameters
         ----------
         f_z : (nx, nv)
-            HO 系の現在の反復解 f^{HO, k+1, z-1}
+            HO 系の現在の反復解 f^{HO, k+1, z-1} に対応する分布
+            （ここでは「新しい」HO 状態として扱う）
         n_HO, u_HO, T_HO : (nx,)
-            旧時刻 k の HO モーメント
+            旧時刻 k の HO モーメント (n^{HO,k}, u^{HO,k}, T^{HO,k})
         Q_HO : (nx,)
-            HO 系の熱流束 Q_i^{HO}（ここでは未使用）
+            HO 系の熱流束 Q_i^{HO}（_HO_calculate_fluxes で計算されたもの）
         theta : float
-            θ-scheme パラメータ（Crank–Nicolson: 0.5）
+            BGK θ-scheme パラメータ（Crank–Nicolson なら 0.5）
 
         Returns
         -------
         Y_I_terms : (nx, 3)
             各セル i に対する [Y_I^n, Y_I^{nu}, Y_I^U]
-            （ここでは Δt * I_i のみ）
+            （離散式上は Δt * (y_i + I_i) に対応）
         """
         device = self.device
         dtype  = self.dtype
 
         nx = self.nx
         dv = self.dv
+        dx = self.dx
         dt = self.dt
 
-        # 返り値バッファ
         Y_I_terms = torch.zeros((nx, 3), dtype=dtype, device=device)
 
-        # ===== 衝突整合ベクトル I_i =====
-        # 新しい HO 解 f_z に対する BGK 衝突項 C^{new}
+        # ============================================================
+        # 1. フラックス整合 y_i : γ を通した定義
+        #    γ_face = -S_face + F_LO_face
+        #    y_i   ≈ (γ_{i+1/2} - γ_{i-1/2}) / Δx
+        # ============================================================
+
+        # --- (1-1) HO 数値流束の離散モーメント S_1, S_2, S_3 (v, v^2, 0.5 v^3) ---
+        #     f_z に対する upwind flux のモーメント
+        #     S_l(i+1/2) = Σ Δv w_l(v_j) f_hat_{i+1/2,j}
+        S_1_face, S_2_face, S_3_face = self._HO_calculate_moments(f_z)  # (nx-1,)
+
+        # --- (1-2) f_z から "新しい" HO モーメントを計算 ---
         n_new, u_new, T_new = self.calculate_moments(f_z)
+        P_new = n_new * T_new
+        nu_new = n_new * u_new
+        U_new  = 0.5 * n_new * (u_new * u_new + T_new)
+
+        # --- (1-3) これらから LO 形式の数値流束 F_LO^{HO} を界面で構成 ---
+        # 質量流束 F1 = nu
+        nu_half = 0.5 * (nu_new[:-1] + nu_new[1:])  # (nx-1,)
+
+        # 運動量流束 F2 = nu^2/n + P
+        mom_flux_center = nu_new * nu_new / (n_new + 1e-30) + P_new  # (nx,)
+        mom_flux_half = 0.5 * (mom_flux_center[:-1] + mom_flux_center[1:])  # (nx-1,)
+
+        # エネルギー流束 F3 = (U + P) u + Q
+        energy_flux_center = (U_new + P_new) * u_new + Q_HO           # (nx,)
+        energy_flux_half   = 0.5 * (energy_flux_center[:-1] +
+                                    energy_flux_center[1:])          # (nx-1,)
+
+        # F_LO_half = [F1, F2, F3]
+        F_LO_half = torch.empty((nx - 1, 3), dtype=dtype, device=device)
+        F_LO_half[:, 0] = nu_half
+        F_LO_half[:, 1] = mom_flux_half
+        F_LO_half[:, 2] = energy_flux_half
+
+        # --- (1-4) HO 数値流束の離散モーメントベクトル S_face ---
+        S_face = torch.stack((S_1_face, S_2_face, S_3_face), dim=1)  # (nx-1,3)
+
+        # --- (1-5) γ_face = -S_face + F_LO_half  ---  (4.19)–(4.21) の離散化
+        gamma_face = -S_face + F_LO_half  # (nx-1,3)
+
+        # --- (1-6) セル中心の y_i = (γ_{i+1/2} - γ_{i-1/2}) / Δx ---
+        if nx > 2:
+            y_internal = (gamma_face[1:, :] - gamma_face[:-1, :]) / dx  # (nx-2,3)
+            Y_I_terms[1:-1, :] += dt * y_internal  # Δt * y_i を右辺に加える
+
+        # ============================================================
+        # 2. 衝突整合 I_i : BGK 衝突項の離散モーメント残差
+        #    I_i ≈ - ∑_j Δv ψ(v_j) C_mix,i,j
+        # ============================================================
+
+        # --- (2-1) 新しい HO 解 f_z に対する BGK 衝突項 C_new ---
         tau_new = self.tau_tilde / (n_new * torch.sqrt(T_new))
         fM_new  = self.Maxwellian(n_new, u_new, T_new)
         C_new   = (fM_new - f_z) / tau_new[:, None]  # (nx,nv)
 
-        # 旧時刻 HO 解 self.f に対する BGK 衝突項 C^{old}
+        # --- (2-2) 旧時刻 HO 解 self.f (= f^k) に対する BGK 衝突項 C_old ---
         n_old, u_old, T_old = n_HO, u_HO, T_HO
         tau_old = self.tau_tilde / (n_old * torch.sqrt(T_old))
         fM_old  = self.Maxwellian(n_old, u_old, T_old)
         C_old   = (fM_old - self.f) / tau_old[:, None]  # (nx,nv)
 
-        # time-centred collision operator
+        # --- (2-3) θ-平均した time-centred 衝突項 ---
         C_mix = theta * C_new + (1.0 - theta) * C_old  # (nx,nv)
 
         # 衝突不変量 ψ = (1, v, 0.5 v^2)
@@ -1900,16 +1949,17 @@ class BGK1D:
         w2 = v                            # ψ_2 = v
         w3 = 0.5 * v * v                  # ψ_3 = 0.5 v^2
 
-        # I_i = ∫ ψ C_mix dv （BGK モーメント方程式の右辺）
-        I_n  = torch.sum(C_mix * w1[None, :], dim=1) * dv  # (nx,)
-        I_nu = torch.sum(C_mix * w2[None, :], dim=1) * dv
-        I_U  = torch.sum(C_mix * w3[None, :], dim=1) * dv
+        # 離散モーメント M_i = ∑ Δv ψ C_mix
+        M_n  = torch.sum(C_mix * w1[None, :], dim=1) * dv  # (nx,)
+        M_nu = torch.sum(C_mix * w2[None, :], dim=1) * dv
+        M_U  = torch.sum(C_mix * w3[None, :], dim=1) * dv
 
-        # LO 方程式は衝突項を持たないので、BGK によるモーメント変化を
-        # 右辺に Δt * I_i として丸ごと付与する
-        Y_I_terms[:, 0] += dt * I_n
-        Y_I_terms[:, 1] += dt * I_nu
-        Y_I_terms[:, 2] += dt * I_U
+        # I_i を「BGK モーメント残差のマイナス」として LO 系に与える
+        # （連続極限では M_i → 0, I_i → 0 になる）
+        Y_I_terms[:, 0] += -dt * M_n
+        Y_I_terms[:, 1] += -dt * M_nu
+        Y_I_terms[:, 2] += -dt * M_U
 
         return Y_I_terms
+
 
