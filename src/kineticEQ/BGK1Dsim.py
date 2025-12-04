@@ -1507,7 +1507,7 @@ class BGK1D:
             if self.Con_Terms_do:
                 Y_I_terms = self._compute_Y_I_terms(self._fz, n_HO, u_HO, T_HO, Q_HO, theta)
             else:
-                Y_I_terms = torch.zeros_like(self._fz[1:-1, :])
+                Y_I_terms = torch.zeros((self.nx, 3), dtype=self.dtype, device=self.device)
 
             # LO_calculate_momentsによる次状態のモーメントの近似(線形化反復を含む)
             n_lo, u_lo, T_lo, tau_lo, lo_residual, lo_iter = self._LO_calculate_moments(n_HO, u_HO, T_HO, Q_HO,

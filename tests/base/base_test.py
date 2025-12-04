@@ -21,6 +21,7 @@ parser.add_argument('--nx', type=int, default=1000, help='Number of grid points'
 parser.add_argument('--nv', type=int, default=200, help='Number of velocity points')
 parser.add_argument('--v_max', type=float, default=10.0, help='Maximum velocity')
 parser.add_argument('--ic_fn', type=str, default=None, help='Custom initial condition function')
+parser.add_argument('--Con_Terms_do', type=bool, default=False, help='Include collision terms')
 args = parser.parse_args()
 
 config = {
@@ -39,6 +40,7 @@ config = {
         "lo_iter": args.lo_iter,
         "ho_tol": args.ho_tol,
         "lo_tol": args.lo_tol,
+        "Con_Terms_do": args.Con_Terms_do,
 
         # ハイパーパラメータ
         "tau_tilde": args.tau_tilde,
