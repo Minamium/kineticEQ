@@ -132,6 +132,11 @@ class BGK2D2V_core:
 
         progress_interval = max(1, self.nt // 50)
 
+        # 初期状態を記録
+        if self.flag_record_state:
+            self.compute_moments()
+            self._record_state(0.0)
+
         # プログレスバーを初期化
         with get_progress_bar(self.use_tqdm,total=self.nt, desc="Explicit Evolution", 
                   bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
@@ -143,10 +148,13 @@ class BGK2D2V_core:
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
 
+                # 新しい f からモーメントを再計算
+                self.compute_moments()
+
                 if self.flag_record_state:
                     if step % progress_interval == 0:
                         # 状態記録
-                        self._record_state(step * self.dt)
+                        self._record_state((step + 1) * self.dt)
 
                 # プログレスバー更新
                 pbar.update(1)
