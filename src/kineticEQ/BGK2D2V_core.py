@@ -12,7 +12,7 @@ class BGK2D2V_core:
     2D2V-BGK数値計算coreクラス
     """
     def __init__(self,
-
+                 
                  # 数値計算パラメータ
                  nx: int,   
                  ny: int,   
@@ -35,6 +35,9 @@ class BGK2D2V_core:
                  u_x: torch.Tensor,
                  u_y: torch.Tensor,
                  T: torch.Tensor,
+
+                 # スキーム選択
+                 explicit_advection_scheme: str = "MUSCL2",
 
                  # デバイス, 精度設定
                  device: str = 'cuda',
@@ -70,6 +73,9 @@ class BGK2D2V_core:
         # tau_tilde
         self.tau_tilde = tau_tilde
 
+        # スキーム設定
+        self.explicit_advection_scheme = explicit_advection_scheme
+
         # 精度設定（文字列からTorch型に変換）
         if dtype == 'float32':
             self.dtype = torch.float32
@@ -100,6 +106,7 @@ class BGK2D2V_core:
         print(f"  dx={self.dx}, dy={self.dy}, dv_x={self.dv_x}, dv_y={self.dv_y}")
         print(f"  dt={self.dt}, T_total={self.T_total}, nt={self.nt}")
         print(f"  tau_tilde={self.tau_tilde}")
+        print(f"  explicit_advection_scheme={self.explicit_advection_scheme}")
         print(f"  dtype: {self.dtype_str}")
 
         # デバイス情報
@@ -309,6 +316,108 @@ class BGK2D2V_core:
 
     # 陽な輸送項計算
     def _compute_explicit_advection(self):
+        """
+        陽な任意の空間差分スキームを選択し呼びだす
+        """
+        if self.explicit_advection_scheme == "upwind":
+            adv = self._compute_explicit_advection_upwind()
+        elif self.explicit_advection_scheme == "MUSCL2":
+            adv = self._compute_explicit_advection_muscl2()
+        else:
+            raise ValueError(f"Unknown explicit advection scheme: {self.explicit_advection_scheme}")
+        
+        return adv
+
+    #  minmod リミタ（MUSCL 用）
+    def _minmod(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        """
+        minmod(a,b) = 0.5 * (sign(a)+sign(b)) * min(|a|,|b|)
+        a,b: 同じ shape の Tensor
+        """
+        s = torch.sign(a) + torch.sign(b)
+        return 0.5 * s * torch.min(torch.abs(a), torch.abs(b))
+    
+    # 二次精度 MUSCL
+    def _compute_explicit_advection_muscl2(self) -> torch.Tensor:
+        """
+        2次精度 MUSCL-TVD upwind による
+        v_x ∂_x f + v_y ∂_y f の評価。
+        境界条件は x, y ともに周期境界（torch.roll）を仮定。
+
+        戻り値:
+            adv : same shape as self.f, (nx, ny, nv_x, nv_y)
+        """
+        if self.f is None:
+            raise RuntimeError("Distribution f is not allocated.")
+
+        f  = self.f
+        dx = self.dx
+        dy = self.dy
+
+        # 速度格子をブロードキャスト形状に
+        vx = self.vx.view(1, 1, self.nv_x, 1)  # (1,1,nv_x,1)
+        vy = self.vy.view(1, 1, 1, self.nv_y)  # (1,1,1,nv_y)
+
+        # ========================================
+        # x 方向 MUSCL
+        # ========================================
+        # 周期境界で隣接セルを取得
+        f_ip1 = torch.roll(f, shifts=-1, dims=0)  # i+1
+        f_im1 = torch.roll(f, shifts= 1, dims=0)  # i-1
+
+        # 傾き（slope）を minmod で制限
+        delta_plus_x  = f_ip1 - f       # f_{i+1} - f_i
+        delta_minus_x = f - f_im1       # f_i - f_{i-1}
+        slope_x = self._minmod(delta_minus_x, delta_plus_x)  # (nx,ny,nvx,nvy)
+
+        # 界面 i+1/2 における左・右状態
+        # 左: f_L(i+1/2) = f_i + 0.5 * slope_i
+        # 右: f_R(i+1/2) = f_{i+1} - 0.5 * slope_{i+1}
+        f_L = f + 0.5 * slope_x
+        slope_x_ip1 = torch.roll(slope_x, shifts=-1, dims=0)
+        f_R = f_ip1 - 0.5 * slope_x_ip1
+
+        # upwind flux: F_{i+1/2} = v_x * f_up
+        vx_pos_mask = (vx > 0.0)
+        f_up_x = torch.where(vx_pos_mask, f_L, f_R)
+        F_iphalf = vx * f_up_x                   # (nx,ny,nvx,nvy)
+
+        # F_{i-1/2} は roll で生成
+        F_imhalf = torch.roll(F_iphalf, shifts=1, dims=0)
+        adv_x = (F_iphalf - F_imhalf) / dx       # ≈ ∂_x (v_x f)
+
+        # ========================================
+        # y 方向 MUSCL
+        # ========================================
+        f_jp1 = torch.roll(f, shifts=-1, dims=1)   # j+1
+        f_jm1 = torch.roll(f, shifts= 1, dims=1)   # j-1
+
+        delta_plus_y  = f_jp1 - f
+        delta_minus_y = f - f_jm1
+        slope_y = self._minmod(delta_minus_y, delta_plus_y)
+
+        # 界面 j+1/2 における下・上状態
+        # 下: f_D(j+1/2) = f_j + 0.5 * slope_j
+        # 上: f_U(j+1/2) = f_{j+1} - 0.5 * slope_{j+1}
+        f_D = f + 0.5 * slope_y
+        slope_y_jp1 = torch.roll(slope_y, shifts=-1, dims=1)
+        f_U = f_jp1 - 0.5 * slope_y_jp1
+
+        vy_pos_mask = (vy > 0.0)
+        f_up_y = torch.where(vy_pos_mask, f_D, f_U)
+        G_jphalf = vy * f_up_y                    # (nx,ny,nvx,nvy)
+
+        G_jmhalf = torch.roll(G_jphalf, shifts=1, dims=1)
+        adv_y = (G_jphalf - G_jmhalf) / dy        # ≈ ∂_y (v_y f)
+
+        # ========================================
+        # 合成
+        # ========================================
+        adv = adv_x + adv_y
+        return adv
+
+    # 一次風上差分
+    def _compute_explicit_advection_upwind(self):
         """
         v_x ∂_x f + v_y ∂_y f を 1次風上差分で評価する。
         境界条件は x, y ともに周期境界を仮定（torch.roll 使用）。
