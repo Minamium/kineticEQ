@@ -155,9 +155,6 @@ class BGK2D2V_core:
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
 
-                # 新しい f からモーメントを再計算
-                self.compute_moments()
-
                 if self.flag_record_state:
                     if step % progress_interval == 0:
                         # 状態記録
@@ -170,6 +167,10 @@ class BGK2D2V_core:
     
     #状態記録メソッド
     def _record_state(self, time):
+        
+        # 新しい f からモーメントを再計算
+        self.compute_moments()
+
         # CPUに転送してnumpy配列として保存
         n_cpu = self.n.cpu().numpy()
         ux_cpu = self.u_x.cpu().numpy()
