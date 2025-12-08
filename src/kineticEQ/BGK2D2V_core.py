@@ -466,16 +466,13 @@ class BGK2D2V_core:
         return adv
 
     # 陽な衝突項の計算
-    def _compute_explicit_collision(self):
+    def _compute_explicit_collision(self, n, u_x, u_y, T):
         """
         BGK 衝突項 C(f) = (f_M - f) / tau を計算する。
         tau = tau_tilde / (n * sqrt(T))
         """
         if self.f is None:
             raise RuntimeError("Distribution f is not allocated.")
-
-        # 現在の f からモーメントを再計算
-        n, u_x, u_y, T = self.compute_moments()
 
         # 緩和時間 tau(n,T)
         tau = self.tau_tilde / (n * torch.sqrt(T))
@@ -496,11 +493,14 @@ class BGK2D2V_core:
         """
         Explicitによる分布関数の時間発展
         """
+        # モーメント計算
+        n, u_x, u_y, T = self.compute_moments()
+
         # 輸送項計算
         f_adv = self._compute_explicit_advection()
         
         # 衝突項計算
-        f_coll = self._compute_explicit_collision()
+        f_coll = self._compute_explicit_collision(n, u_x, u_y, T)
         
         # 分布関数の更新
         self.f_new = self.f + self.dt * ( (-f_adv) + f_coll)
