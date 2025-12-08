@@ -39,6 +39,12 @@ class BGK2D2V_core:
                  # スキーム選択
                  explicit_advection_scheme: str = "MUSCL2",
 
+                 # 境界条件
+                 bc_x_min: str = "periodic",
+                 bc_x_max: str = "periodic",
+                 bc_y_min: str = "periodic",
+                 bc_y_max: str = "periodic",
+
                  # デバイス, 精度設定
                  device: str = 'cuda',
                  dtype: str ='float64',
@@ -76,6 +82,12 @@ class BGK2D2V_core:
         # スキーム設定
         self.explicit_advection_scheme = explicit_advection_scheme
 
+        # 境界条件設定
+        self.bc_x_min = bc_x_min
+        self.bc_x_max = bc_x_max
+        self.bc_y_min = bc_y_min
+        self.bc_y_max = bc_y_max
+
         # 精度設定（文字列からTorch型に変換）
         if dtype == 'float32':
             self.dtype = torch.float32
@@ -107,6 +119,8 @@ class BGK2D2V_core:
         print(f"  dt={self.dt}, T_total={self.T_total}, nt={self.nt}")
         print(f"  tau_tilde={self.tau_tilde}")
         print(f"  explicit_advection_scheme={self.explicit_advection_scheme}")
+        print(f"  BC x_min={self.bc_x_min}, x_max={self.bc_x_max}, "
+              f"y_min={self.bc_y_min}, y_max={self.bc_y_max}")
         print(f"  dtype: {self.dtype_str}")
 
         # デバイス情報
@@ -167,10 +181,6 @@ class BGK2D2V_core:
     
     #状態記録メソッド
     def _record_state(self, time):
-        
-        # 新しい f からモーメントを再計算
-        self.compute_moments()
-
         # CPUに転送してnumpy配列として保存
         n_cpu = self.n.cpu().numpy()
         ux_cpu = self.u_x.cpu().numpy()
@@ -315,6 +325,77 @@ class BGK2D2V_core:
         else:
             print("  CFL condition satisfied.")
 
+    # x方向の境界処理
+    def _shift_x(self, a: torch.Tensor, shift: int) -> torch.Tensor:
+        """
+        x方向に shift (=±1,0) だけシフトした配列を返す。
+        境界条件は bc_x_min, bc_x_max により決まる。
+
+        現状:
+          - "periodic" のみ実装（過去実装と同じ挙動）
+        将来:
+          - "reflect"（反射境界）
+          - "fixed_moment"（固定モーメント境界）などをここに追加する。
+        """
+        if shift == 0:
+            return a
+
+        # --- periodic BC（従来通り torch.roll）---
+        if self.bc_x_min == "periodic" and self.bc_x_max == "periodic":
+            return torch.roll(a, shifts=shift, dims=0)
+
+        # --- 以下は将来拡張用の雛形 ---
+
+        if (self.bc_x_min == "neumann" and self.bc_x_max == "neumann"):
+            # 例: ゼロ勾配 Neumann（simple outflow 的なもの）
+            # shift = +1 (i-1 を参照) のとき
+            if shift == 1:
+                left = a[0:1, ...]       # 左端を複製
+                interior = a[:-1, ...]
+                return torch.cat([left, interior], dim=0)
+            # shift = -1 (i+1 を参照) のとき
+            elif shift == -1:
+                interior = a[1:, ...]
+                right = a[-1:, ...]      # 右端を複製
+                return torch.cat([interior, right], dim=0)
+
+        # TODO: reflect, fixed_moment などの実装をここに追加
+
+        raise NotImplementedError(
+            f"_shift_x for BC (min={self.bc_x_min}, max={self.bc_x_max}) "
+            f"and shift={shift} is not implemented yet."
+        )
+
+    # y方向の境界処理
+    def _shift_y(self, a: torch.Tensor, shift: int) -> torch.Tensor:
+        """
+        y方向に shift (=±1,0) だけシフトした配列を返す。
+        境界条件は bc_y_min, bc_y_max により決まる。
+        """
+        if shift == 0:
+            return a
+
+        # periodic
+        if self.bc_y_min == "periodic" and self.bc_y_max == "periodic":
+            return torch.roll(a, shifts=shift, dims=1)
+
+        if (self.bc_y_min == "neumann" and self.bc_y_max == "neumann"):
+            if shift == 1:
+                bottom = a[:, 0:1, ...]
+                interior = a[:, :-1, ...]
+                return torch.cat([bottom, interior], dim=1)
+            elif shift == -1:
+                interior = a[:, 1:,  ...]
+                top = a[:, -1:, ...]
+                return torch.cat([interior, top], dim=1)
+
+        # TODO: reflect, fixed_moment など
+        raise NotImplementedError(
+            f"_shift_y for BC (min={self.bc_y_min}, max={self.bc_y_max}) "
+            f"and shift={shift} is not implemented yet."
+        )
+
+
     # 陽な輸送項計算
     def _compute_explicit_advection(self):
         """
@@ -343,7 +424,7 @@ class BGK2D2V_core:
         """
         2次精度 MUSCL-TVD upwind による
         v_x ∂_x f + v_y ∂_y f の評価。
-        境界条件は x, y ともに周期境界（torch.roll）を仮定。
+        境界条件は x, y ともに _shift_x, _shift_y により決まる。
 
         戻り値:
             adv : same shape as self.f, (nx, ny, nv_x, nv_y)
@@ -362,9 +443,9 @@ class BGK2D2V_core:
         # ========================================
         # x 方向 MUSCL
         # ========================================
-        # 周期境界で隣接セルを取得
-        f_ip1 = torch.roll(f, shifts=-1, dims=0)  # i+1
-        f_im1 = torch.roll(f, shifts= 1, dims=0)  # i-1
+        # 境界処理メソッドより隣接セルを取得
+        f_ip1 = self._shift_x(f, -1)   # i+1
+        f_im1 = self._shift_x(f,  1)   # i-1
 
         # 傾き（slope）を minmod で制限
         delta_plus_x  = f_ip1 - f       # f_{i+1} - f_i
@@ -375,7 +456,7 @@ class BGK2D2V_core:
         # 左: f_L(i+1/2) = f_i + 0.5 * slope_i
         # 右: f_R(i+1/2) = f_{i+1} - 0.5 * slope_{i+1}
         f_L = f + 0.5 * slope_x
-        slope_x_ip1 = torch.roll(slope_x, shifts=-1, dims=0)
+        slope_x_ip1 = self._shift_x(slope_x, -1)
         f_R = f_ip1 - 0.5 * slope_x_ip1
 
         # upwind flux: F_{i+1/2} = v_x * f_up
@@ -384,14 +465,14 @@ class BGK2D2V_core:
         F_iphalf = vx * f_up_x                   # (nx,ny,nvx,nvy)
 
         # F_{i-1/2} は roll で生成
-        F_imhalf = torch.roll(F_iphalf, shifts=1, dims=0)
+        F_imhalf = self._shift_x(F_iphalf, 1)
         adv_x = (F_iphalf - F_imhalf) / dx       # ≈ ∂_x (v_x f)
 
         # ========================================
         # y 方向 MUSCL
         # ========================================
-        f_jp1 = torch.roll(f, shifts=-1, dims=1)   # j+1
-        f_jm1 = torch.roll(f, shifts= 1, dims=1)   # j-1
+        f_jp1 = self._shift_y(f, -1)   # j+1
+        f_jm1 = self._shift_y(f,  1)   # j-1
 
         delta_plus_y  = f_jp1 - f
         delta_minus_y = f - f_jm1
@@ -401,14 +482,14 @@ class BGK2D2V_core:
         # 下: f_D(j+1/2) = f_j + 0.5 * slope_j
         # 上: f_U(j+1/2) = f_{j+1} - 0.5 * slope_{j+1}
         f_D = f + 0.5 * slope_y
-        slope_y_jp1 = torch.roll(slope_y, shifts=-1, dims=1)
+        slope_y_jp1 = self._shift_y(slope_y, -1)
         f_U = f_jp1 - 0.5 * slope_y_jp1
 
         vy_pos_mask = (vy > 0.0)
         f_up_y = torch.where(vy_pos_mask, f_D, f_U)
         G_jphalf = vy * f_up_y                    # (nx,ny,nvx,nvy)
 
-        G_jmhalf = torch.roll(G_jphalf, shifts=1, dims=1)
+        G_jmhalf = self._shift_y(G_jphalf, 1)
         adv_y = (G_jphalf - G_jmhalf) / dy        # ≈ ∂_y (v_y f)
 
         # ========================================
@@ -421,7 +502,7 @@ class BGK2D2V_core:
     def _compute_explicit_advection_upwind(self):
         """
         v_x ∂_x f + v_y ∂_y f を 1次風上差分で評価する。
-        境界条件は x, y ともに周期境界を仮定（torch.roll 使用）。
+        境界条件は x, y ともに _shift_x, _shift_y により決まる。
         戻り値:
             adv : same shape as self.f, (nx, ny, nv_x, nv_y)
         """
@@ -437,8 +518,8 @@ class BGK2D2V_core:
         vy = self.vy.view(1, 1, 1, self.nv_y)  # (1,1,1,nv_y)
 
         # -------- x 方向の 1次風上差分 --------
-        f_ip1 = torch.roll(f, shifts=-1, dims=0)  # i+1
-        f_im1 = torch.roll(f, shifts=1,  dims=0)  # i-1
+        f_ip1 = self._shift_x(f, -1)  # i+1
+        f_im1 = self._shift_x(f,  1)  # i-1
 
         dfdx_pos = (f - f_im1) / dx
         dfdx_neg = (f_ip1 - f) / dx
@@ -451,8 +532,8 @@ class BGK2D2V_core:
         adv_x = vx * dfdx  # v_x ∂_x f
 
         # -------- y 方向の 1次風上差分 --------
-        f_jp1 = torch.roll(f, shifts=-1, dims=1)  # j+1
-        f_jm1 = torch.roll(f, shifts=1,  dims=1)  # j-1
+        f_jp1 = self._shift_y(f, -1)  # j+1
+        f_jm1 = self._shift_y(f,  1)  # j-1
 
         dfdy_pos = (f - f_jm1) / dy
         dfdy_neg = (f_jp1 - f) / dy
