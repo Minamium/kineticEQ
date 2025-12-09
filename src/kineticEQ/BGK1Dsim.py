@@ -1307,7 +1307,7 @@ class BGK1D:
                     progress_write(f"Step {step:5d}/{self.nt - 1} (t={current_time:.3f})")
                     progress_write(f"Picard iteration: {Picard_iter:5d}, residual: {residual:.6e}")
                     if self.implicit_solver == 'holo':
-                        progress_write(f"LO iteration: {lo_iter_list}, residual: {lo_residual_list}, y_I_max: {Y_I}")
+                        progress_write(f"LO iteration: {lo_iter_list}, residual: {lo_residual_list}")
                         progress_write(f"y_I_max: {Y_I}")
 
                 pbar.update(1)
