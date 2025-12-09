@@ -39,6 +39,9 @@ class BGK2D2V_core:
                  # スキーム選択
                  explicit_advection_scheme: str = "MUSCL2",
 
+                 # 数値計算カーネル設定
+                 explicit_kernel: str = "backend",
+
                  # 境界条件
                  bc_x_min: str = "periodic",
                  bc_x_max: str = "periodic",
@@ -81,6 +84,9 @@ class BGK2D2V_core:
 
         # スキーム設定
         self.explicit_advection_scheme = explicit_advection_scheme
+
+        # 計算カーネルとビルド設定
+        self.explicit_kernel = explicit_kernel
 
         # 境界条件設定
         self.bc_x_min = bc_x_min
@@ -131,6 +137,30 @@ class BGK2D2V_core:
         else:
             print(f"  device: {self.device}, CPU")
 
+    # コンパイルメソッド
+    def compile(self, flag_use_cuda_backend=False):
+        
+        # CUDA fused explicitコンパイル
+        if self.explicit_kernel == "backend" or flag_use_cuda_backend:
+            print("--- compile CUDA fused explicit backend ---")
+            from torch.utils.cpp_extension import load
+            import traceback, os, sysconfig
+            from pathlib import Path
+            os.makedirs('build', exist_ok=True)
+            src_dir = Path(__file__).resolve().parent / "backends" / "explicit_2d2v"
+            os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.6")
+            self._explicit_cuda = load(
+                name='explicit_fused_2d2v',
+                sources=[str(src_dir/'explicit_2d2v_wrapper.cpp'),
+                         str(src_dir/'explicit_2d2v_kernel.cu')],
+                extra_cflags=['-O3'],
+                extra_cuda_cflags=['-O3'],  # FP64なので -use_fast_math は付けない
+                extra_include_paths=[sysconfig.get_paths()['include']],
+                build_directory='build',
+                verbose=True
+            )
+            traceback.print_exc()
+            print('--- fused CUDA backend loaded ---')
 
     # シミュレーション実行メソッド
     def run_simulation(self):
@@ -196,7 +226,6 @@ class BGK2D2V_core:
         }
         self.animation_data.append(state_data)
             
-    
     # 配列確保メソッド
     def Array_allocation(self):
         """
@@ -394,7 +423,6 @@ class BGK2D2V_core:
             f"_shift_y for BC (min={self.bc_y_min}, max={self.bc_y_max}) "
             f"and shift={shift} is not implemented yet."
         )
-
 
     # 陽な輸送項計算
     def _compute_explicit_advection(self):
