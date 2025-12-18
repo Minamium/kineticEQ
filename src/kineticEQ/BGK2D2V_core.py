@@ -194,7 +194,12 @@ class BGK2D2V_core:
 
             for step in range(self.nt):
                 # 時間発展ステップ
-                self._explicit_update()
+                if self.explicit_kernel=="backend":
+                    self._explicit_update_cuda_backend()
+                elif self.explicit_kernel=="python":
+                    self._explicit_update()
+                else:
+                    raise ValueError("explicit_kernel must be 'backend' or 'python'")
 
                 # 配列交換
                 self.f, self.f_new = self.f_new, self.f
@@ -616,5 +621,37 @@ class BGK2D2V_core:
         self.f_new = self.f + self.dt * ( (-f_adv) + f_coll)
 
         return self.f_new
+
+    def _explicit_update_cuda_backend(self):
+        # scheme mapping
+        if self.explicit_advection_scheme == "upwind":
+            scheme = 0
+        elif self.explicit_advection_scheme == "MUSCL2":
+            scheme = 1
+        else:
+            raise ValueError("backend supports only upwind or MUSCL2")
+
+        # BC mapping (現状python側もこの2種しか実装済み)
+        def map_bc(bmin, bmax):
+            if bmin == "periodic" and bmax == "periodic":
+                return 0
+            if bmin == "neumann" and bmax == "neumann":
+                return 1
+            raise NotImplementedError("backend supports only periodic or neumann (same on both sides)")
+
+        bc_x = map_bc(self.bc_x_min, self.bc_x_max)
+        bc_y = map_bc(self.bc_y_min, self.bc_y_max)
+
+        # 呼び出し（f, f_new, vx, vy はCUDA上でcontiguous前提）
+        self._explicit_cuda.explicit_step(
+            self.f, self.f_new,
+            self.vx, self.vy,
+            float(self.dv_x), float(self.dv_y),
+            float(self.dt), float(self.dx), float(self.dy),
+            float(self.tau_tilde),
+            int(scheme), int(bc_x), int(bc_y)
+        )
+        return self.f_new
+
 
     
