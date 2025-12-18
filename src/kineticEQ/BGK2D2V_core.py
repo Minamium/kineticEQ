@@ -191,7 +191,7 @@ class BGK2D2V_core:
             self._record_state(0.0)
 
         # プログレスバーを初期化
-        with get_progress_bar(self.use_tqdm,total=self.nt, desc="Explicit Evolution", 
+        with get_progress_bar(self.use_tqdm,total=self.nt, desc="Explicit Evolution", dynamic_miniters=False,
                   bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
 
             for step in range(self.nt):
