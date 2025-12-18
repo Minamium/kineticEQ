@@ -209,6 +209,7 @@ class BGK2D2V_core:
                 if self.flag_record_state:
                     if step % progress_interval == 0:
                         # 状態記録
+                        self.compute_moments()
                         self._record_state((step + 1) * self.dt)
 
                 # プログレスバー更新
