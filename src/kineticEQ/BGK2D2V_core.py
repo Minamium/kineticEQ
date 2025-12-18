@@ -137,6 +137,8 @@ class BGK2D2V_core:
         else:
             print(f"  device: {self.device}, CPU")
 
+        self.compile()
+
     # コンパイルメソッド
     def compile(self, flag_use_cuda_backend=False):
         
