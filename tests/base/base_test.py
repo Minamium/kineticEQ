@@ -1,94 +1,46 @@
-import argparse
+import numpy as np
 from kineticEQ import BGK1DPlot
 
-# コマンドライン引数
-parser = argparse.ArgumentParser()
-parser.add_argument('--output', type=str, default='base_bench', help='Output filename prefix')
-parser.add_argument('--solver', type=str, default='implicit', help='Solver type')
-parser.add_argument('--implicit_solver', type=str, default='holo', help='Implicit solver type')
-parser.add_argument('--picard_iter', type=int, default=64, help='Picard iteration number')
-parser.add_argument('--picard_tol', type=float, default=1e-6, help='Picard tolerance')
-parser.add_argument('--ho_iter', type=int, default=32, help='HO iteration number')
-parser.add_argument('--ho_tol', type=float, default=1e-4, help='HO tolerance')
-parser.add_argument('--lo_iter', type=int, default=32, help='LO iteration number')
-parser.add_argument('--lo_tol', type=float, default=1e-4, help='LO tolerance')
-parser.add_argument('--tau_tilde', type=float, default=5e-6, help='Hyperparameter')
-parser.add_argument('--dt', type=float, default=5e-5, help='Time step')
-parser.add_argument('--T_total', type=float, default=0.01, help='Total simulation time')
-parser.add_argument('--device', type=str, default='cuda', help='Device')
-parser.add_argument('--use_tqdm', action='store_true', default=True, help='Use tqdm')
-parser.add_argument('--nx', type=int, default=1000, help='Number of grid points')
-parser.add_argument('--nv', type=int, default=200, help='Number of velocity points')
-parser.add_argument('--v_max', type=float, default=10.0, help='Maximum velocity')
-parser.add_argument('--ic_fn', type=str, default=None, help='Custom initial condition function')
-parser.add_argument('--Con_Terms_do', action='store_true', default=False, help='Include collision terms')
-parser.add_argument('--flux_consistency_do', action='store_true', default=False, help='Include flux consistency terms')
-parser.add_argument('--SVdown_do', action='store_true', default=False, help='Include SVdown terms')
-args = parser.parse_args()
 
-config = {
-        # ソルバ選択
-        "solver": args.solver,
-
-        # 陰解法ソルバー
-        "implicit_solver": args.implicit_solver,
-
-        # 陰解法パラメータ
-        "picard_iter": args.picard_iter,
-        "picard_tol": args.picard_tol,
-
-        # HOLOパラメータ
-        "ho_iter": args.ho_iter,
-        "lo_iter": args.lo_iter,
-        "ho_tol": args.ho_tol,
-        "lo_tol": args.lo_tol,
-        "Con_Terms_do": args.Con_Terms_do,
-        "flux_consistency_do": args.flux_consistency_do,
-        "SVdown": args.SVdown_do,
-
-        # ハイパーパラメータ
-        "tau_tilde": args.tau_tilde,
-
-        # 数値計算パラメータ
-        "nx": args.nx,
-        "nv": args.nv,
-        "v_max": args.v_max,
-        "dt": args.dt,
-        
-        # カスタム初期条件
-        "ic_fn": args.ic_fn,
-
-        "initial_regions": [
-        {"x_range": (0.0, 0.5), "n": 1.0, "u": 0.0, "T": 1.0},    
-        {"x_range": (0.5, 1.0), "n": 0.125, "u": 0.0, "T": 0.8}
-    ],
-
-        # 固定モーメント境界条件
-        "n_left": 1.0,
-        "u_left": 0.0,
-        "T_left": 1.0,
-        "n_right": 0.125,
-        "u_right": 0.0,
-        "T_right": 0.8,
-
-        # シミュレーション時間
-        "T_total":args.T_total,
-
-        # 精度
+def make_config(**overrides):
+    config = {
+        "solver": "implicit",
+        "implicit_solver": "holo",
+        "picard_iter": 4,
+        "picard_tol": 1e-3,
+        "ho_iter": 2,
+        "lo_iter": 2,
+        "ho_tol": 1e-3,
+        "lo_tol": 1e-3,
+        "Con_Terms_do": False,
+        "flux_consistency_do": False,
+        "SVdown": False,
+        "tau_tilde": 1e-3,
+        "nx": 6,
+        "nv": 6,
+        "v_max": 1.0,
+        "dt": 1e-3,
+        "T_total": 0.0,
         "dtype": "float64",
-
-        "use_tqdm" : args.use_tqdm,
-
-        "device" : args.device
-
+        "use_tqdm": False,
+        "device": "cpu",
+        "auto_compile": False,
+        "initial_regions": [
+            {"x_range": (0.0, 0.5), "n": 1.0, "u": 0.0, "T": 1.0},
+            {"x_range": (0.5, 1.0), "n": 0.5, "u": 0.0, "T": 0.8},
+        ],
     }
+    config.update(overrides)
+    return config
 
-sim = BGK1DPlot(**config)
-sim.Array_allocation()
-sim.set_initial_condition()
-sim.apply_boundary_condition()
-sim.plot_state(filename=f"{args.output}_init.png")
-sim.run_simulation()
-sim.plot_state(filename=f"{args.output}_final.png")
-sim.create_gif(filename=f"{args.output}.gif")
 
+def test_allocation_and_initialization_on_cpu():
+    sim = BGK1DPlot(**make_config())
+
+    sim.Array_allocation()
+    sim.set_initial_condition()
+    sim.apply_boundary_condition()
+
+    assert sim.f.shape == (sim.nx, sim.nv)
+    assert np.allclose(sim.x.cpu().numpy()[0], 0.0)
+    assert np.allclose(sim.v.cpu().numpy()[0], -sim.v_max)

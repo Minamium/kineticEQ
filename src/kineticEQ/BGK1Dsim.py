@@ -133,7 +133,11 @@ class BGK1D:
         torch.set_default_dtype(self.dtype)
 
         # デバイス設定
-        self.device = torch.device(device)
+        requested_device = torch.device(device)
+        if requested_device.type == "cuda" and not torch.cuda.is_available():
+            print("CUDA requested but not available. Falling back to CPU.")
+            requested_device = torch.device("cpu")
+        self.device = requested_device
 
         # tqdm設定
         self.use_tqdm = use_tqdm
@@ -182,7 +186,11 @@ class BGK1D:
         print(" ---- time ----")
         print(f"  time: nt={self.nt}, dt={self.dt:.4f}, T_total={self.T_total}")
         print(f"  dtype: {self.dtype}")
-        print(f"  device: {self.device}, GPU name: {torch.cuda.get_device_name(0)}")
+        if str(self.device).startswith("cuda") and torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+        else:
+            gpu_name = "cpu"
+        print(f"  device: {self.device}, GPU name: {gpu_name}")
 
     #シミュレーションメソッド
     def run_simulation(self):

@@ -1,66 +1,58 @@
-import argparse
+import os
+import tempfile
+import numpy as np
 from kineticEQ import BGK1DPlot
-import pickle
 
-# コマンドライン引数
-parser = argparse.ArgumentParser()
-parser.add_argument('--output', type=str, default='Conv_bench', help='Output filename prefix')
-parser.add_argument('--dt', type=float, default=5e-4, help='Time step')
-parser.add_argument('--nv', type=int, default=200, help='Number of velocity points')
-parser.add_argument('--nx', type=int, default=500, help='Number of space points')
-parser.add_argument('--picard_iter', type=int, default=4096, help='Number of picard iterations')
-parser.add_argument('--picard_tol', type=float, default=1e-6, help='Tolerance for picard iterations')
-parser.add_argument('--ho_iter', type=int, default=4096, help='Number of ho iterations')
-parser.add_argument('--lo_iter', type=int, default=4096, help='Number of lo iterations')
-parser.add_argument('--ho_tol', type=float, default=1e-6, help='Tolerance for ho iterations')
-parser.add_argument('--lo_tol', type=float, default=1e-6, help='Tolerance for lo iterations')
-parser.add_argument('--use_tqdm', type=bool, default=True, help='Use tqdm')
-parser.add_argument('--no_run', type=bool, default=False, help='Do not run the simulation')
-parser.add_argument(
-    '--tau_tilde_list',
-    type=float,
-    nargs='+',  # 1個以上の float を受け取る
-    default=[5e-3, 5e-4, 5e-5, 5e-6],
-    help='List of tau_tilde values'
-)
-args = parser.parse_args()
 
-config = {
-    "v_max": 10.0,
-    "dt": args.dt,
-    "nv": args.nv,
-    "nx": args.nx,
-
-    # 陰解法パラメータ
-    "picard_iter": args.picard_iter,
-    "picard_tol": args.picard_tol,
-
-    # HOLOパラメータ
-    "ho_iter": args.ho_iter,
-    "lo_iter": args.lo_iter,
-    "ho_tol": args.ho_tol,
-    "lo_tol": args.lo_tol,
-
-    "initial_regions": [
-        {"x_range": (0.0, 0.5), "n": 1.0,   "u": 0.0, "T": 1.0},
-        {"x_range": (0.5, 1.0), "n": 0.125, "u": 0.0, "T": 0.8},
-    ],
-    "n_left": 1.0,   "u_left": 0.0, "T_left": 1.0,
-    "n_right": 0.125,"u_right": 0.0,"T_right": 0.8,
-    "T_total": 0.05,
-    "dtype": "float64",
-    "use_tqdm": args.use_tqdm,
-    "device": "cuda",
-    "auto_compile": False,
-}
-
-sim = BGK1DPlot(**config)
-if not args.no_run:
-    conv_result = sim.run_convergence_test( tau_tilde_list=args.tau_tilde_list)
-    sim.save_benchmark_results(
-        filename=f"{args.output}.pkl",
-        bench_results=conv_result,
+def make_sim():
+    return BGK1DPlot(
+        solver="implicit",
+        implicit_solver="holo",
+        tau_tilde=1e-3,
+        v_max=1.0,
+        dt=1e-3,
+        nv=4,
+        T_total=0.0,
+        dtype="float64",
+        use_tqdm=False,
+        device="cpu",
+        auto_compile=False,
     )
 
-tmp = sim.load_benchmark_results(filename=f"{args.output}.pkl")
-sim.plot_convergence_results(tmp, figsize=(12, 6), show_plots=True, filename=f"{args.output}.png")
+
+def _dummy_benchmark_results():
+    v = np.linspace(-1.0, 1.0, 3)
+    x = np.linspace(0.0, 1.0, 4)
+    record = {
+        "x": x,
+        "v": v,
+        "f": np.zeros((x.size, v.size)),
+        "n": np.zeros_like(x),
+        "u": np.zeros_like(x),
+        "T": np.zeros_like(x),
+        "dx": x[1] - x[0],
+        "dv": v[1] - v[0],
+    }
+    return {"bench_type": "spatial", 4: record, 8: record}
+
+
+def test_can_save_and_load_benchmark_results():
+    sim = make_sim()
+    bench_results = _dummy_benchmark_results()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        file_path = os.path.join(tmpdir, "results.pkl")
+        saved_path = sim.save_benchmark_results(bench_results=bench_results, filename=file_path)
+        assert os.path.isfile(saved_path)
+
+        loaded = sim.load_benchmark_results(saved_path)
+        assert loaded["bench_type"] == bench_results["bench_type"]
+        for grid in (4, 8):
+            assert loaded[grid]["dx"] == bench_results[grid]["dx"]
+            assert loaded[grid]["dv"] == bench_results[grid]["dv"]
+            np.testing.assert_array_equal(loaded[grid]["x"], bench_results[grid]["x"])
+            np.testing.assert_array_equal(loaded[grid]["v"], bench_results[grid]["v"])
+            np.testing.assert_array_equal(loaded[grid]["f"], bench_results[grid]["f"])
+            np.testing.assert_array_equal(loaded[grid]["n"], bench_results[grid]["n"])
+            np.testing.assert_array_equal(loaded[grid]["u"], bench_results[grid]["u"])
+            np.testing.assert_array_equal(loaded[grid]["T"], bench_results[grid]["T"])
