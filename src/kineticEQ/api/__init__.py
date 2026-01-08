@@ -1,7 +1,7 @@
 # src/kineticEQ/api/__init__.py
 from __future__ import annotations
 
-from .simulation import Engine, run
+from .engine import Engine, run
 from .config import Config
 from .result import Result
 
