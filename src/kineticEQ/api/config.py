@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
-from typing import TypeVar, Type, Mapping
+from typing import TypeVar, Type, Mapping, Any
 
 E = TypeVar("E", bound=Enum)
 
@@ -41,6 +41,7 @@ class Scheme(str, Enum):
     EXPLICIT = "explicit"
     IMPLICIT = "implicit"
     HOLO = "holo"
+    HOLO_NN = "holo_nn"
 
 # 計算カーネルのバックエンド
 class Backend(str, Enum):
@@ -59,6 +60,10 @@ class LogLevel(str, Enum):
     WARNING = "warning"
     ERROR = "error"
 
+# tqdm設定
+class UseTqdm(str, Enum):
+    TRUE = "true"
+    FALSE = "false"
 
 @dataclass(frozen=True)
 class Config:
@@ -68,6 +73,8 @@ class Config:
     device: str = "cuda"
     dtype: str | DType = DType.FLOAT64
     log_level: str | LogLevel = LogLevel.INFO
+    model_cfg: Any | None = None
+    use_tqdm: str | UseTqdm = UseTqdm.TRUE
     
     # 正規化処理
     def __post_init__(self):
@@ -78,7 +85,8 @@ class Config:
         object.__setattr__(self, "scheme", parse_enum(Scheme, self.scheme,
                                  aliases={"exp": Scheme.EXPLICIT,
                                           "imp": Scheme.IMPLICIT,
-                                          "hl": Scheme.HOLO}))
+                                          "hl": Scheme.HOLO,
+                                          "hl_nn": Scheme.HOLO_NN}))
         object.__setattr__(self, "backend", parse_enum(Backend, self.backend,
                                  aliases={"pytorch": Backend.TORCH,
                                           "cuda_backend": Backend.CUDA_KERNEL}))
@@ -115,6 +123,10 @@ class Config:
         return self.log_level.value
 
     @property
+    def use_tqdm_name(self) -> str:
+        return self.use_tqdm.value
+
+    @property
     def as_dict(self) -> dict[str, object]:
         return {
             "model": self.model.value,
@@ -123,4 +135,6 @@ class Config:
             "device": self.device,
             "dtype": self.dtype.value,
             "log_level": self.log_level.value,
+            "model_cfg": self.model_cfg,
+            "use_tqdm": self.use_tqdm.value,
         }

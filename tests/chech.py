@@ -5,11 +5,15 @@ from kineticEQ import Config, Engine, run
 config = Config()
 
 # 簡易実行
+print("========= execute run(config) Test =========")
 run(config)
+print("========= Test complete =========\n")
 
 # コンフィグの編集
 from dataclasses import replace
-config = replace(config, scheme="implicit", 
+config = replace(config, 
+                 model="BGK2D2V",
+                 scheme="holo_nn", 
                  backend="cuda_kernel", 
                  device="cuda", 
                  dtype="float64", 
@@ -17,7 +21,11 @@ config = replace(config, scheme="implicit",
 
 
 # Engineのインスタンス作成
+print("========= Instance construction Test: Engine(config) =========")
 engine_instance = Engine(config, apply_logging_flag=True)
+print("========= Test complete =========\n")
 
 # Engineからのrunメソッド実行
+print("========= execute engine_instance.run() Test =========")
 engine_instance.run()
+print("========= Test complete =========\n")

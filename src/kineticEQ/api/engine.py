@@ -4,6 +4,9 @@ from .result import Result
 from .config import Config
 import logging
 from .logging_utils import apply_logging
+from dataclasses import replace
+from kineticEQ.params.registry import default_model_cfg, expected_model_cfg_type
+from kineticEQ.utillib.progress_bar import get_progress_bar, progress_write
 logger = logging.getLogger(__name__)
 
 # kineticEQの最上位wrapperクラス
@@ -12,9 +15,18 @@ class Engine:
         # configを保存
         self.config = config
 
+        # model_cfgの設定
+        if self.config.model_cfg is None:
+            self.config = replace(self.config, model_cfg=default_model_cfg(self.config.model))
+        else:
+            t = expected_model_cfg_type(self.config.model)
+            if not isinstance(self.config.model_cfg, t):
+                raise TypeError(f"model_cfg type mismatch: expected {t.__name__}, got {type(self.config.model_cfg).__name__}")
+
+
         # apply_logging
         if apply_logging_flag:
-            apply_logging(config)
+            apply_logging(self.config)
 
         # info-log
         logger.info(
@@ -38,6 +50,13 @@ class Engine:
     def run(self) -> Result:
         # debug-log
         logger.debug(f"run {self.config.model_name} {self.config.scheme_name}")
+
+        # time-evolution
+        with get_progress_bar(self.config.use_tqdm,total=self.config.model_cfg.time.n_steps, desc="Time Evolution", 
+                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+            for steps in range(self.config.model_cfg.time.n_steps):
+                logger.debug(f"time-evolution {self.config.model_name} {self.config.scheme_name} step: {steps}")
+                pbar.update(1)
 
         return Result()
 
