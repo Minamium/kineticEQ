@@ -1,4 +1,4 @@
-
+# kineticEQ/utillib/progress_bar.py
 """progress_bar.py – toggle tqdm / text‑based progress output
 ===========================================================
 BGK1Dsim など既存コードが使う最小 API を実装した軽量ヘルパ。

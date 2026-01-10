@@ -2,7 +2,7 @@
 from kineticEQ import Config, Engine, run
 
 # Configの作成
-config = Config()
+config = Config(model="BGK1D1V")
 
 # 簡易実行
 print("========= execute run(config) Test =========")
@@ -17,6 +17,7 @@ config = replace(config,
                  backend="cuda_kernel", 
                  device="cuda", 
                  dtype="float64", 
+                 use_tqdm="false",
                  log_level="debug")
 
 

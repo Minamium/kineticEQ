@@ -96,6 +96,10 @@ class Config:
 
         object.__setattr__(self, "device", str(self.device).strip())
 
+        object.__setattr__(self, "use_tqdm", parse_enum(UseTqdm, self.use_tqdm,
+                                aliases={"true": UseTqdm.TRUE,
+                                         "false": UseTqdm.FALSE}))
+
         object.__setattr__(self, "log_level", parse_enum(LogLevel, self.log_level,
                                 aliases={"debug": LogLevel.DEBUG,
                                          "info": LogLevel.INFO,
@@ -125,6 +129,10 @@ class Config:
     @property
     def use_tqdm_name(self) -> str:
         return self.use_tqdm.value
+
+    @property
+    def use_tqdm_bool(self) -> bool:
+        return self.use_tqdm == UseTqdm.TRUE
 
     @property
     def as_dict(self) -> dict[str, object]:

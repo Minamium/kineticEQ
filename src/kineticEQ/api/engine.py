@@ -7,6 +7,7 @@ from .logging_utils import apply_logging
 from dataclasses import replace
 from kineticEQ.params.registry import default_model_cfg, expected_model_cfg_type
 from kineticEQ.utillib.progress_bar import get_progress_bar, progress_write
+from kineticEQ.utillib.pretty import format_kv_block
 logger = logging.getLogger(__name__)
 
 # kineticEQの最上位wrapperクラス
@@ -35,12 +36,14 @@ class Engine:
             "  scheme   : %s\n"
             "  backend  : %s\n"
             "  device   : %s\n"
-            "  log_level: %s",
+            "  log_level: %s\n"
+            "------ Model Configuration ------\n%s",
             self.config.model_name,
             self.config.scheme_name,
             self.config.backend_name,
             self.config.device,
             self.config.log_level_name,
+            format_kv_block(self.config.model_cfg),
         )
 
 
@@ -52,7 +55,7 @@ class Engine:
         logger.debug(f"run {self.config.model_name} {self.config.scheme_name}")
 
         # time-evolution
-        with get_progress_bar(self.config.use_tqdm,total=self.config.model_cfg.time.n_steps, desc="Time Evolution", 
+        with get_progress_bar(self.config.use_tqdm_bool,total=self.config.model_cfg.time.n_steps, desc="Time Evolution", 
                   bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
             for steps in range(self.config.model_cfg.time.n_steps):
                 logger.debug(f"time-evolution {self.config.model_name} {self.config.scheme_name} step: {steps}")

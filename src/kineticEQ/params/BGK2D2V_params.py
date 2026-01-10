@@ -25,6 +25,20 @@ class BGK2D2VParams:
 
 @dataclass(frozen=True)
 class ModelConfig:
+    # 表示順の辞書
+    __pretty_order__ = (
+        "grid.nx",
+        "grid.ny",
+        "grid.Lx",
+        "grid.Ly",
+        "grid.nx_v",
+        "grid.ny_v",
+        "grid.v_max",
+        "params.tau_tilde",
+        "time.dt",
+        "time.T_total",
+    )
+    
     grid: Grid2D2V = field(default_factory=Grid2D2V)
     time: TimeConfig = field(default_factory=TimeConfig)
     params: BGK2D2VParams = field(default_factory=BGK2D2VParams)

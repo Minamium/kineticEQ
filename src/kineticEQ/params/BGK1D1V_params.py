@@ -22,6 +22,17 @@ class BGK1D1VParams:
 
 @dataclass(frozen=True)
 class ModelConfig:
+    # 表示順の辞書
+    __pretty_order__ = (
+        "grid.nx",
+        "grid.Lx",
+        "grid.nv",
+        "grid.v_max",
+        "params.tau_tilde",
+        "time.dt",
+        "time.T_total",
+    )
+
     grid: Grid1D1V = field(default_factory=Grid1D1V)
     time: TimeConfig = field(default_factory=TimeConfig)
     params: BGK1D1VParams = field(default_factory=BGK1D1VParams)
