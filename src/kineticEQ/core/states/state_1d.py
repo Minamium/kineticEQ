@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 import torch
 import math
+from kineticEQ.api.config import Config, DType
 
 # BGK1D1Vの状態空間のデータクラス
 @dataclass
@@ -40,4 +41,12 @@ def allocate_state_1d1v(nx, nv, Lx, v_max, device, dtype) -> State1D1V:
         neg_mask=~pos,
         v_coeff=(-v / dx),
         k0=k0,
+    )
+
+def build_state(cfg: Config) -> State1D1V:
+    g = cfg.model_cfg.grid
+    dtype = torch.float64 if cfg.dtype == DType.FLOAT64 else torch.float32
+    return allocate_state_1d1v(
+        nx=g.nx, nv=g.nv, Lx=g.Lx, v_max=g.v_max,
+        device=cfg.device, dtype=dtype
     )

@@ -8,6 +8,8 @@ from dataclasses import replace
 from kineticEQ.params.registry import default_model_cfg, expected_model_cfg_type
 from kineticEQ.utillib.progress_bar import get_progress_bar, progress_write
 from kineticEQ.utillib.pretty import format_kv_block
+from kineticEQ.core.states.registry import build_state
+from kineticEQ.core.schemes.registry import build_stepper
 logger = logging.getLogger(__name__)
 
 # kineticEQの最上位wrapperクラス
@@ -54,11 +56,20 @@ class Engine:
         # debug-log
         logger.debug(f"run {self.config.model_name} {self.config.scheme_name}")
 
+        # steteとstepperの設定
+        state = build_state(self.config)
+        stepper = build_stepper(self.config, state)
+
         # time-evolution
         with get_progress_bar(self.config.use_tqdm_bool,total=self.config.model_cfg.time.n_steps, desc="Time Evolution", 
                   bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
             for steps in range(self.config.model_cfg.time.n_steps):
                 logger.debug(f"time-evolution {self.config.model_name} {self.config.scheme_name} step: {steps}")
+
+                # ============loop body===========
+                stepper() 
+                
+                # ============loop body===========
                 pbar.update(1)
 
         return Result()

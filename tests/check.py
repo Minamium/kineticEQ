@@ -2,7 +2,8 @@
 from kineticEQ import Config, Engine, run
 
 # Configの作成
-config = Config(model="BGK1D1V")
+config = Config(device="cpu",
+                model="BGK1D1V")
 
 # 簡易実行
 print("========= execute run(config) Test =========")

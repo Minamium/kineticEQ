@@ -39,7 +39,7 @@ class SilentPB:
     * `write()` は単純に `print()` ラッパ。
     """
 
-    __slots__ = ("total", "n", "desc", "_start", "_next_tick")
+    __slots__ = ("total", "n", "desc", "_start", "_next_tick", "_done")
 
     def __init__(self, total: Optional[int] = None, desc: str = "") -> None:
         self.total: Optional[int] = total if (total and total > 0) else None
@@ -48,6 +48,7 @@ class SilentPB:
         self._start: float = time.perf_counter()
         # 10 % 刻みで表示。total が None の場合は表示しない。
         self._next_tick: float = 0.1 if self.total is not None else float("inf")
+        self._done = False
 
     # --- context‑manager ----------------------------------------------------
     def __enter__(self) -> "SilentPB":
@@ -55,8 +56,9 @@ class SilentPB:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         # 最終表示（100 %）がまだなら出す
-        if self.total and self.n >= self.total:
+        if self.total and self.n >= self.total and not self._done:
             self._emit(force=True)
+            self._done = True
 
     # --- public API ---------------------------------------------------------
     def update(self, n: int = 1):
@@ -67,9 +69,13 @@ class SilentPB:
         ratio = self.n / self.total
         if ratio >= self._next_tick or self.n >= self.total:
             self._emit()
+            if self.n >= self.total:
+                self._done = True
+
             # 次の 10 % しきい値へ
             self._next_tick += 0.1
 
+            
     def close(self):
         pass  # 互換性のために存在
 
