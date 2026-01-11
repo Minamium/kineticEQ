@@ -8,6 +8,8 @@ dist/
 *.egg-info/
 kineticEQ/backends/*.so
 kineticEQ/backends/*.pyd
+cuda_kernel/build/
+
 # CMake
 CMakeBuild/
 CMakeFiles/

@@ -9,10 +9,12 @@ Stepper = Callable[[int], None]
 StepperBuilder = Callable[[Config, Any], Stepper]  # (cfg, state) -> stepper
 
 from .BGK1D import bgk1d_explicit_torch
+from .BGK1D import bgk1d_explicit_cuda_kernel
 from .BGK2D2V import bgk2d2v_explicit_torch
 
 _FACTORIES: dict[tuple[Model, Scheme, Backend], StepperBuilder] = {
     (Model.BGK1D1V, Scheme.EXPLICIT, Backend.TORCH): bgk1d_explicit_torch.build_stepper,
+    (Model.BGK1D1V, Scheme.EXPLICIT, Backend.CUDA_KERNEL): bgk1d_explicit_cuda_kernel.build_stepper,
     (Model.BGK2D2V, Scheme.EXPLICIT, Backend.TORCH): bgk2d2v_explicit_torch.build_stepper,
     # 例：CUDAカーネルを後で追加
     # (Model.BGK2D2V, Scheme.EXPLICIT, Backend.CUDA_KERNEL): bgk2d2v_explicit_cuda.build_stepper,
