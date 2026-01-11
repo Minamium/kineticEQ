@@ -5,6 +5,7 @@ from .config import Config
 import logging
 from .logging_utils import apply_logging
 from dataclasses import replace
+import torch
 
 # params
 from kineticEQ.params.registry import default_model_cfg, expected_model_cfg_type
@@ -65,6 +66,10 @@ class Engine:
 
         # デバイスとバックエンドの例外処理
         resolve_device(self.config.device)
+
+        # GPUのモデル名の取得と表示
+        if self.config.device == "cuda":
+            logger.info(f"GPU model: {torch.cuda.get_device_name(0)}")
 
         # steteとstepperの設定
         state = build_state(self.config)
