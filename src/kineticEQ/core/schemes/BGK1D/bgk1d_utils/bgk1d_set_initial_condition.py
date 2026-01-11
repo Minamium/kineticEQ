@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from kineticEQ.api.config import Config
 from kineticEQ.core.states.state_1d import State1D1V
-from kineticEQ.core.schemes.BGK1D.bgk1d_maxwellian import maxwellian
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_maxwellian import maxwellian
 
 @torch.no_grad()
 def set_initial_condition(state: State1D1V, cfg: Config) -> None:
