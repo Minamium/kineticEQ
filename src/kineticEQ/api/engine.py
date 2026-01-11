@@ -74,16 +74,17 @@ class Engine:
         with get_progress_bar(self.config.use_tqdm_bool,total=self.config.model_cfg.time.n_steps, desc="Time Evolution", 
                   bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
             for steps in range(self.config.model_cfg.time.n_steps):
-                logger.debug(f"time-evolution {self.config.model_name} {self.config.scheme_name} step: {steps}")
+                logger.debug(f"time-evolution {self.config.model_name} {self.config.scheme_name} {self.config.backend_name} step: {steps}")
 
                 # ============loop body===========
-                stepper() 
+                # call-build_stepper
+                stepper(steps) 
                 
                 # ============loop body===========
                 pbar.update(1)
 
         # debug-log(状況に応じて削除)
-        logger.debug(f"distribution function: {state.f}\n")
+        logger.debug(f"moments: {state.n, state.u, state.T}\n")
 
         return Result()
 

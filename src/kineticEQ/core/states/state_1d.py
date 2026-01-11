@@ -8,9 +8,15 @@ from kineticEQ.api.config import Config, DType
 @dataclass
 class State1D1V:
     f: torch.Tensor
-    f_new: torch.Tensor
+    f_tmp: torch.Tensor
+    f_m: torch.Tensor
     x: torch.Tensor
     v: torch.Tensor
+    n: torch.Tensor
+    u: torch.Tensor
+    T: torch.Tensor
+    dv: torch.Tensor
+    dx: torch.Tensor
 
     # caches (scheme-shared)
     v_col: torch.Tensor
@@ -24,8 +30,14 @@ class State1D1V:
 def allocate_state_1d1v(nx, nv, Lx, v_max, device, dtype) -> State1D1V:
     dx = Lx / (nx - 1)
     f = torch.zeros((nx, nv), device=device, dtype=dtype)
-    f_new = torch.zeros_like(f)
+    n = torch.ones(nx, device=device, dtype=dtype)
+    u = torch.zeros(nx, device=device, dtype=dtype)
+    T = torch.ones(nx, device=device, dtype=dtype)
+    f_tmp = torch.zeros_like(f)
+    f_m = torch.zeros_like(f)
     x = torch.linspace(0, Lx, nx, device=device, dtype=dtype)
+    dx = float(Lx / (nx - 1))
+    dv = float((2.0 * v_max) / (nv - 1))
     v = torch.linspace(-v_max, v_max, nv, device=device, dtype=dtype)
 
     pos = v > 0
@@ -34,7 +46,9 @@ def allocate_state_1d1v(nx, nv, Lx, v_max, device, dtype) -> State1D1V:
     k0 = int(torch.searchsorted(v, torch.tensor(0.0, device=device, dtype=dtype)))
 
     return State1D1V(
-        f=f, f_new=f_new, x=x, v=v,
+        f=f, f_tmp=f_tmp, f_m=f_m, x=x, v=v, n=n, u=u, T=T,
+        dv=dv,
+        dx=dx,
         v_col=v[None, :],
         inv_sqrt_2pi=inv,
         pos_mask=pos,

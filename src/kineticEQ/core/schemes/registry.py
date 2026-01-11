@@ -5,7 +5,7 @@ from typing import Any, Callable
 from kineticEQ.api.config import Config, Model, Scheme, Backend
 
 # stepperは「引数なしで1step進める callable」とする
-Stepper = Callable[[], None]
+Stepper = Callable[[int], None]
 StepperBuilder = Callable[[Config, Any], Stepper]  # (cfg, state) -> stepper
 
 from .BGK1D import bgk1d_explicit_torch

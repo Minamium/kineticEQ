@@ -12,5 +12,5 @@ def test_resolve_device_cuda_ok():
 @pytest.mark.parametrize("scheme", ["explicit", "implicit", "holo", "holo_nn"])
 @pytest.mark.parametrize("backend", ["torch", "cuda_kernel"])
 def test_smoke_cuda(model, scheme, backend):
-    cfg = Config(model=model, scheme=scheme, backend=backend, device="cuda", use_tqdm="false")
+    cfg = Config(model=model, scheme=scheme, backend=backend, device="cuda", use_tqdm="false", log_level="DEBUG")
     Engine(cfg, apply_logging_flag=True).run()
