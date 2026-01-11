@@ -10,6 +10,7 @@ def step(state: State1D1V, cfg: Config) -> None:
     # TODO: ここに本体（今はダミーでよい）
     # state.f_new[...] = ...
     # state.f, state.f_new = state.f_new, state.f
+    state.f[:,:] += 1e-300
     return
 
 def build_stepper(cfg: Config, state: State1D1V) -> Stepper:

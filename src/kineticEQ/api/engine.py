@@ -5,9 +5,16 @@ from .config import Config
 import logging
 from .logging_utils import apply_logging
 from dataclasses import replace
+
+# params
 from kineticEQ.params.registry import default_model_cfg, expected_model_cfg_type
-from kineticEQ.utillib.progress_bar import get_progress_bar, progress_write
+
+# utillib
+from kineticEQ.utillib.progress_bar import get_progress_bar
 from kineticEQ.utillib.pretty import format_kv_block
+from kineticEQ.utillib.device_util import resolve_device
+
+# core
 from kineticEQ.core.states.registry import build_state
 from kineticEQ.core.schemes.registry import build_stepper
 logger = logging.getLogger(__name__)
@@ -56,6 +63,9 @@ class Engine:
         # debug-log
         logger.debug(f"run {self.config.model_name} {self.config.scheme_name}")
 
+        # デバイスとバックエンドの例外処理
+        resolve_device(self.config.device)
+
         # steteとstepperの設定
         state = build_state(self.config)
         stepper = build_stepper(self.config, state)
@@ -71,6 +81,9 @@ class Engine:
                 
                 # ============loop body===========
                 pbar.update(1)
+
+        # debug-log(削除予定)
+        logger.debug(f"distribution function: {state.f}")
 
         return Result()
 
