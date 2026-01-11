@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Callable
 from kineticEQ.api.config import Config
 from kineticEQ.core.states.state_1d import State1D1V
-
+import logging
+logger = logging.getLogger(__name__)
 Stepper = Callable[[], None]
 
 def step(state: State1D1V, cfg: Config) -> None:
@@ -11,6 +12,7 @@ def step(state: State1D1V, cfg: Config) -> None:
     # state.f_new[...] = ...
     # state.f, state.f_new = state.f_new, state.f
     state.f[:,:] += 1e-300
+    logger.debug("f: %s", state.f)
     return
 
 def build_stepper(cfg: Config, state: State1D1V) -> Stepper:

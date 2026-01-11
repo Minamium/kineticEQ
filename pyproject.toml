@@ -1,8 +1,8 @@
 [project]
 name = "kineticEQ"
-version = "1.0.1"
+version = "1.9.0"
 description = "kinetic equation solvers"
-authors = [{ name = "Minamium", email = "arcadia.battery@gmail.com" }]
+authors = [{ name = "Minamium", email = "minamium.shukunami@gmail.com" }]
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
@@ -17,3 +17,6 @@ dependencies = [
 
 [project.optional-dependencies]
 viz = ["matplotlib", "plotly>=5"]
+
+[tool.pytest.ini_options]
+addopts = "-s"
