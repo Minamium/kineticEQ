@@ -21,8 +21,8 @@ def test_smoke_cuda(model, scheme, backend):
         use_tqdm="false",
         log_level="debug",
         model_cfg=ModelConfig(
-            grid=Grid1D1V(nx=124, nv=64, Lx=1.0, v_max=10.0),
-            time=TimeConfig(dt=5e-4, T_total=5e-3),
+            grid=Grid1D1V(nx=500, nv=200, Lx=1.0, v_max=10.0),
+            time=TimeConfig(dt=5e-6, T_total=5e-5),
             params=BGK1D1VParams(tau_tilde=5e-1),
             initial=InitialCondition1D(
                 initial_regions=(
