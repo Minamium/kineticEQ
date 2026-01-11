@@ -20,3 +20,4 @@ viz = ["matplotlib", "plotly>=5"]
 
 [tool.pytest.ini_options]
 addopts = "-s"
+log_cli = true
