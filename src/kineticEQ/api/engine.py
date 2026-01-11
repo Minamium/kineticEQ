@@ -82,8 +82,8 @@ class Engine:
                 # ============loop body===========
                 pbar.update(1)
 
-        # debug-log(削除予定)
-        logger.debug(f"distribution function: {state.f}")
+        # debug-log(状況に応じて削除)
+        logger.debug(f"distribution function: {state.f}\n")
 
         return Result()
 
