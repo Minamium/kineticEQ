@@ -72,8 +72,8 @@ class Engine:
             logger.info(f"GPU model: {torch.cuda.get_device_name(0)}")
 
         # steteとstepperの設定
-        state = build_state(self.config)
-        stepper = build_stepper(self.config, state)
+        self.state = build_state(self.config)
+        stepper = build_stepper(self.config, self.state)
 
         # time-evolution
         with get_progress_bar(self.config.use_tqdm_bool,total=self.config.model_cfg.time.n_steps, desc="Time Evolution", 
@@ -87,9 +87,6 @@ class Engine:
                 
                 # ============loop body===========
                 pbar.update(1)
-
-        # debug-log(状況に応じて削除)
-        logger.debug(f"moments: {state.n, state.u, state.T}\n")
 
         return Result()
 
