@@ -21,4 +21,4 @@ def test_smoke_cpu(model, scheme):
     )
     simulation_engine = Engine(cfg, apply_logging_flag=True)
     simulation_engine.run()
-    plot_state(simulation_engine.state, filename="plot_test_cpu.png", output_dir="./results")
+    plot_state(simulation_engine.state, filename="plot_test_cpu.png", output_dir="./../results")

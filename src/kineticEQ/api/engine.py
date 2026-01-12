@@ -56,13 +56,8 @@ class Engine:
             format_kv_block(self.config.model_cfg),
         )
 
-
         # debug-log
         logger.debug(f"config: {self.config.as_dict}")
-
-    def run(self) -> Result:
-        # debug-log
-        logger.debug(f"run {self.config.model_name} {self.config.scheme_name}")
 
         # デバイスとバックエンドの例外処理
         resolve_device(self.config.device)
@@ -73,8 +68,13 @@ class Engine:
 
         # steteとstepperの設定
         self.state = build_state(self.config)
-        stepper = build_stepper(self.config, self.state)
+        self.stepper = build_stepper(self.config, self.state)
 
+
+    def run(self) -> Result:
+        """
+        time-evolution
+        """
         # time-evolution
         with get_progress_bar(self.config.use_tqdm_bool,total=self.config.model_cfg.time.n_steps, desc="Time Evolution", 
                   bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
@@ -83,7 +83,7 @@ class Engine:
 
                 # ============loop body===========
                 # call-build_stepper
-                stepper(steps) 
+                self.stepper(steps) 
                 
                 # ============loop body===========
                 pbar.update(1)
