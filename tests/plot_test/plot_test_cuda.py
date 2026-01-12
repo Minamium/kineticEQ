@@ -29,4 +29,4 @@ def test_plot_cuda(model, scheme, backend):
     )
     simulation_engine = Engine(cfg, apply_logging_flag=True)
     simulation_engine.run()
-    plot_state(simulation_engine.state)
+    plot_state(simulation_engine.state, filename="plot_test_cuda.png", output_dir="./")
