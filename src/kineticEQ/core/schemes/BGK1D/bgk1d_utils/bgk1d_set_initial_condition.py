@@ -28,7 +28,11 @@ def set_initial_condition(state: State1D1V, cfg: Config) -> None:
             a, b = r.x_range
             rn, ru, rT = r.n, r.u, r.T
 
-        mask = (x >= a) & (x < b)  # 左閉右開
+        if r == regions[-1]:
+            mask = (x >= a) & (x <= b)  # 最後の領域は右閉
+        else:
+            mask = (x >= a) & (x < b)
+        
         n[mask] = float(rn)
         u[mask] = float(ru)
         T[mask] = float(rT)
