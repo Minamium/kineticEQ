@@ -20,7 +20,7 @@ def test_smoke_cpu(model, scheme):
         )
     )
     simulation_engine = Engine(cfg, apply_logging_flag=True)
-    
-    plot_state(simulation_engine.state, filename="initial_state_explicit_torch_cpu.png", output_dir="./../results")
+
+    plot_state(simulation_engine.state, filename=f"initial_state_{scheme}_torch_cpu.png", output_dir="./../results")
     simulation_engine.run()
-    plot_state(simulation_engine.state, filename="final_state_explicit_torch_cpu.png", output_dir="./../results")
+    plot_state(simulation_engine.state, filename=f"final_state_{scheme}_torch_cpu.png", output_dir="./../results")
