@@ -1,6 +1,6 @@
 # kineticEQ/src/kineticEQ/plotting/bgk1d/plot_state.py
 import logging
-import os
+from pathlib import Path
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calculate_moments
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,6 @@ def plot_state(state, filename="bgk_state.png", output_dir=None):
     ax4.set_title('Temperature Distribution')
     ax4.grid(True, alpha=0.3)
 
-    plt.show()
     plt.savefig(output_dir / filename)
 
     # 統計情報表示
