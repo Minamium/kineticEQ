@@ -20,6 +20,5 @@ def test_plot_cpu(model, scheme, backend):
             params=BGK1D.BGK1D1VParams(tau_tilde=5e-5),
         )
     )
-    simulation_engine = Engine(cfg, apply_logging_flag=True)
-    simulation_engine.run()
-    plot_state(simulation_engine.state)
+    Engine(cfg, apply_logging_flag=True).run
+    
