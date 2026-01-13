@@ -103,8 +103,9 @@ class Engine:
                     pbar.write(f"Step {steps:5d}/{self.config.model_cfg.time.n_steps - 1} (t={current_time:.3f})")
                     
                     # benchlog表示(Noneなら弾く)
-                    if self.state.benchlog:  
-                        pbar.write(format_kv_block(self.state.benchlog))
+                    benchlog = getattr(self.stepper, "benchlog", None)
+                    if benchlog:
+                        pbar.write(format_kv_block(benchlog))
 
                 # ============loop body===========
                 pbar.update(1)

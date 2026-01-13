@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 Stepper = Callable[[int], None]
 
 @torch.no_grad()
-def step(state: State1D1V, cfg: Config, ws: ImplicitWorkspace, cuda_module, gtsv_module, num_steps: int) -> State1D1V:
+def step(state: State1D1V, cfg: Config, ws: ImplicitWorkspace, cuda_module, gtsv_module, num_steps: int) -> tuple[State1D1V, dict]:
     # 初期候補：前ステップ
     ws.fz.copy_(state.f)
     swapped_last = False
@@ -23,6 +23,8 @@ def step(state: State1D1V, cfg: Config, ws: ImplicitWorkspace, cuda_module, gtsv
     # scheme_params から取得
     picard_iter = cfg.model_cfg.scheme_params.picard_iter
     picard_tol = cfg.model_cfg.scheme_params.picard_tol
+
+    latest = ws.fz
 
     for z in range(picard_iter):
         # (a,b,c,B) を一括構築（Maxwellの境界寄与も旧実装と同等）
@@ -49,20 +51,17 @@ def step(state: State1D1V, cfg: Config, ws: ImplicitWorkspace, cuda_module, gtsv
         residual = torch.max(torch.abs(ws.fn_tmp - ws.fz))
         residual_val = float(residual)
 
+        latest = ws.fn_tmp
+
         if residual <= picard_tol:
-            swapped_last = False
             break
 
         # 次反復へ
         ws.fz, ws.fn_tmp = ws.fn_tmp, ws.fz
-        swapped_last = True
-
-        # 直近で swap したかで最新候補の位置が変わる
-        latest = ws.fz if swapped_last else ws.fn_tmp
-        state.f_tmp.copy_(latest)
-        # 念のため境界は前状態を維持（latest の境界は _fz と同じだが、方針の明確化）
-        state.f_tmp[0, :].copy_(state.f[0, :])
-        state.f_tmp[-1, :].copy_(state.f[-1, :])
+    
+    state.f_tmp.copy_(latest)
+    state.f_tmp[0, :].copy_(state.f[0, :])
+    state.f_tmp[-1, :].copy_(state.f[-1, :])
 
     # NaN/Infチェック
     if num_steps % 100 == 0:
@@ -74,12 +73,12 @@ def step(state: State1D1V, cfg: Config, ws: ImplicitWorkspace, cuda_module, gtsv
     state.f, state.f_tmp = state.f_tmp, state.f
 
     # benchlog
-    self.benchlog = {
+    benchlog = {
         "picard_iter": z + 1,
-        "picard_tol": residual_val,
+        "picard_residual": residual_val,
     }
 
-    return state
+    return state, benchlog
 
 def build_stepper(cfg: Config, state: State1D1V) -> Stepper:
     # CFL条件チェック
@@ -96,5 +95,8 @@ def build_stepper(cfg: Config, state: State1D1V) -> Stepper:
     # 初期条件設定
     set_initial_condition(state, cfg)
     def _stepper(num_steps: int) -> None:
-        step(state, cfg, ws, cuda_module, gtsv_module, num_steps)
+        _, benchlog = step(state, cfg, ws, cuda_module, gtsv_module, num_steps)
+        _stepper.benchlog = benchlog  # bench-logを属性として載せる
+
+    _stepper.benchlog = None  # 初期値
     return _stepper
