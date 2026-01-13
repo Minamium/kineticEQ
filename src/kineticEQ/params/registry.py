@@ -31,4 +31,7 @@ def expected_model_cfg_type(model: Model) -> type:
     return _TYPES[model]
 
 def default_scheme_params(model: Model, scheme: Scheme) -> Any:
-    return _SCHEME_PARAMS_FACTORIES[(model, scheme)]()
+    factory = _SCHEME_PARAMS_FACTORIES.get((model, scheme))
+    if factory is None:
+        return None
+    return factory()
