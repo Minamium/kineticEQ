@@ -7,3 +7,5 @@ class Params:
     ho_tol: float = 1e-4
     lo_iter: int = 16
     lo_tol: float = 1e-4
+    Con_Terms_do: bool = True
+    flux_consistency_do: bool = True

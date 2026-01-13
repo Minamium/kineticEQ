@@ -29,6 +29,6 @@ def test_plot_cuda(model, scheme, backend):
         )
     )
     simulation_engine = Engine(cfg, apply_logging_flag=True)
-    plot_state(simulation_engine.state, filename=f"initial_state_{scheme}_{backend}_cuda.png", output_dir="./../results")
+    plot_state(simulation_engine.state, filename=f"initial_state_{scheme}_{backend}_cuda.png", output_dir="./results")
     simulation_engine.run()
-    plot_state(simulation_engine.state, filename=f"final_state_{scheme}_{backend}_cuda.png", output_dir="./../results")
+    plot_state(simulation_engine.state, filename=f"final_state_{scheme}_{backend}_cuda.png", output_dir="./results")

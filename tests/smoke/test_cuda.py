@@ -9,12 +9,15 @@ def test_resolve_device_cuda_ok():
     assert resolve_device("cuda") == "cuda"
 
 @pytest.mark.parametrize("model", ["BGK1D1V"])
-@pytest.mark.parametrize("scheme", ["explicit", "implicit"])
+@pytest.mark.parametrize("scheme", ["explicit", "implicit", "holo"])
 @pytest.mark.parametrize("backend", ["torch", "cuda_kernel"])
 def test_smoke_cuda(model, scheme, backend):
     # サポートしていない組み合わせはスキップ
     if backend == "torch" and scheme == "implicit":
         pytest.skip("torch implicit is not supported (requires gtsv). Use backend='cuda_kernel'.")
+
+    if backend == "torch" and scheme == "holo":
+        pytest.skip("torch holo is not supported (requires gtsv). Use backend='cuda_kernel'.")
     
     cfg = Config(
         model=model,

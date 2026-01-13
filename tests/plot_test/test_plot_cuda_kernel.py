@@ -11,7 +11,7 @@ def test_resolve_device_cuda_ok():
     assert resolve_device("cuda") == "cuda"
 
 @pytest.mark.parametrize("model", ["BGK1D1V"])
-@pytest.mark.parametrize("scheme", ["explicit", "implicit"])
+@pytest.mark.parametrize("scheme", ["explicit", "implicit", "holo"])
 @pytest.mark.parametrize("backend", ["cuda_kernel"])
 def test_plot_cuda(model, scheme, backend):
     cfg = Config(
@@ -29,6 +29,6 @@ def test_plot_cuda(model, scheme, backend):
         )
     )
     simulation_engine = Engine(cfg, apply_logging_flag=True)
-    plot_state(simulation_engine.state, filename=f"initial_state_{scheme}_{backend}_cuda.png", output_dir="./../results")
+    plot_state(simulation_engine.state, filename=f"initial_state_{scheme}_{backend}_cuda.png", output_dir="./results")
     simulation_engine.run()
-    plot_state(simulation_engine.state, filename=f"final_state_{scheme}_{backend}_cuda.png", output_dir="./../results")
+    plot_state(simulation_engine.state, filename=f"final_state_{scheme}_{backend}_cuda.png", output_dir="./results")
