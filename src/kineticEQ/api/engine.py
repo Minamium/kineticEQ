@@ -56,13 +56,15 @@ class Engine:
             "  backend  : %s\n"
             "  device   : %s\n"
             "  log_level: %s\n"
-            "------ Model Configuration ------\n%s",
+            "------ Model Configuration ------\n%s"
+            "------ Scheme Configuration ------\n%s",
             self.config.model_name,
             self.config.scheme_name,
             self.config.backend_name,
             self.config.device,
             self.config.log_level_name,
             format_kv_block(self.config.model_cfg),
+            format_kv_block(self.config.model_cfg.scheme_params),
         )
 
         # debug-log
@@ -94,7 +96,13 @@ class Engine:
                 # call-build_stepper
                 self.stepper(steps) 
 
-                
+                # 進捗表示
+                progress_interval = max(1, self.config.model_cfg.time.n_steps // 10)
+                if steps % progress_interval == 0:
+                    current_time = steps * self.config.model_cfg.time.dt
+                    pbar.write(f"Step {steps:5d}/{self.config.model_cfg.time.n_steps - 1} (t={current_time:.3f})")
+                    pbar.write(format_kv_block(self.config.benchlog))
+
                 # ============loop body===========
                 pbar.update(1)
 

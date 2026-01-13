@@ -73,7 +73,13 @@ def step(state: State1D1V, cfg: Config, ws: ImplicitWorkspace, cuda_module, gtsv
     # swap
     state.f, state.f_tmp = state.f_tmp, state.f
 
-    return (z + 1), residual_val
+    # benchlog
+    state.benchlog = {
+        "picard_iter": z + 1,
+        "picard_tol": residual_val,
+    }
+
+    return state
 
 def build_stepper(cfg: Config, state: State1D1V) -> Stepper:
     # CFL条件チェック
