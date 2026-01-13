@@ -1,5 +1,6 @@
 # kineticEQ/analysis/BGK1D/benchmark.py
 from kineticEQ import Config, Engine, BGK1D
+import torch
 
 class BGK1DBenchmark:
     def __init__(self, config: Config):
@@ -7,8 +8,8 @@ class BGK1DBenchmark:
         self.engine = Engine(config)
     
     # ベンチマークメソッド
-    def run_benchmark(self, 
-                      benc_type="spatial", 
+    def run_benchmark(self,
+                      benc_type="spatial",
                       grid_list=[16, 32, 64, 128, 256, 512, 1024],
                       nv_list=[64, 128, 256]):
         print(f"--- Benchmark Start, benc_type: {benc_type} ---")
