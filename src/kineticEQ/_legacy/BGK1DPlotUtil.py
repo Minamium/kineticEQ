@@ -14,7 +14,7 @@ from .BGK1Dsim import BGK1D
 # 可視化関数群
 class BGK1DPlotMixin:
     """可視化, 解析用の関数群"""
-    #状態可視化メソッド
+    #状態可視化メソッド(移植済み)
     def plot_state(self, filename='bgk_simulation.png'):
         """状態の可視化"""
         import matplotlib.pyplot as plt

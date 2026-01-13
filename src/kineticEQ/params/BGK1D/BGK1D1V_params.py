@@ -1,4 +1,4 @@
-# kineticEQ/params/BGK1D1V_params.py
+# kineticEQ/params/BGK1D/BGK1D1V_params.py
 from dataclasses import dataclass, field
 from typing import Any
 import math
@@ -23,13 +23,6 @@ class BGK1D1VParams:
     tau_tilde: float = 5e-1
 
 @dataclass(frozen=True)
-class InitialRegion1D:
-    x_range: tuple[float, float]
-    n: float
-    u: float
-    T: float
-
-@dataclass(frozen=True)
 class InitialCondition1D:
     initial_regions: tuple[Any, ...] = (
         {"x_range": (0.0, 0.5), "n": 1.0,   "u": 0.0, "T": 1.0},
@@ -47,6 +40,7 @@ class ModelConfig:
         "params.tau_tilde",
         "time.dt",
         "time.T_total",
+        "scheme_params.",
         "initial.", 
     )
 
@@ -54,3 +48,4 @@ class ModelConfig:
     time: TimeConfig = field(default_factory=TimeConfig)
     params: BGK1D1VParams = field(default_factory=BGK1D1VParams)
     initial: InitialCondition1D = field(default_factory=InitialCondition1D)
+    scheme_params: Any = None

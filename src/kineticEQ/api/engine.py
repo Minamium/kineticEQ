@@ -8,7 +8,7 @@ from dataclasses import replace
 import torch
 
 # params
-from kineticEQ.params.registry import default_model_cfg, expected_model_cfg_type
+from kineticEQ.params.registry import default_model_cfg, expected_model_cfg_type, default_scheme_params 
 
 # utillib
 from kineticEQ.utillib.progress_bar import get_progress_bar
@@ -33,6 +33,15 @@ class Engine:
             t = expected_model_cfg_type(self.config.model)
             if not isinstance(self.config.model_cfg, t):
                 raise TypeError(f"model_cfg type mismatch: expected {t.__name__}, got {type(self.config.model_cfg).__name__}")
+
+        # scheme_params の自動設定
+        if self.config.model_cfg.scheme_params is None:
+            default_sp = default_scheme_params(self.config.model, self.config.scheme)
+            if default_sp is not None:
+                self.config = replace(
+                    self.config,
+                    model_cfg=replace(self.config.model_cfg, scheme_params=default_sp)
+                )
 
 
         # apply_logging

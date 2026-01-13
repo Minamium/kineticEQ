@@ -1,5 +1,6 @@
 import pytest
 import torch
+from kineticEQ.params.BGK1D.BGK1D1V_params import Grid1D1V
 from kineticEQ.utillib.device_util import resolve_device
 from kineticEQ import Config, Engine, BGK1D
 from kineticEQ.plotting.bgk1d.plot_state import plot_state
@@ -10,7 +11,7 @@ def test_resolve_device_cuda_ok():
     assert resolve_device("cuda") == "cuda"
 
 @pytest.mark.parametrize("model", ["BGK1D1V"])
-@pytest.mark.parametrize("scheme", ["explicit"])
+@pytest.mark.parametrize("scheme", ["explicit", "implicit"])
 @pytest.mark.parametrize("backend", ["torch", "cuda_kernel"])
 def test_plot_cuda(model, scheme, backend):
     cfg = Config(
