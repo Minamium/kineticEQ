@@ -63,7 +63,7 @@ class Engine:
             self.config.backend_name,
             self.config.device,
             self.config.log_level_name,
-            format_kv_block(self.config.model_cfg),
+            format_kv_block(self.config.model_cfg, exclude={"scheme_params"}),
             format_kv_block(self.config.model_cfg.scheme_params),
         )
 

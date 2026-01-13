@@ -48,6 +48,7 @@ def format_kv_block(
     obj: Any,
     indent: int = 2,
     key_order: Iterable[str] | None = None,
+    exclude: set[str] | None = None,
 ) -> str:
     """
     dataclass/dict をフラット化して "key: value" のブロック文字列を返す。
@@ -57,9 +58,13 @@ def format_kv_block(
     if key_order is None:
         key_order = getattr(obj, "__pretty_order__", None)
 
-    base = _to_mapping(obj)
+    base = dict(_to_mapping(obj))
     if not isinstance(base, dict):
         return repr(obj)
+    
+    if exclude:
+        for k in exclude:
+            base.pop(k, None)
 
     flat = _flatten(base)
     pad = " " * indent
