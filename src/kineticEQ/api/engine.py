@@ -56,7 +56,7 @@ class Engine:
             "  backend  : %s\n"
             "  device   : %s\n"
             "  log_level: %s\n"
-            "------ Model Configuration ------\n%s"
+            "------ Model Configuration ------\n%s\n"
             "------ Scheme Configuration ------\n%s",
             self.config.model_name,
             self.config.scheme_name,
