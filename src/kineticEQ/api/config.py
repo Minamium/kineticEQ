@@ -75,7 +75,6 @@ class Config:
     log_level: str | LogLevel = LogLevel.INFO
     model_cfg: Any | None = None
     use_tqdm: str | UseTqdm = UseTqdm.TRUE
-    benchlog: dict[str, Any] | None = None
 
     
     # 正規化処理

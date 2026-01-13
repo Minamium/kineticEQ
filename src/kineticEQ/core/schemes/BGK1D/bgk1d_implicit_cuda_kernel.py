@@ -74,7 +74,7 @@ def step(state: State1D1V, cfg: Config, ws: ImplicitWorkspace, cuda_module, gtsv
     state.f, state.f_tmp = state.f_tmp, state.f
 
     # benchlog
-    state.benchlog = {
+    self.benchlog = {
         "picard_iter": z + 1,
         "picard_tol": residual_val,
     }

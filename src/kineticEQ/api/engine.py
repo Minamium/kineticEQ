@@ -101,7 +101,10 @@ class Engine:
                 if steps % progress_interval == 0:
                     current_time = steps * self.config.model_cfg.time.dt
                     pbar.write(f"Step {steps:5d}/{self.config.model_cfg.time.n_steps - 1} (t={current_time:.3f})")
-                    pbar.write(format_kv_block(self.config.benchlog))
+                    
+                    # benchlog表示(Noneなら弾く)
+                    if self.state.benchlog:  
+                        pbar.write(format_kv_block(self.state.benchlog))
 
                 # ============loop body===========
                 pbar.update(1)
