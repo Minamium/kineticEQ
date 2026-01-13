@@ -11,7 +11,7 @@ import torch
 from kineticEQ.params.registry import default_model_cfg, expected_model_cfg_type, default_scheme_params 
 
 # utillib
-from kineticEQ.utillib.progress_bar import get_progress_bar
+from kineticEQ.utillib.progress_bar import get_progress_bar, progress_write
 from kineticEQ.utillib.pretty import format_kv_block
 from kineticEQ.utillib.device_util import resolve_device
 
@@ -93,6 +93,7 @@ class Engine:
                 # ============loop body===========
                 # call-build_stepper
                 self.stepper(steps) 
+
                 
                 # ============loop body===========
                 pbar.update(1)

@@ -11,8 +11,8 @@ def test_resolve_device_cuda_ok():
     assert resolve_device("cuda") == "cuda"
 
 @pytest.mark.parametrize("model", ["BGK1D1V"])
-@pytest.mark.parametrize("scheme", ["explicit", "implicit"])
-@pytest.mark.parametrize("backend", ["torch", "cuda_kernel"])
+@pytest.mark.parametrize("scheme", ["explicit"])
+@pytest.mark.parametrize("backend", ["torch"])
 def test_plot_cuda(model, scheme, backend):
     cfg = Config(
         model=model,

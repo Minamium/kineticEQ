@@ -76,6 +76,7 @@ class Config:
     model_cfg: Any | None = None
     use_tqdm: str | UseTqdm = UseTqdm.TRUE
     
+    
     # 正規化処理
     def __post_init__(self):
         object.__setattr__(self, "model", parse_enum(Model, self.model,
