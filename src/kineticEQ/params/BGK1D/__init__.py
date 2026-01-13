@@ -1,7 +1,4 @@
 # kineticEQ/params/BGK1D/__init__.py
-from . import explicit
-from . import implicit
-from . import holo
 from .BGK1D1V_params import (
     Grid1D1V,
     TimeConfig,
