@@ -5,7 +5,7 @@ from scipy.interpolate import interp1d
 from typing import Any, Union
 import time
 
-from _legacy.utillib.progress_bar import get_progress_bar, progress_write
+from utillib.progress_bar import get_progress_bar, progress_write
 
 @torch.jit.script
 def _tdma_vec_impl(a: torch.Tensor,
