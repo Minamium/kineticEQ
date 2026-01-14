@@ -13,7 +13,8 @@ def test_resolve_device_cuda_ok():
 @pytest.mark.parametrize("scheme", ["explicit", "implicit", "holo"])
 @pytest.mark.parametrize("backend", ["cuda_kernel"])
 def test_bgk1d_benchmark_cuda(bench_type, scheme, backend):
-    out = run_benchmark(bench_type=bench_type, scheme=scheme, 
+    out = run_benchmark(bench_type=bench_type, scheme=scheme,
+                        T_total=0.05,
                         backend=backend, device="cuda",
                         use_tqdm="true", log_level="info",
                         nv_list=[32, 64, 128, 256, 512, 1024],
