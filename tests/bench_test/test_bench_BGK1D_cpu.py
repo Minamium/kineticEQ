@@ -4,9 +4,11 @@ from kineticEQ.analysis.BGK1D.plotting.plot_benchmark_result import plot_benchma
 from kineticEQ.analysis.BGK1D.plotting.plot_timing_benchmark import plot_timing_benchmark
 
 @pytest.mark.parametrize("bench_type", ["x_grid", "v_grid", "time"])
-def test_bgk1d_benchmark_cpu(bench_type):
-    out = run_benchmark(bench_type=bench_type, scheme="explicit", 
-                        backend="torch", device="cpu",
+@pytest.mark.parametrize("scheme", ["explicit"])
+@pytest.mark.parametrize("backend", ["torch"])
+def test_bgk1d_benchmark_cpu(bench_type, scheme, backend):
+    out = run_benchmark(bench_type=bench_type, scheme=scheme, 
+                        backend=backend, device="cpu",
                         use_tqdm="true", log_level="info",
                         nv_list=[64, 128, 256],
                         nx_list=[64, 128, 256])
