@@ -20,10 +20,10 @@ def test_bgk1d_benchmark_cuda(bench_type, scheme, backend):
                         nx_list=[32, 64, 128, 256])
 
     if bench_type == "x_grid" or bench_type == "v_grid":
-        plot_benchmark_results(out, out_dir="./bechmark_result", 
+        plot_benchmark_results(out, out_dir="./results/benchmarks", 
                                fname_moment=f"{bench_type}_{scheme}_{backend}_cuda_moments.png", 
                                fname_error=f"{bench_type}_{scheme}_{backend}_cuda_errors.png")
 
     if bench_type == "time":
-        plot_timing_benchmark(out, out_dir="./bechmark_result", 
+        plot_timing_benchmark(out, out_dir="./results/benchmarks", 
                               fname=f"{bench_type}_{scheme}_{backend}_cuda_timing.png")
