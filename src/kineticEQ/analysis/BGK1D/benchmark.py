@@ -1,6 +1,7 @@
 # kineticEQ/analysis/BGK1D/benchmark.py
 from kineticEQ import Config, Engine, BGK1D
 from .utils.snapshot import snapshot_from_engine
+from .utils.compute_err import append_errors
 from .utils.swap_grid_params import with_grid
 from dataclasses import replace
 import torch
@@ -185,4 +186,5 @@ def run_benchmark(bench_type: str,
     else:
         raise ValueError(f"Unknown benchmark type: {bench_type}")
 
+    out = append_errors(out, kind="nearest")
     return out
