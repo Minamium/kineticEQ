@@ -10,3 +10,5 @@ def test_bgk1d_benchmark_cpu(bench_type):
                         use_tqdm="true", log_level="info",
                         nv_list=[64, 128, 256],
                         nx_list=[64, 128, 256])
+
+    print(out)
