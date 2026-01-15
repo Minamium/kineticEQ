@@ -172,11 +172,13 @@ def run_benchmark(bench_type: str,
     if bench_type == "x_grid":
         for nx in nx_list:
             cfg1 = with_grid(base_cfg, nx=nx)
+            print(f"[bench:{bench_type}] nx={cfg1.model_cfg.grid.nx}, nv={cfg1.model_cfg.grid.nv}")
             run_one(cfg1, tag=scheme)
 
     elif bench_type == "v_grid":
         for nv in nv_list:
             cfg1 = with_grid(base_cfg, nv=nv)
+            print(f"[bench:{bench_type}] nx={cfg1.model_cfg.grid.nx}, nv={cfg1.model_cfg.grid.nv}")
             run_one(cfg1, tag=scheme)
 
     elif bench_type == "time":
@@ -184,6 +186,7 @@ def run_benchmark(bench_type: str,
         for nv in nv_list:
             for nx in nx_list:
                 cfg1 = with_grid(base_cfg, nx=nx, nv=nv)
+                print(f"[bench:{bench_type}] nx={cfg1.model_cfg.grid.nx}, nv={cfg1.model_cfg.grid.nv}")
                 run_timebenchmark(cfg1, tag=scheme)
 
     else:

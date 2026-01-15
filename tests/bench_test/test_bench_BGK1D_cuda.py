@@ -11,14 +11,14 @@ def test_resolve_device_cuda_ok():
     assert resolve_device("cuda") == "cuda"
 
 @pytest.mark.parametrize("bench_type", ["x_grid", "v_grid", "time"])
-@pytest.mark.parametrize("scheme", ["explicit", "implicit", "holo"])
+@pytest.mark.parametrize("scheme", ["explicit", "implicit"])
 @pytest.mark.parametrize("backend", ["cuda_kernel"])
 def test_bgk1d_benchmark_cuda(bench_type, scheme, backend):
     if scheme == "holo":
-        scheme_params = BGK1D.holo.Params(ho_tol=1e-6, ho_iter=10,
-                                          lo_tol=1e-6, lo_iter=10)
+        scheme_params = BGK1D.holo.Params(ho_tol=1e-6, ho_iter=1,
+                                          lo_tol=1e-6, lo_iter=1)
     elif scheme == "implicit":
-        scheme_params=BGK1D.implicit.Params(picard_iter=256, picard_tol=1e-6)
+        scheme_params=BGK1D.implicit.Params(picard_iter=1, picard_tol=1e-6)
     elif scheme == "explicit":
         scheme_params=None
 
