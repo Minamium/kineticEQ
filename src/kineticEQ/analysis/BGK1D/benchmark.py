@@ -8,14 +8,16 @@ import torch
 import time
 import platform
 import subprocess
+from typing import Any
 
 def run_benchmark(bench_type: str,
                   scheme: str = "explicit", backend: str = "cuda_kernel", device: str = "cuda",
                   use_tqdm: str = "true", log_level: str = "info",
                   dt: float = 5e-6, T_total: float = 5e-4, tau_tilde: float = 5e-5,
-                  Lx: float = 1.0, v_max: float = 10.0,
+                  Lx: float = 1.0, v_max: float = 10.0,ini_nx: int = 128,ini_nv: int = 64,
                   nx_list: list = [64, 128, 256, 512, 1024],
-                  nv_list: list = [32, 64, 128, 256, 516]):
+                  nv_list: list = [32, 64, 128, 256, 516],
+                  scheme_params: Any = None):
 
     base_cfg = Config(
         model="BGK1D",
@@ -26,9 +28,10 @@ def run_benchmark(bench_type: str,
         use_tqdm=use_tqdm,
         log_level=log_level,
         model_cfg=BGK1D.ModelConfig(
-            grid=BGK1D.Grid1D1V(nx=8, nv=8, Lx=Lx, v_max=v_max),
+            grid=BGK1D.Grid1D1V(nx=ini_nx, nv=ini_nv, Lx=Lx, v_max=v_max),
             time=BGK1D.TimeConfig(dt=dt, T_total=T_total),
             params=BGK1D.BGK1D1VParams(tau_tilde=tau_tilde),
+            scheme_params=scheme_params
         )
     )
 
