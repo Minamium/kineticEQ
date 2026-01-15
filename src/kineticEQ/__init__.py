@@ -6,7 +6,8 @@ from importlib.metadata import PackageNotFoundError, version
 __version__ = version("kineticEQ")  
 
 # レガシーの公開
-#from ._legacy.BGK1Dsim import BGK1Dsim
+from ._legacy.BGK1Dsim import BGK1D
+from ._legacy.BGK1DPlotUtil import BGK1DPlotMixin
 
 # APIディレクトリの公開
 from .api import Config, Engine, run, Result

@@ -5,7 +5,7 @@ from scipy.interpolate import interp1d
 from typing import Any, Union
 import time
 
-from .utillib.progress_bar import get_progress_bar, progress_write
+from ..utillib.progress_bar import get_progress_bar, progress_write
 
 class BGK2D2V_core:
     """
