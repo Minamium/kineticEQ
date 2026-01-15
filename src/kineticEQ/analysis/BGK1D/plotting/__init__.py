@@ -1,0 +1,5 @@
+# kineticEQ/analysis/BGK1D/plotting/__init__.py
+from .plot_benchmark_result import plot_benchmark_results
+from .plot_convergence_result import plot_convergence_results
+from .plot_scheme_comparison_result import plot_cross_scheme_results
+from .plot_timing_benchmark import plot_timing_benchmark

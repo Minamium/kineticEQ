@@ -1,9 +1,9 @@
 import pytest
 import torch
-from kineticEQ.params.BGK1D.BGK1D1V_params import Grid1D1V
+from kineticEQ.params.BGK1D import Grid1D1V
 from kineticEQ.utillib.device_util import resolve_device
 from kineticEQ import Config, Engine, BGK1D
-from kineticEQ.plotting.bgk1d.plot_state import plot_state
+from kineticEQ.plotting.bgk1d import plot_state
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 

@@ -1,6 +1,6 @@
 import pytest
 from kineticEQ import Config, Engine, BGK1D
-from kineticEQ.plotting.bgk1d.plot_state import plot_state
+from kineticEQ.plotting.bgk1d import plot_state
 
 @pytest.mark.parametrize("model", ["BGK1D1V"])
 @pytest.mark.parametrize("scheme", ["explicit"])

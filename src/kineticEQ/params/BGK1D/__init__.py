@@ -6,3 +6,6 @@ from .BGK1D1V_params import (
     InitialCondition1D,
     ModelConfig,
 )
+from . import explicit
+from . import implicit
+from . import holo
