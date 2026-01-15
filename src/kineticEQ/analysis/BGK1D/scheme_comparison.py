@@ -51,7 +51,7 @@ def _get_device_name(device: str) -> str:
 def run_scheme_comparison_test(
     *,
     scheme_list: List[str] = ("explicit", "holo", "implicit"),
-    scheme_dt_list: List[float] = (5e-7, 5e-4, 5e-7),
+    scheme_dt_list: List[float] = (5e-7, 5e-5, 5e-7),
     nx: int = 1000,
     nv: int = 200,
     Lx: float = 1.0,

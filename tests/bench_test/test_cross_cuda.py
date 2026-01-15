@@ -5,7 +5,7 @@ from kineticEQ.analysis.BGK1D.plotting.plot_scheme_comparison_result import plot
 def test_cross_scheme_comparison():
     out = run_scheme_comparison_test(
         scheme_list=["explicit", "implicit", "holo"],
-        scheme_dt_list=[5e-7, 5e-7, 5e-4],
+        scheme_dt_list=[5e-7, 5e-7, 5e-5],
         tau_tilde=5e-6,
     )
 
