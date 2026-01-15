@@ -10,7 +10,7 @@ import platform
 import subprocess
 from typing import Any
 
-def run_benchmark(bench_type: str,
+def run_benchmark(bench_type: str, error_interp: str = "nearest",
                   scheme: str = "explicit", backend: str = "cuda_kernel", device: str = "cuda",
                   use_tqdm: str = "true", log_level: str = "info",
                   dt: float = 5e-6, T_total: float = 5e-4, tau_tilde: float = 5e-5,
@@ -72,6 +72,7 @@ def run_benchmark(bench_type: str,
     out = {
         "meta": {
             "bench_type": bench_type,
+            "error_interp": error_interp,
             "scheme": scheme,
             "backend": backend,
             "device": device,
@@ -192,5 +193,5 @@ def run_benchmark(bench_type: str,
     else:
         raise ValueError(f"Unknown benchmark type: {bench_type}")
 
-    out = append_errors(out, kind="nearest")
+    out = append_errors(out, kind=error_interp)
     return out
