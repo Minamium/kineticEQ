@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # kineticEQの最上位wrapperクラス
 class Engine:
-    def __init__(self, config: Config, apply_logging_flag: bool = False):
+    def __init__(self, config: Config, apply_logging_flag: bool = True):
         # configを保存
         self.config = config
 
