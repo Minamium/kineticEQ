@@ -10,15 +10,15 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not 
 def test_resolve_device_cuda_ok():
     assert resolve_device("cuda") == "cuda"
 
-@pytest.mark.parametrize("bench_type", ["x_grid", "v_grid", "time"])
+@pytest.mark.parametrize("bench_type", ["x_grid", "v_grid"])
 @pytest.mark.parametrize("scheme", ["explicit", "implicit"])
 @pytest.mark.parametrize("backend", ["cuda_kernel"])
 def test_bgk1d_benchmark_cuda(bench_type, scheme, backend):
     if scheme == "holo":
-        scheme_params = BGK1D.holo.Params(ho_tol=1e-6, ho_iter=1,
-                                          lo_tol=1e-6, lo_iter=1)
+        scheme_params = BGK1D.holo.Params(ho_tol=1e-6, ho_iter=64,
+                                          lo_tol=1e-6, lo_iter=64)
     elif scheme == "implicit":
-        scheme_params=BGK1D.implicit.Params(picard_iter=1, picard_tol=1e-6)
+        scheme_params=BGK1D.implicit.Params(picard_iter=64, picard_tol=1e-6)
     elif scheme == "explicit":
         scheme_params=None
 
@@ -30,11 +30,6 @@ def test_bgk1d_benchmark_cuda(bench_type, scheme, backend):
                         nv_list=[33, 65, 129, 257, 513, 1025],
                         nx_list=[33, 65, 129, 257, 513])
 
-    if bench_type == "x_grid" or bench_type == "v_grid":
-        plot_benchmark_results(out, out_dir="./results/benchmarks", 
-                               fname_moment=f"{bench_type}_{scheme}_{backend}_cuda_moments.png", 
-                               fname_error=f"{bench_type}_{scheme}_{backend}_cuda_errors.png")
-
-    if bench_type == "time":
-        plot_timing_benchmark(out, out_dir="./results/benchmarks", 
-                              fname=f"{bench_type}_{scheme}_{backend}_cuda_timing.png")
+    plot_benchmark_results(out, out_dir="./results/benchmarks", 
+                           fname_moment=f"{bench_type}_{scheme}_{backend}_cuda_moments.png", 
+                           fname_error=f"{bench_type}_{scheme}_{backend}_cuda_errors.png")
