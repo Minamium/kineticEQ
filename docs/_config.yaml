@@ -3,6 +3,9 @@ description: kineticEQ docs - High-Performance Kinetic Equation Solver
 
 remote_theme: just-the-docs/just-the-docs@v0.7.0
 
+url: "https://minamium.github.io"
+baseurl: "/kineticEQ"
+
 plugins:
   - jekyll-remote-theme
 
