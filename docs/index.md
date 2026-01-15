@@ -3,11 +3,11 @@ title: kineticEQ Docs
 nav_order: 1
 ---
 
-# kineticEQ ドキュメント
+# What is kineticEQ?
 
-高性能運動論方程式ソルバー（BGK方程式）
+kineticEQ is a kinetic equation solver using torch library.
 
-## クイックスタート
+## Quick Start
 
 ```python
 from kineticEQ import Config, Engine, BGK1D
@@ -27,14 +27,8 @@ engine = Engine(cfg)
 engine.run()
 ```
 
-## ドキュメント
+## Documentation
 
-- [インストール](getting-started/installation.md)
-- [チュートリアル](tutorials/basic.md)
-- [APIリファレンス](api/index.md)
-
-## 特徴
-
-- **高速計算**: PyTorch + カスタムCUDAカーネルによる最適化
-- **複数スキーム**: 陽解法 / 陰解法 / HOLO法
-- **モジュラー設計**: 拡張可能なアーキテクチャ
+- [Installation](getting-started/installation.md)
+- [Tutorial](tutorials/basic.md)
+- [API Reference](api/index.md)

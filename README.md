@@ -1,6 +1,6 @@
 # kineticEQ
-Hello, Github.
-This is a kinetic equation solver useing torch library.
+
+Kinetic equation solver using torch library.
 
 ## Installation
 
@@ -10,13 +10,13 @@ pip install -e ./kineticEQ
 ```
 
 
-## Usage
+## Documentation
 
-```python
-from kineticEQ import Config, Engine, run
+- Website: https://minamium.github.io/kineticEQ/
 
-Config_instance = Config()
+Source
 
-Engine_instance = Engine(Config_instance)
-
-Engine_instance.run()
+- Docs Top: [docs/index.md](docs/index.md)
+- API guide: [docs/api/index.md](docs/api/index.md)
+- Getting Started: [docs/getting-started/index.md](docs/getting-started/index.md)   
+- Tutorials: [docs/tutorials/index.md](docs/tutorials/index.md)
