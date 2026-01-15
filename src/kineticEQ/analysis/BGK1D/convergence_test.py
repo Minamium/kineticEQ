@@ -52,11 +52,11 @@ def _get_device_name(device: str) -> str:
 def run_convergence_test(
     *,
     tau_tilde_list: List[float] = (5e-4, 5e-5, 5e-6, 5e-7),
-    nx: int = 512,
-    nv: int = 128,
+    nx: int = 1000,
+    nv: int = 200,
     Lx: float = 1.0,
     v_max: float = 10.0,
-    dt: float = 5e-6,
+    dt: float = 5e-5,
     T_total: float = 0.05,
     device: str = "cuda",
     backend: str = "cuda_kernel",
@@ -80,9 +80,9 @@ def run_convergence_test(
     """
 
     if imp_params is None:
-        imp_params = BGK1D.implicit.Params(picard_tol=1e-6, picard_iter=100)
+        imp_params = BGK1D.implicit.Params(picard_tol=1e-6, picard_iter=10_000)
     if holo_params is None:
-        holo_params = BGK1D.holo.Params(ho_tol=1e-6, ho_iter=256, lo_tol=1e-6, lo_iter=256)
+        holo_params = BGK1D.holo.Params(ho_tol=1e-6, ho_iter=10_000, lo_tol=1e-6, lo_iter=10_000)
 
     n_steps = int(BGK1D.TimeConfig(dt=dt, T_total=T_total).n_steps)
     sample_interval = max(1, n_steps // max(1, sample_percent))
