@@ -1,8 +1,6 @@
 ---
 title: APIリファレンス
 nav_order: 4
-parent: kineticEQ Docs
-has_children: true
 ---
 
 # APIリファレンス

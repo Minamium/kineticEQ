@@ -1,7 +1,6 @@
 ---
-title: 基本チュートリアル
+title: Basic Tutorial
 nav_order: 3
-parent: kineticEQ Docs
 ---
 
 # 基本チュートリアル

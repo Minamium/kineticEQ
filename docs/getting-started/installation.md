@@ -1,24 +1,24 @@
 ---
-title: インストール
+title: Installation
+description: kineticEQ Docs - Installation
 nav_order: 2
-parent: kineticEQ Docs
 ---
 
-# インストール
+# Installation
 
-## 必要条件
+## Requirements
 
 - Python >= 3.10
 - PyTorch >= 2.0
 - CUDA Toolkit (GPU使用時)
 
-## pipでインストール
+## pip install
 
 ```bash
 pip install kineticEQ
 ```
 
-## 開発版のインストール
+## Development install
 
 ```bash
 git clone https://github.com/Minamium/kineticEQ.git
@@ -26,10 +26,9 @@ cd kineticEQ
 pip install -e .
 ```
 
-## CUDAカーネルのビルド
+## CUDA kernel build
 
-CUDAカーネルは初回実行時に自動でJITコンパイルされる。
-事前ビルドする場合:
+CUDA kernel is automatically JIT compiled at the first run.
 
 ```bash
 python -c "from kineticEQ.cuda_kernel import compile; compile.compile_all()"
