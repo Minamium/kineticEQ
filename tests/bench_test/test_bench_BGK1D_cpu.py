@@ -10,8 +10,8 @@ def test_bgk1d_benchmark_cpu(bench_type, scheme, backend):
     out = run_benchmark(bench_type=bench_type, scheme=scheme, 
                         backend=backend, device="cpu",
                         use_tqdm="true", log_level="info",
-                        nv_list=[64, 128, 256],
-                        nx_list=[64, 128, 256])
+                        nv_list=[65, 129, 257, 513],
+                        nx_list=[65, 129, 257])
 
     if bench_type == "x_grid" or bench_type == "v_grid":
         plot_benchmark_results(out, out_dir="./results/benchmarks", 

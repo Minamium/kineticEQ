@@ -27,8 +27,8 @@ def test_bgk1d_benchmark_cuda(bench_type, scheme, backend):
                         backend=backend, device="cuda",
                         use_tqdm="true", log_level="info",
                         ini_nx=500,ini_nv=200,
-                        nv_list=[32, 64, 128, 256, 512, 1024],
-                        nx_list=[32, 64, 128, 256])
+                        nv_list=[33, 65, 129, 257, 513, 1025],
+                        nx_list=[33, 65, 129, 257, 513])
 
     if bench_type == "x_grid" or bench_type == "v_grid":
         plot_benchmark_results(out, out_dir="./results/benchmarks", 
