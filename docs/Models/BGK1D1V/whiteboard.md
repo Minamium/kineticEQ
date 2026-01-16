@@ -1,3 +1,9 @@
+---
+title: Whiteboard
+parent: Models
+nav_order: 21
+---
+
 ## Implicit scheme
 
 \begin{equation}
