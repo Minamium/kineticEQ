@@ -1,6 +1,7 @@
 ---
-title: APIリファレンス
-nav_order: 4
+title: kineticEQ.api
+parent: API Reference
+nav_order: 1
 ---
 
 # APIリファレンス

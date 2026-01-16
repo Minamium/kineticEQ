@@ -1,7 +1,7 @@
 ---
 title: Installation
-description: kineticEQ Docs - Installation
-nav_order: 2
+parent: Getting Started
+nav_order: 11
 ---
 
 # Installation
