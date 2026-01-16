@@ -8,9 +8,9 @@ nav_order: 2
 
 ## Requirements
 
-- Python >= 3.10
+- NumPy >= 1.21
 - PyTorch >= 2.0
-- CUDA Toolkit (GPU使用時)
+
 
 ## pip install
 
@@ -24,12 +24,4 @@ pip install kineticEQ
 git clone https://github.com/Minamium/kineticEQ.git
 cd kineticEQ
 pip install -e .
-```
-
-## CUDA kernel build
-
-CUDA kernel is automatically JIT compiled at the first run.
-
-```bash
-python -c "from kineticEQ.cuda_kernel import compile; compile.compile_all()"
 ```
