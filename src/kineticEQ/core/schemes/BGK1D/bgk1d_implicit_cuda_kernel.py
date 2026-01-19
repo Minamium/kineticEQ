@@ -7,6 +7,7 @@ from kineticEQ.core.states.state_1d import State1D1V
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_implicit_ws import ImplicitWorkspace, allocate_implicit_workspace
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_set_initial_condition import set_initial_condition
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_check_CFL import bgk1d_check_CFL
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calculate_moments
 from kineticEQ.cuda_kernel.compile import load_implicit_fused
 from kineticEQ.cuda_kernel.compile import load_gtsv
 import logging
@@ -48,7 +49,7 @@ def step(state: State1D1V, cfg: Config, ws: ImplicitWorkspace, cuda_module, gtsv
         ws.fn_tmp[1:-1, :].copy_(solution.T)
 
         # 残差
-        residual = torch.max(torch.abs(ws.fn_tmp - ws.fz))
+        residual = torch.max(torch.abs(ws.fn_tmp - ws.fz)/torch.abs(ws.fz))
         residual_val = float(residual)
 
         latest = ws.fn_tmp
