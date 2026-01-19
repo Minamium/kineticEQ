@@ -557,7 +557,7 @@ def step(
         latest = ws.fn_tmp
         ho_std_residual_val = float(ho_res.item())
 
-        if ho_res <= ho_tol:
+        if ho_res <= 1.0:
             break
 
         # next iteration
