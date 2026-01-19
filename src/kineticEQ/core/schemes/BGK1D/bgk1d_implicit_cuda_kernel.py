@@ -55,7 +55,7 @@ def step(state: State1D1V, cfg: Config, ws: ImplicitWorkspace, cuda_module, gtsv
         den = abs_tol + picard_tol * ref
 
         residual = torch.max(df / den)
-        residual_val = float(residual)
+        residual_val = float(torch.max(df).item())
 
         latest = ws.fn_tmp
 
