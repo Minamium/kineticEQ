@@ -49,7 +49,7 @@ class Engine:
             apply_logging(self.config)
 
         # info-log
-        logger.info(
+        logger.info("Engine settings:\n"
             "--- kineticEQ-Engine initialize complete ------\n"
             "  model    : %s\n"
             "  scheme   : %s\n"
