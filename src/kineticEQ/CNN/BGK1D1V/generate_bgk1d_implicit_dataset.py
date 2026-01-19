@@ -1,4 +1,4 @@
-# kineticEQ/CNN/BGK1D1V/generate_bgk1d_dataset.py
+# kineticEQ/CNN/BGK1D1V/generate_bgk1d_implicit_dataset.py
 """
 BGK1D1V implicit (cuda_kernel) dataset generator for NN warm-start.
 
@@ -8,7 +8,7 @@ BGK1D1V implicit (cuda_kernel) dataset generator for NN warm-start.
 - 出力：Zarr（1 case = 1 store）
 
 例:
-torchrun --standalone --nproc_per_node=8 src/CNN/generate_bgk1d_implicit_dataset.py \
+torchrun --standalone --nproc_per_node=8 src/CNN/GBK1D1V/generate_bgk1d_implicit_dataset.py \
   --out-dir /path/to/dataset \
   --nx 4096 --nv 256 --lx 1.0 --vmax 10.0 \
   --t-total 0.05 \
