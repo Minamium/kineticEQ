@@ -5,3 +5,4 @@ from dataclasses import dataclass
 class Params:
     picard_iter: int = 16
     picard_tol: float = 1e-4
+    abs_tol: float = 1e-16

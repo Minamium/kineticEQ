@@ -24,6 +24,7 @@ def step(state: State1D1V, cfg: Config, ws: ImplicitWorkspace, cuda_module, gtsv
     # scheme_params から取得
     picard_iter = cfg.model_cfg.scheme_params.picard_iter
     picard_tol = cfg.model_cfg.scheme_params.picard_tol
+    abs_tol = cfg.model_cfg.scheme_params.abs_tol
 
     latest = ws.fz
 
@@ -48,13 +49,17 @@ def step(state: State1D1V, cfg: Config, ws: ImplicitWorkspace, cuda_module, gtsv
         ws.fn_tmp.copy_(ws.fz)
         ws.fn_tmp[1:-1, :].copy_(solution.T)
 
-        # 残差
-        residual = torch.max(torch.abs(ws.fn_tmp - ws.fz)/torch.abs(ws.fz))
+        # 正規化誤差
+        df  = torch.abs(ws.fn_tmp - ws.fz)
+        ref = torch.maximum(torch.abs(ws.fn_tmp), torch.abs(ws.fz))
+        den = abs_tol + picard_tol * ref
+
+        residual = torch.max(df / den)
         residual_val = float(residual)
 
         latest = ws.fn_tmp
 
-        if residual <= picard_tol:
+        if residual <= 1.0:
             break
 
         # 次反復へ
