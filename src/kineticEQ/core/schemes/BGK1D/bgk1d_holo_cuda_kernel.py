@@ -247,7 +247,7 @@ def _LO_calculate_moments_picard(
     lo_iter: int,
     lo_tol: float,
     lo_abs_tol: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float, int]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float, int, float]:
     """
     元クラスの _LO_calculate_moments を、workspace 利用前提で移植。
     3x3 block tridiagonal は CUDA 拡張 lo_blocktridiag に投げる。
@@ -381,8 +381,8 @@ def _LO_calculate_moments_picard(
         diff = torch.abs(ws.W_full - W_m)
         ref  = torch.maximum(torch.abs(ws.W_full), torch.abs(W_m))
         den  = lo_abs_tol + lo_tol * ref
-        lo_residual_val = torch.max(diff)
-        std_lo_residual_val = float(torch.max(diff / den))
+        lo_residual_val = float(torch.max(diff).item())
+        std_lo_residual_val = float(torch.max(diff / den).item())
         W_m.copy_(ws.W_full)
 
         if std_lo_residual_val < 1.0:
