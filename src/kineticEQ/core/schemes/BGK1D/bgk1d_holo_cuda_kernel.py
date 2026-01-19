@@ -246,6 +246,7 @@ def _LO_calculate_moments_picard(
     *,
     lo_iter: int,
     lo_tol: float,
+    lo_abs_tol: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float, int]:
     """
     元クラスの _LO_calculate_moments を、workspace 利用前提で移植。
@@ -378,10 +379,13 @@ def _LO_calculate_moments_picard(
 
         # residual
         diff = torch.abs(ws.W_full - W_m)
-        lo_residual_val = float(torch.max(diff).item())
+        ref  = torch.maximum(torch.abs(ws.W_full), torch.abs(W_m))
+        den  = lo_abs_tol + lo_tol * ref
+        lo_residual_val = torch.max(diff)
+        std_lo_residual_val = float(torch.max(diff / den))
         W_m.copy_(ws.W_full)
 
-        if lo_residual_val < lo_tol:
+        if std_lo_residual_val < 1.0:
             break
 
     # back to (n,u,T,tau)
@@ -401,7 +405,7 @@ def _LO_calculate_moments_picard(
     ws.T_lo.copy_(T_lo)
     ws.tau_lo.copy_(tau_lo)
 
-    return ws.n_lo, ws.u_lo, ws.T_lo, ws.tau_lo, lo_residual_val, lo_iter_done
+    return ws.n_lo, ws.u_lo, ws.T_lo, ws.tau_lo, lo_residual_val, lo_iter_done, std_lo_residual_val
 
 
 # ----------------------------
@@ -430,6 +434,7 @@ def step(
     ho_abs_tol = float(getattr(sp, "ho_abs_tol", 1e-12))
     lo_iter = int(getattr(sp, "lo_iter", 16))
     lo_tol = float(getattr(sp, "lo_tol", 1e-4))
+    lo_abs_tol = float(getattr(sp, "lo_abs_tol", 1e-12))
 
     # flags (元クラスの挙動に合わせるための互換フラグ)
     Con_Terms_do = bool(getattr(sp, "Con_Terms_do", True))
@@ -492,7 +497,7 @@ def step(
         max_YI = float(torch.max(torch.abs(ws.Y_I_terms)).item())
 
         # LO moment solve
-        n_lo, u_lo, T_lo, tau_lo, lo_residual_val, lo_iter_done = _LO_calculate_moments_picard(
+        n_lo, u_lo, T_lo, tau_lo, lo_residual_val, lo_iter_done, std_lo_residual_val = _LO_calculate_moments_picard(
             state, cfg, ws, lo_block_module,
             ws.n_HO, ws.u_HO, ws.T_HO,
             ws.Q_HO,
@@ -500,6 +505,7 @@ def step(
             ws.Y_I_terms,
             lo_iter=lo_iter,
             lo_tol=lo_tol,
+            lo_abs_tol=lo_abs_tol,
         )
 
         # Maxwellian from LO moments
@@ -583,6 +589,7 @@ def step(
         "std_ho_residual": ho_std_residual_val,
         "lo_iter": lo_iter_done,
         "lo_residual": lo_residual_val,
+        "std_lo_residual":std_lo_residual_val,
         "max_YI": max_YI,
     }
     return state, benchlog
