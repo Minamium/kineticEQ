@@ -13,9 +13,9 @@ dependencies = [
   "tqdm",
   "ninja",
   "wheel",
-  "setuptools"
+  "setuptools",
   "zarr",
-  "numcodecs",
+  "numcodecs"
 ]
 
 [project.optional-dependencies]
