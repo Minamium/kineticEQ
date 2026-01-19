@@ -5,6 +5,7 @@ from dataclasses import dataclass
 class Params:
     ho_iter: int = 8
     ho_tol: float = 1e-4
+    ho_abs_tol: float = 1e-12
     lo_iter: int = 16
     lo_tol: float = 1e-4
     Con_Terms_do: bool = True

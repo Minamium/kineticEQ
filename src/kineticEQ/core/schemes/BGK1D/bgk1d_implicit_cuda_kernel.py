@@ -56,6 +56,7 @@ def step(state: State1D1V, cfg: Config, ws: ImplicitWorkspace, cuda_module, gtsv
 
         residual = torch.max(df / den)
         residual_val = float(torch.max(df).item())
+        std_residual_val = float(residual.item())
 
         latest = ws.fn_tmp
 
@@ -82,6 +83,7 @@ def step(state: State1D1V, cfg: Config, ws: ImplicitWorkspace, cuda_module, gtsv
     benchlog = {
         "picard_iter": z + 1,
         "picard_residual": residual_val,
+        "std_picard_residual": std_residual_val,
     }
 
     return state, benchlog

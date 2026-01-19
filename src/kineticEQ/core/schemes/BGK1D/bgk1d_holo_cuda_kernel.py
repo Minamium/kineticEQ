@@ -427,6 +427,7 @@ def step(
 
     ho_iter = int(getattr(sp, "ho_iter", 8))
     ho_tol = float(getattr(sp, "ho_tol", 1e-4))
+    ho_abs_tol = float(getattr(sp, "ho_abs_tol", 1e-12))
     lo_iter = int(getattr(sp, "lo_iter", 16))
     lo_tol = float(getattr(sp, "lo_tol", 1e-4))
 
@@ -546,9 +547,15 @@ def step(
         ws.fn_tmp[1:-1, :].copy_(solution.T)
 
         # residual & convergence
-        ho_res = torch.max(torch.abs(ws.fn_tmp - ws.fz))
-        ho_residual_val = float(ho_res.item())
+        df  = torch.abs(ws.fn_tmp - ws.fz)
+        ref = torch.maximum(torch.abs(ws.fn_tmp), torch.abs(ws.fz))
+        den = ho_abs_tol + ho_tol * ref
+
+        
+        ho_res = torch.max(df / den)
+        ho_residual_val = float(torch.max(df).item())
         latest = ws.fn_tmp
+        ho_std_residual_val = float(ho_res.item())
 
         if ho_res <= ho_tol:
             break
@@ -573,6 +580,7 @@ def step(
     benchlog = {
         "ho_iter": z + 1,
         "ho_residual": ho_residual_val,
+        "std_ho_residual": ho_std_residual_val,
         "lo_iter": lo_iter_done,
         "lo_residual": lo_residual_val,
         "max_YI": max_YI,
