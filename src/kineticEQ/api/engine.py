@@ -105,7 +105,7 @@ class Engine:
                     # benchlog表示(Noneなら弾く)
                     benchlog = getattr(self.stepper, "benchlog", None)
                     if benchlog:
-                        pbar.write(format_kv_block(benchlog))
+                        logger.info(pbar.write(format_kv_block(benchlog)))
 
                 # ============loop body===========
                 pbar.update(1)
