@@ -32,7 +32,7 @@ def main():
     # 計算負荷の分散
     g = torch.Generator()
     g.manual_seed(0)  # 全rankで同じ
-    all_cases = torch.randperm(100, generator=g).tolist()
+    all_cases = torch.randperm(1000, generator=g).tolist()
     my_cases = all_cases[rank::world_size]
 
     for case_id in my_cases:
