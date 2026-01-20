@@ -61,7 +61,7 @@ def main():
             maker.stepper(steps)
 
             # calculate moments
-            moments = calculate_moments(maker.state.f)
+            moments = calculate_moments(maker.state, maker.state.f)
 
     # 同期
     if is_dist:
