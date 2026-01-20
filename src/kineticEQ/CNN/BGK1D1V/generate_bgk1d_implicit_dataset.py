@@ -24,7 +24,7 @@ def main():
     is_dist, rank, local_rank, world_size, device = setup_dist()
 
     # 例：処理したいケース一覧（dt,tau,init など）
-    all_cases = list(range(8))
+    all_cases = list(range(16))
 
     # rank で仕事分割（ストライド）
     my_cases = all_cases[rank::world_size]
@@ -48,7 +48,7 @@ def main():
         model_cfg = BGK1D.ModelConfig(
             grid=BGK1D.Grid1D1V(nx=512, nv=256, Lx=1.0, v_max=10.0),
             time=BGK1D.TimeConfig(dt=5e-5, T_total=0.05),
-            params=BGK1D.BGK1D1VParams(tau_tilde=(5e-6 + case_id*10)),
+            params=BGK1D.BGK1D1VParams(tau_tilde=(5e-6 + case_id*1e-6)),
             scheme_params=BGK1D.implicit.Params(picard_iter=1_000, picard_tol=1e-6, abs_tol=1e-13),
             initial=BGK1D.InitialCondition1D(initial_regions=(
                 {"x_range": (0.0, 0.5), "n": 0.1 , "u": 0.0, "T":  0.5},
