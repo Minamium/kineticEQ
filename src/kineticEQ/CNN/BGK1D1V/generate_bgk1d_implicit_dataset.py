@@ -4,6 +4,7 @@ import os
 import torch
 import torch.distributed as dist
 from kineticEQ import Engine, Config, BGK1D
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calculate_moments
 from kineticEQ.plotting.bgk1d import plot_state
 
 def setup_dist():
@@ -23,27 +24,18 @@ def setup_dist():
 def main():
     is_dist, rank, local_rank, world_size, device = setup_dist()
 
-    # 例：処理したいケース一覧（dt,tau,init など）
-    all_cases = list(range(100))
-
-    # rank で仕事分割（ストライド）
-    my_cases = all_cases[rank::world_size]
-
-    # 出力は rank ごとに分ける（衝突防止）
-    out_dir = f"mgpu_output/shard_rank{rank:03d}"
+    # 出力ディレクトリ作成
+    out_dir = f"mgpu_output/shard_rank{rank:02d}"
     os.makedirs(out_dir, exist_ok=True)
 
-    # 乱数 seed（rank ごとにずらす：重複回避）
-    base_seed = 1234
-    torch.manual_seed(base_seed + rank)
-    torch.cuda.manual_seed_all(base_seed + rank)
+    # 計算負荷の分散
+    g = torch.Generator()
+    g.manual_seed(0)  # 全rankで同じ
+    all_cases = torch.randperm(100, generator=g).tolist()
+    my_cases = all_cases[rank::world_size]
 
     for case_id in my_cases:
-        # --- ここに kineticEQ の 1ケース生成を入れる ---
-        # engine = Engine(cfg_for(case_id), ...)
-        # for step in range(n_steps): engine.stepper(step)
-        # W = compute_moments(...) など
-        # save(out_dir, case_id, data)
+        # ケースごとのパラメータ設定
         print(f"Rank {rank}: Processing case {case_id}")
         model_cfg = BGK1D.ModelConfig(
             grid=BGK1D.Grid1D1V(nx=512, nv=256, Lx=1.0, v_max=10.0),
@@ -63,11 +55,15 @@ def main():
                               model_cfg=model_cfg,
                               log_level="err",
                               use_tqdm=False))
-        maker.run()
-        plot_state(state=maker.state, output_dir=out_dir, 
-                   filename=f"case_{model_cfg.params.tau_tilde:.6f}.png")
+        
+        # ステッパーを叩いて学習データを得る
+        for steps in range(model_cfg.time.n_steps):
+            maker.stepper(steps)
 
-    # 必要なら同期（任意）
+            # calculate moments
+            moments = calculate_moments(maker.state.f)
+
+    # 同期
     if is_dist:
         dist.barrier(device_ids=[local_rank])
         dist.destroy_process_group()
