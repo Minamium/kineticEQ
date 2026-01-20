@@ -23,13 +23,13 @@ def main():
     is_dist, rank, local_rank, world_size, device = setup_dist()
 
     # 例：処理したいケース一覧（dt,tau,init など）
-    all_cases = list(range(20))
+    all_cases = list(range(8))
 
     # rank で仕事分割（ストライド）
     my_cases = all_cases[rank::world_size]
 
     # 出力は rank ごとに分ける（衝突防止）
-    out_dir = f"out/shard_rank{rank:03d}"
+    out_dir = f"mgpu_output/shard_rank{rank:03d}"
     os.makedirs(out_dir, exist_ok=True)
 
     # 乱数 seed（rank ごとにずらす：重複回避）
@@ -44,7 +44,19 @@ def main():
         # W = compute_moments(...) など
         # save(out_dir, case_id, data)
         print(f"Rank {rank}: Processing case {case_id}")
-        maker = Engine(Config(model="BGK1D1V", model_cfg=BGK1D.TimeConfig(T_total=0.001)))
+        model_cfg = BGK1D.ModelConfig(
+            grid=BGK1D.Grid1D1V(nx=512, nv=256, Lx=1.0, v_max=10.0),
+            time=BGK1D.TimeConfig(dt=5e-5, T_total=5e-4),
+            params=BGK1D.BGK1D1VParams(tau_tilde=5e-3 * case_id),
+            initial=BGK1D.InitialCondition1D(initial_regions=(
+                {"x_range": (0.0, 0.5), "n": 0.1 , "u": 0.0, "T":  0.5},
+                {"x_range": (0.5, 1.0), "n": 0.01, "u": 0.0, "T":  0.1},
+                )
+            )
+        )
+        maker = Engine(Config(model="BGK1D1V", 
+                              scheme="explicit",
+                              model_cfg=model_cfg))
         maker.run()
 
     # 必要なら同期（任意）
