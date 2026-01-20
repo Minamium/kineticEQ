@@ -100,12 +100,12 @@ class Engine:
                 progress_interval = max(1, self.config.model_cfg.time.n_steps // 10)
                 if steps % progress_interval == 0:
                     current_time = steps * self.config.model_cfg.time.dt
-                    pbar.set_postfix_str(f"t={current_time:.3f}")
                     
                     # benchlog表示(Noneなら弾く)
                     benchlog = getattr(self.stepper, "benchlog", None)
                     if benchlog and logger.isEnabledFor(logging.INFO):
                         pbar.write(format_kv_block(benchlog))
+                        pbar.write(f"t={current_time:.3f}")
 
                 # ============loop body===========
                 pbar.update(1)
