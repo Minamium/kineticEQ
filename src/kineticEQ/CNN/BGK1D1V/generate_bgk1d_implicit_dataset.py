@@ -47,9 +47,9 @@ def main():
         print(f"Rank {rank}: Processing case {case_id}")
         model_cfg = BGK1D.ModelConfig(
             grid=BGK1D.Grid1D1V(nx=512, nv=256, Lx=1.0, v_max=10.0),
-            time=BGK1D.TimeConfig(dt=5e-5, T_total=5e-3),
-            params=BGK1D.BGK1D1VParams(tau_tilde=5e-3 * (case_id + 1)),
-            scheme_params=BGK1D.implicit.Params(picard_iter=100_000, picard_tol=1e-6, abs_tol=1e-13),
+            time=BGK1D.TimeConfig(dt=5e-5, T_total=0.05),
+            params=BGK1D.BGK1D1VParams(tau_tilde=(5e-6 + case_id*10)),
+            scheme_params=BGK1D.implicit.Params(picard_iter=1_000, picard_tol=1e-6, abs_tol=1e-13),
             initial=BGK1D.InitialCondition1D(initial_regions=(
                 {"x_range": (0.0, 0.5), "n": 0.1 , "u": 0.0, "T":  0.5},
                 {"x_range": (0.5, 1.0), "n": 0.01, "u": 0.0, "T":  0.1},
