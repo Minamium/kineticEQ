@@ -16,9 +16,14 @@ Stepper = Callable[[int], None]
 
 @torch.no_grad()
 def step(state: State1D1V, cfg: Config, ws: ImplicitWorkspace, cuda_module, gtsv_module, num_steps: int) -> tuple[State1D1V, dict]:
-    # 初期候補：前ステップ
-    ws.fz.copy_(state.f)
-    swapped_last = False
+    # 初期候補：前ステップを参照, 外部フックがあればそちらを優先
+    init_fz = getattr(ws, "_init_fz", None)
+    if init_fz is None:
+        ws.fz.copy_(state.f)
+    else:
+        ws.fz.copy_(init_fz)   # shape (nx, nv)
+        ws._init_fz = None
+
     residual_val = float('inf')
 
     # scheme_params から取得
@@ -107,4 +112,5 @@ def build_stepper(cfg: Config, state: State1D1V) -> Stepper:
         _stepper.benchlog = benchlog  # bench-logを属性として載せる
 
     _stepper.benchlog = None  # 初期値
+    _stepper.ws = ws 
     return _stepper
