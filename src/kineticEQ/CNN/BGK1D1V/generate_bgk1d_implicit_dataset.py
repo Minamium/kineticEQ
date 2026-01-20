@@ -4,6 +4,7 @@ import os
 import torch
 import torch.distributed as dist
 from kineticEQ import Engine, Config, BGK1D
+from kineticEQ.plotting.bgk1d import plot_state
 
 def setup_dist():
     # torchrun起動の環境変数をキャッチ
@@ -46,8 +47,8 @@ def main():
         print(f"Rank {rank}: Processing case {case_id}")
         model_cfg = BGK1D.ModelConfig(
             grid=BGK1D.Grid1D1V(nx=512, nv=256, Lx=1.0, v_max=10.0),
-            time=BGK1D.TimeConfig(dt=5e-5, T_total=5e-4),
-            params=BGK1D.BGK1D1VParams(tau_tilde=5e-3 * case_id),
+            time=BGK1D.TimeConfig(dt=5e-5, T_total=5e-3),
+            params=BGK1D.BGK1D1VParams(tau_tilde=5e-3 * (case_id + 1)),
             initial=BGK1D.InitialCondition1D(initial_regions=(
                 {"x_range": (0.0, 0.5), "n": 0.1 , "u": 0.0, "T":  0.5},
                 {"x_range": (0.5, 1.0), "n": 0.01, "u": 0.0, "T":  0.1},
@@ -56,8 +57,11 @@ def main():
         )
         maker = Engine(Config(model="BGK1D1V", 
                               scheme="explicit",
+                              backend="cuda_kernel",
                               model_cfg=model_cfg))
         maker.run()
+        plot_state(state=maker.state, output_dir=out_dir, 
+                   filename=f"case_{model_cfg.params.tau_tilde:.6f}.png")
 
     # 必要なら同期（任意）
     if is_dist:
