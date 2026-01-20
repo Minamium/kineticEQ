@@ -1,11 +1,12 @@
 # kineticEQ/CNN/BGK1D1V/generate_bgk1d_implicit_dataset.py
 
 import os
+import json
 import torch
 import torch.distributed as dist
 from kineticEQ import Engine, Config, BGK1D
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calculate_moments
-from kineticEQ.plotting.bgk1d import plot_state
+import numpy as np
 
 def setup_dist():
     # torchrun起動の環境変数をキャッチ
@@ -36,7 +37,6 @@ def main():
 
     for case_id in my_cases:
         # ケースごとのパラメータ設定
-        print(f"Rank {rank}: Processing case {case_id}")
         model_cfg = BGK1D.ModelConfig(
             grid=BGK1D.Grid1D1V(nx=512, nv=256, Lx=1.0, v_max=10.0),
             time=BGK1D.TimeConfig(dt=5e-5, T_total=0.05),
@@ -46,7 +46,6 @@ def main():
                 {"x_range": (0.0, 0.5), "n": 1.0,   "u": 0.0, "T": 1.0},
                 {"x_range": (0.5, 1.0), "n": 0.125, "u": 0.0, "T": 0.8},
                 )
-            
             )
         )
         maker = Engine(Config(model="BGK1D1V", 
@@ -55,6 +54,11 @@ def main():
                               model_cfg=model_cfg,
                               log_level="err",
                               use_tqdm=False))
+
+        print(f"Rank {rank}: Processing case {case_id}, tau_tilde: {model_cfg.params.tau_tilde}")
+
+        # モーメントを格納するリスト
+        data = []
         
         # ステッパーを叩いて学習データを得る
         for steps in range(model_cfg.time.n_steps):
@@ -62,6 +66,28 @@ def main():
 
             # calculate moments
             moments = calculate_moments(maker.state, maker.state.f)
+            data.append(moments)
+
+        # metaデータ記録
+        meta = dict(
+            nx=model_cfg.grid.nx,
+            nv=model_cfg.grid.nv,
+            Lx=model_cfg.grid.Lx,
+            v_max=model_cfg.grid.v_max,
+            dt=float(model_cfg.time.dt),
+            T_total=float(model_cfg.time.T_total),
+            tau_tilde=float(model_cfg.params.tau_tilde),
+            scheme="implicit",
+            backend="cuda_kernel",
+            case_id=int(case_id),
+        )
+
+        # npz形式でモーメントを記録
+        np.savez(
+            os.path.join(out_dir, f"case_{case_id:03d}.npz"),
+            meta=json.dumps(meta),
+            data=data,
+        )
 
     # 同期
     if is_dist:
