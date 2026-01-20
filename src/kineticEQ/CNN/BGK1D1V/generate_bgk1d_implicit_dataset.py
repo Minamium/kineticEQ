@@ -65,8 +65,8 @@ def main():
             maker.stepper(steps)
 
             # calculate moments
-            moments = calculate_moments(maker.state, maker.state.f)
-            data.append(moments)
+            n, u, T = calculate_moments(maker.state, maker.state.f)
+            data.append((n.cpu().item(), u.cpu().item(), T.cpu().item()))
 
         # metaデータ記録
         meta = dict(
