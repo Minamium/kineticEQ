@@ -559,7 +559,7 @@ def step(
 
         
         ho_res = torch.max(df / den)
-        ho_residual_val = float(torch.max(df).item())
+        ho_residual_val = float((torch.max(df) / torch.max(ref)).item())
         latest = ws.fn_tmp
         ho_std_residual_val = float(ho_res.item())
 
