@@ -3,6 +3,7 @@
 import os
 import torch
 import torch.distributed as dist
+from kineticEQ import Engine, Config, BGK1D
 
 def setup_dist():
     # torchrun起動の環境変数をキャッチ
@@ -22,7 +23,7 @@ def main():
     is_dist, rank, local_rank, world_size, device = setup_dist()
 
     # 例：処理したいケース一覧（dt,tau,init など）
-    all_cases = list(range(1000))
+    all_cases = list(range(20))
 
     # rank で仕事分割（ストライド）
     my_cases = all_cases[rank::world_size]
@@ -43,6 +44,8 @@ def main():
         # W = compute_moments(...) など
         # save(out_dir, case_id, data)
         print(f"Rank {rank}: Processing case {case_id}")
+        maker = Engine(Config(model="BGK1D1V", model_cfg=BGK1D.TimeConfig(T_total=0.001)))
+        maker.run()
 
     # 必要なら同期（任意）
     if is_dist:
