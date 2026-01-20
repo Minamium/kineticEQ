@@ -37,10 +37,13 @@ def main():
 
     for case_id in my_cases:
         # ケースごとのパラメータ設定
+        tau = float(5e-6 * (case_id + 1) * 10.0)
+
+        # モデル設定
         model_cfg = BGK1D.ModelConfig(
             grid=BGK1D.Grid1D1V(nx=512, nv=256, Lx=1.0, v_max=10.0),
             time=BGK1D.TimeConfig(dt=5e-5, T_total=0.05),
-            params=BGK1D.BGK1D1VParams(tau_tilde=(5e-6*(case_id+1)*10)),
+            params=BGK1D.BGK1D1VParams(tau_tilde=tau),
             scheme_params=BGK1D.implicit.Params(picard_iter=1_000, picard_tol=1e-6, abs_tol=1e-13),
             initial=BGK1D.InitialCondition1D(initial_regions=(
                 {"x_range": (0.0, 0.5), "n": 1.0,   "u": 0.0, "T": 1.0},
@@ -55,39 +58,58 @@ def main():
                               log_level="err",
                               use_tqdm=False))
 
-        print(f"Rank {rank}: Processing case {case_id}, tau_tilde: {model_cfg.params.tau_tilde}")
+        n_steps = model_cfg.time.n_steps
+        nx = model_cfg.grid.nx
 
-        # モーメントを格納するリスト
-        data = []
-        
-        # ステッパーを叩いて学習データを得る
-        for steps in range(model_cfg.time.n_steps):
-            maker.stepper(steps)
+        # 事前確保： (n_steps+1, nx)
+        n_hist = np.empty((n_steps + 1, nx), dtype=np.float32)
+        u_hist = np.empty((n_steps + 1, nx), dtype=np.float32)
+        T_hist = np.empty((n_steps + 1, nx), dtype=np.float32)
 
-            # calculate moments
+        picard_iter_hist = np.empty((n_steps + 1,), dtype=np.int16)
+        std_resid_hist   = np.empty((n_steps + 1,), dtype=np.float32)
+
+        # t=0 記録
+        with torch.no_grad():
             n, u, T = calculate_moments(maker.state, maker.state.f)
-            data.append((n.cpu().item(), u.cpu().item(), T.cpu().item()))
+        n_hist[0] = n.detach().cpu().float().numpy()
+        u_hist[0] = u.detach().cpu().float().numpy()
+        T_hist[0] = T.detach().cpu().float().numpy()
+        picard_iter_hist[0] = 0
+        std_resid_hist[0] = 0.0
 
-        # metaデータ記録
+        # evolve
+        for step in range(n_steps):
+            maker.stepper(step)
+            bench = getattr(maker.stepper, "benchlog", None) or {}
+
+            with torch.no_grad():
+                n, u, T = calculate_moments(maker.state, maker.state.f)
+
+            n_hist[step + 1] = n.detach().cpu().float().numpy()
+            u_hist[step + 1] = u.detach().cpu().float().numpy()
+            T_hist[step + 1] = T.detach().cpu().float().numpy()
+
+            picard_iter_hist[step + 1] = int(bench.get("picard_iter", -1))
+            std_resid_hist[step + 1]   = float(bench.get("std_picard_residual", np.nan))
+
         meta = dict(
-            nx=model_cfg.grid.nx,
-            nv=model_cfg.grid.nv,
-            Lx=model_cfg.grid.Lx,
-            v_max=model_cfg.grid.v_max,
-            dt=float(model_cfg.time.dt),
-            T_total=float(model_cfg.time.T_total),
+            nx=nx, nv=model_cfg.grid.nv, Lx=model_cfg.grid.Lx, v_max=model_cfg.grid.v_max,
+            dt=float(model_cfg.time.dt), T_total=float(model_cfg.time.T_total),
             tau_tilde=float(model_cfg.params.tau_tilde),
-            scheme="implicit",
-            backend="cuda_kernel",
-            case_id=int(case_id),
+            scheme="implicit", backend="cuda_kernel",
+            case_id=int(case_id), rank=int(rank),
         )
 
-        # npz形式でモーメントを記録
-        np.savez(
+        np.savez_compressed(
             os.path.join(out_dir, f"case_{case_id:03d}.npz"),
-            meta=json.dumps(meta),
-            data=data,
+            meta=np.string_(json.dumps(meta)),
+            n=n_hist, u=u_hist, T=T_hist,
+            picard_iter=picard_iter_hist,
+            std_picard_residual=std_resid_hist,
         )
+
+        print(f"Rank {rank}: saved case {case_id} tau={tau:.3e}", flush=True)
 
     # 同期
     if is_dist:
