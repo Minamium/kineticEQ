@@ -49,23 +49,27 @@ def main():
             grid=BGK1D.Grid1D1V(nx=512, nv=256, Lx=1.0, v_max=10.0),
             time=BGK1D.TimeConfig(dt=5e-5, T_total=5e-3),
             params=BGK1D.BGK1D1VParams(tau_tilde=5e-3 * (case_id + 1)),
+            scheme_params=BGK1D.implicit.Params(picard_iter=100_000, picard_tol=1e-6, abs_tol=1e-13),
             initial=BGK1D.InitialCondition1D(initial_regions=(
                 {"x_range": (0.0, 0.5), "n": 0.1 , "u": 0.0, "T":  0.5},
                 {"x_range": (0.5, 1.0), "n": 0.01, "u": 0.0, "T":  0.1},
                 )
+            
             )
         )
         maker = Engine(Config(model="BGK1D1V", 
-                              scheme="explicit",
+                              scheme="implicit",
                               backend="cuda_kernel",
-                              model_cfg=model_cfg))
+                              model_cfg=model_cfg,
+                              log_level="err",
+                              use_tqdm=False))
         maker.run()
         plot_state(state=maker.state, output_dir=out_dir, 
                    filename=f"case_{model_cfg.params.tau_tilde:.6f}.png")
 
     # 必要なら同期（任意）
     if is_dist:
-        dist.barrier()
+        dist.barrier(device_ids=[local_rank])
         dist.destroy_process_group()
 
 if __name__ == "__main__":
