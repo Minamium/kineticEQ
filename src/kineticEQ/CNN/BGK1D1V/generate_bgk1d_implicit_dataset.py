@@ -42,8 +42,7 @@ def main():
         # for step in range(n_steps): engine.stepper(step)
         # W = compute_moments(...) など
         # save(out_dir, case_id, data)
-
-        pass
+        print(f"Rank {rank}: Processing case {case_id}")
 
     # 必要なら同期（任意）
     if is_dist:
