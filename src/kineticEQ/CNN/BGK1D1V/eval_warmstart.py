@@ -132,8 +132,8 @@ def run_case_baseline(eng: Engine, n_steps: int) -> dict:
 
 def run_case_warmstart(eng: Engine, model: torch.nn.Module, n_steps: int) -> dict:
     iters = []
-    dt = float(eng.cfg.model_cfg.time.dt)
-    tau = float(eng.cfg.model_cfg.params.tau_tilde)
+    dt = float(cfg.model_cfg.time.dt)
+    tau = float(cfg.model_cfg.params.tau_tilde)
 
     t0 = time.perf_counter()
     for s in range(n_steps):
@@ -211,7 +211,7 @@ def main():
 
     # Run
     base = run_case_baseline(eng0, n_steps=args.n_steps)
-    warm = run_case_warmstart(eng1, model=model, n_steps=args.n_steps)
+    warm = run_case_warmstart(eng1, cfg=cfg1, model=model, n_steps=args.n_steps)
 
     base_sum = summarize(base["picard_iter"])
     warm_sum = summarize(warm["picard_iter"])
