@@ -22,7 +22,7 @@ from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calcu
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_maxwellian import maxwellian
 
 
-class MomentCNN1D(torchnn.Module):
+class MomentCNN1D(torch.nn.Module):
     """
     Simple Conv1d network:
       input:  (B, 5, nx)  [n,u,T,logdt,logtau]
