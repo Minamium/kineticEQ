@@ -22,24 +22,24 @@ from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calcu
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_maxwellian import maxwellian
 
 
-class MomentCNN1D(torch.nn.Module):
+class MomentCNN1D(nn.Module):
     """
-    Same structure as train_moment_cnn.py:
-      Conv1d(in_ch -> hidden, k, padding=k//2)
-      GELU
-      Conv1d(hidden -> hidden, k, padding=k//2)
-      GELU
-      Conv1d(hidden -> out_ch, 1)
+    Simple Conv1d network:
+      input:  (B, 5, nx)  [n,u,T,logdt,logtau]
+      output: (B, 3, nx)  [n_next,u_next,T_next]
+
+    Note:
+    - This is a baseline. Later you can add residual blocks / normalization.
     """
-    def __init__(self, in_ch: int = 5, out_ch: int = 3, hidden: int = 64, kernel: int = 5):
+    def __init__(self, ch_in: int = 5, ch_hidden: int = 64, ch_out: int = 3, kernel: int = 5) -> None:
         super().__init__()
         pad = kernel // 2
-        self.net = torch.nn.Sequential(
-            torch.nn.Conv1d(in_ch, hidden, kernel, padding=pad),
-            torch.nn.GELU(),
-            torch.nn.Conv1d(hidden, hidden, kernel, padding=pad),
-            torch.nn.GELU(),
-            torch.nn.Conv1d(hidden, out_ch, 1),
+        self.net = nn.Sequential(
+            nn.Conv1d(ch_in, ch_hidden, kernel_size=kernel, padding=pad),
+            nn.SiLU(),
+            nn.Conv1d(ch_hidden, ch_hidden, kernel_size=kernel, padding=pad),
+            nn.SiLU(),
+            nn.Conv1d(ch_hidden, ch_out, kernel_size=1, padding=0),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
