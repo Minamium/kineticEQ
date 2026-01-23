@@ -22,7 +22,7 @@ from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calcu
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_maxwellian import maxwellian
 
 
-class MomentCNN1D(nn.Module):
+class MomentCNN1D(torchnn.Module):
     """
     Simple Conv1d network:
       input:  (B, 5, nx)  [n,u,T,logdt,logtau]
@@ -34,12 +34,12 @@ class MomentCNN1D(nn.Module):
     def __init__(self, ch_in: int = 5, ch_hidden: int = 64, ch_out: int = 3, kernel: int = 5) -> None:
         super().__init__()
         pad = kernel // 2
-        self.net = nn.Sequential(
-            nn.Conv1d(ch_in, ch_hidden, kernel_size=kernel, padding=pad),
-            nn.SiLU(),
-            nn.Conv1d(ch_hidden, ch_hidden, kernel_size=kernel, padding=pad),
-            nn.SiLU(),
-            nn.Conv1d(ch_hidden, ch_out, kernel_size=1, padding=0),
+        self.net = torch.nn.Sequential(
+            torch.nn.Conv1d(ch_in, ch_hidden, kernel_size=kernel, padding=pad),
+            torch.nn.SiLU(),
+            torch.nn.Conv1d(ch_hidden, ch_hidden, kernel_size=kernel, padding=pad),
+            torch.nn.SiLU(),
+            torch.nn.Conv1d(ch_hidden, ch_out, kernel_size=1, padding=0),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
