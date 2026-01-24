@@ -89,7 +89,7 @@ def main():
 
     # ---- knobs for scaled loss ----
     ap.add_argument("--u_eps", type=float, default=5e-2, help="dm scale uses |u0|+u_eps (prevents collapse at u0~0)")
-    ap.add_argument("--s_min", type=float, default=1e-3, help="minimum scale clamp to avoid exploding normalized residuals")
+    ap.add_argument("--s_min", type=float, default=1e-2, help="minimum scale clamp to avoid exploding normalized residuals")
     ap.add_argument("--grad_clip", type=float, default=1.0, help="clip grad-norm (0 disables)")
 
     ap.add_argument("--sched_plateau", action="store_true")
@@ -172,7 +172,7 @@ def main():
             with torch.amp.autocast("cuda", enabled=use_amp):
                 pred = model(x)
                 loss = loss_scaled_dnu(
-                    pred, y, x,
+                    pred.float(), y.float(), x.float(),
                     eps=1e-6,
                     u_eps=float(args.u_eps),
                     s_min=float(args.s_min),
