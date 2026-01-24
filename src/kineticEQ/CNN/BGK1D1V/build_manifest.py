@@ -97,7 +97,7 @@ def build_manifest(
             n_steps = _infer_nsteps(p)
 
             rec = {
-                "path": str(p.as_posix()),
+                "path": str(p.relative_to(data_root).as_posix()),
                 "case_id": int(meta["case_id"]),
                 "dt": float(meta["dt"]),
                 "tau_tilde": float(meta["tau_tilde"]),
