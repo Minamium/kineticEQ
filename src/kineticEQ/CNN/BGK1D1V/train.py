@@ -117,7 +117,7 @@ def main():
     save_json(save_dir / "config.json", vars(args))
 
     # ---- model/optim ----
-    model = MomentCNN1D(in_ch=5, hidden=512, out_ch=3, kernel=11, n_blocks=5).to(device)
+    model = MomentCNN1D(in_ch=5, hidden=256, out_ch=3, kernel=11, n_blocks=5).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     scheduler = None
