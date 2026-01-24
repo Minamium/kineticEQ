@@ -39,6 +39,8 @@ def main():
     args = ap.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        print(f"Device_name: {torch.cuda.get_device_name(0)}")
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
