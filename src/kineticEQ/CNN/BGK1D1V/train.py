@@ -71,6 +71,7 @@ def main():
     # ---- model/optim ----
     model = MomentCNN1D(in_ch=5, hidden=128, out_ch=3, kernel=11, n_blocks=4).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    loss_fn = F.smooth_l1_loss
 
     # AMP (new API; warning-free)
     use_amp = (args.amp and device.type == "cuda")
@@ -113,7 +114,7 @@ def main():
 
             with torch.amp.autocast("cuda", enabled=use_amp):
                 pred = model(x)
-                loss = F.mse_loss(pred, y)
+                loss = loss_fn(pred, y)
 
             scaler.scale(loss).backward()
             scaler.step(opt)
@@ -166,7 +167,7 @@ def main():
                 y = y.to(device, non_blocking=True)
                 with torch.amp.autocast("cuda", enabled=use_amp):
                     pred = model(x)
-                    loss = F.mse_loss(pred, y)
+                    loss = loss_fn(pred, y)
 
                 bs = x.size(0)
                 va_loss_sum += float(loss.item()) * bs
