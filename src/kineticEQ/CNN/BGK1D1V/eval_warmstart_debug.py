@@ -150,6 +150,10 @@ def _maxwellian_from_nuT(state, n: torch.Tensor, u: torch.Tensor, T: torch.Tenso
 def build_fz_from_moments(state,
                           n1: torch.Tensor, u1: torch.Tensor, T1: torch.Tensor,
                           n_floor: float = 1e-12, T_floor: float = 1e-12) -> torch.Tensor:
+    """
+    Build Maxwellian fz from moments (with boundary overwrite).
+    Note: boundary overwrite intentionally breaks exact moment reproduction.
+    """
     if (not torch.isfinite(n1).all()) or (not torch.isfinite(u1).all()) or (not torch.isfinite(T1).all()):
         return state.f.clone()
 
@@ -199,6 +203,17 @@ def _rel_err(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-30) -> dict:
     return {"l2": float(l2.detach().cpu()), "linf": float(linf.detach().cpu())}
 
 
+def _abs_stats(x: torch.Tensor) -> dict:
+    """
+    absolute scale statistics (abs max / abs mean)
+    """
+    ax = torch.abs(x)
+    return {
+        "abs_max": float(torch.max(ax).detach().cpu()),
+        "abs_mean": float(torch.mean(ax).detach().cpu()),
+    }
+
+
 @torch.no_grad()
 def run_case_debug(cfg: Config,
                    model: MomentCNN1D,
@@ -211,6 +226,12 @@ def run_case_debug(cfg: Config,
     """
     baseline と warmstart を並走し、stepごとの誤差を観測。
     debug_steps: 先頭何stepだけ詳細ログを残すか
+
+    修正点:
+      - mix前の fz_pure を保持し、再構築誤差は fz_pure で評価
+      - 再構築誤差は内点(1:-1)でも評価（境界上書きの影響を除く）
+      - 真のΔW（baselineの n1_b-n0_b 等）もログ
+      - u の絶対スケール（真値/予測）もログ
     """
     torch.set_default_device(device)
 
@@ -241,15 +262,16 @@ def run_case_debug(cfg: Config,
         # --- predict using baseline state moments (公平：同じ入力を使う)
         n1p, u1p, T1p, dn, du, dT = predict_next_moments_delta(model, n0_b, u0_b, T0_b, logdt, logtau)
 
-        # build warmstart fz from predicted moments on warm engine state
-        # 注：初期条件は同じなので state構造は同等。momentsは baseline側から供給。
-        fz_pred = build_fz_from_moments(eng_warm.state, n1p, u1p, T1p, n_floor=n_floor, T_floor=T_floor)
+        # --- build warmstart fz: keep pure Maxwellian (with boundary overwrite) separately
+        fz_pure = build_fz_from_moments(eng_warm.state, n1p, u1p, T1p, n_floor=n_floor, T_floor=T_floor)
 
+        # --- the actually used init fz (after optional mixing)
+        fz_used = fz_pure
         if mix_alpha < 1.0:
             a = float(mix_alpha)
-            fz_pred = a * fz_pred + (1.0 - a) * eng_warm.state.f
+            fz_used = a * fz_pure + (1.0 - a) * eng_warm.state.f
 
-        ws._init_fz = fz_pred
+        ws._init_fz = fz_used
 
         # --- step both
         eng_base.stepper(s)
@@ -278,12 +300,29 @@ def run_case_debug(cfg: Config,
                 "T": _rel_err(T1_b, T1p),
             }
 
-            # (ii) discretization check: moments of constructed fz_pred vs the (n1p,u1p,T1p)
-            n_fz, u_fz, T_fz = calculate_moments(eng_warm.state, fz_pred)
-            fz_moment_err = {
+            # (ii-a) discretization check: moments of constructed PURE fz vs (n1p,u1p,T1p)
+            # Full-domain (includes boundary overwrite)
+            n_fz, u_fz, T_fz = calculate_moments(eng_warm.state, fz_pure)
+            fz_moment_err_full = {
                 "n": _rel_err(n1p, n_fz),
                 "u": _rel_err(u1p, u_fz),
                 "T": _rel_err(T1p, T_fz),
+            }
+
+            # (ii-b) interior-only reproduction (exclude boundary cells)
+            # NOTE: This is the meaningful metric when boundary overwrite is a "spec".
+            fz_moment_err_interior = {
+                "n": _rel_err(n1p[1:-1], n_fz[1:-1]),
+                "u": _rel_err(u1p[1:-1], u_fz[1:-1]),
+                "T": _rel_err(T1p[1:-1], T_fz[1:-1]),
+            }
+
+            # (ii-c) moments of USED fz (after mixing) - not supposed to match n1p when mix_alpha<1
+            n_used, u_used, T_used = calculate_moments(eng_warm.state, fz_used)
+            used_fz_moments_stats = {
+                "n": _abs_stats(n_used),
+                "u": _abs_stats(u_used),
+                "T": _abs_stats(T_used),
             }
 
             # (iii) baseline vs warm state divergence (solution difference)
@@ -293,11 +332,30 @@ def run_case_debug(cfg: Config,
                 "T": _rel_err(T1_b, T1_w),
             }
 
-            # (iv) step-to-step relative change magnitude (how hard the step is)
-            step_change = {
+            # (iv-a) predicted step-to-step relative change magnitude
+            pred_step_change = {
                 "dn_over_n0_linf": float(torch.max(torch.abs(dn) / (torch.abs(n0_b) + 1e-30)).detach().cpu()),
                 "dT_over_T0_linf": float(torch.max(torch.abs(dT) / (torch.abs(T0_b) + 1e-30)).detach().cpu()),
                 "du_abs_linf": float(torch.max(torch.abs(du)).detach().cpu()),
+            }
+
+            # (iv-b) true step-to-step change magnitude from baseline
+            dn_true = n1_b - n0_b
+            du_true = u1_b - u0_b
+            dT_true = T1_b - T0_b
+            true_step_change = {
+                "dn_over_n0_linf": float(torch.max(torch.abs(dn_true) / (torch.abs(n0_b) + 1e-30)).detach().cpu()),
+                "dT_over_T0_linf": float(torch.max(torch.abs(dT_true) / (torch.abs(T0_b) + 1e-30)).detach().cpu()),
+                "du_abs_linf": float(torch.max(torch.abs(du_true)).detach().cpu()),
+            }
+
+            # (v) u scale stats (helps interpret relative u error explosion)
+            u_scale = {
+                "u0_true": _abs_stats(u0_b),
+                "u1_true": _abs_stats(u1_b),
+                "u1_pred": _abs_stats(u1p),
+                "du_pred": _abs_stats(du),
+                "du_true": _abs_stats(du_true),
             }
 
             debug_log.append({
@@ -306,10 +364,18 @@ def run_case_debug(cfg: Config,
                 "picard_iter_warm": int(it_hist_warm[s]),
                 "std_resid_base": float(resid_hist_base[s]),
                 "std_resid_warm": float(resid_hist_warm[s]),
+
+                # key diagnostics
                 "pred_err_vs_baseline_next": pred_err,
-                "fz_moment_reproduction_err": fz_moment_err,
+                "fz_moment_reproduction_err_full": fz_moment_err_full,
+                "fz_moment_reproduction_err_interior": fz_moment_err_interior,
+                "used_fz_moments_stats": used_fz_moments_stats,
                 "baseline_vs_warm_next_err": sol_err,
-                "pred_step_change_metrics": step_change,
+
+                # step-change diagnostics
+                "pred_step_change_metrics": pred_step_change,
+                "true_step_change_metrics": true_step_change,
+                "u_scale_stats": u_scale,
             })
 
     t1 = time.perf_counter()
