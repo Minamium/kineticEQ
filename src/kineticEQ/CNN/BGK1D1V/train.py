@@ -22,7 +22,7 @@ def save_json(path: Path, obj):
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False))
 
 
-def make_loader(manifest: str, split: str, batch: int, workers: int, pin: bool):
+def make_loader(manifest: str, split: str, batch: int, workers: int, pin: bool, prefetch_factor: int):
     ds = BGK1D1VNPZDeltaDataset(manifest_path=manifest, split=split, mmap=True, cache_npz=True, target="dnu")
     dl = DataLoader(
         ds,
@@ -32,7 +32,7 @@ def make_loader(manifest: str, split: str, batch: int, workers: int, pin: bool):
         pin_memory=pin,
         persistent_workers=(workers > 0),
         drop_last=(split == "train"),
-        prefetch_factor=2 if workers > 0 else None,
+        prefetch_factor=prefetch_factor if workers > 0 else None,
     )
     return ds, dl
 
@@ -81,6 +81,7 @@ def main():
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--workers", type=int, default=2)
+    ap.add_argument("--prefetch_factor", type=int, default=2)
     ap.add_argument("--amp", action="store_true")
     ap.add_argument("--save_dir", type=str, default="cnn_runs/bgk1d1v")
     ap.add_argument("--log_interval", type=int, default=20)
@@ -116,7 +117,7 @@ def main():
     save_json(save_dir / "config.json", vars(args))
 
     # ---- model/optim ----
-    model = MomentCNN1D(in_ch=5, hidden=128, out_ch=3, kernel=11, n_blocks=5).to(device)
+    model = MomentCNN1D(in_ch=5, hidden=512, out_ch=3, kernel=11, n_blocks=5).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     scheduler = None
@@ -134,8 +135,8 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     # ---- data ----
-    train_ds, train_dl = make_loader(args.manifest, "train", args.batch, args.workers, pin=pin)
-    val_ds, val_dl     = make_loader(args.manifest, "val",   args.batch, args.workers, pin=pin)
+    train_ds, train_dl = make_loader(args.manifest, "train", args.batch, args.workers, pin=pin, prefetch_factor=args.prefetch_factor)
+    val_ds, val_dl     = make_loader(args.manifest, "val",   args.batch, args.workers, pin=pin, prefetch_factor=args.prefetch_factor)
 
     best_val = float("inf")
     log_path = save_dir / "log.jsonl"
