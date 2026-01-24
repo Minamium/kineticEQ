@@ -32,22 +32,38 @@ def main():
     # 計算負荷の分散
     g = torch.Generator()
     g.manual_seed(0)  # 全rankで同じ
-    all_cases = torch.randperm(1000, generator=g).tolist()
+    all_cases = torch.randperm(1_000, generator=g).tolist()
     my_cases = all_cases[rank::world_size]
 
     for case_id in my_cases:
         # ケースごとのパラメータ設定
-        tau = float(5e-6 * (case_id + 1) * 10.0)
+        # 乱数生成
+        g_case = torch.Generator(device="cpu")
+        g_case.manual_seed(1234 + int(case_id))
+        tau = 5e-7 # 暫定で固定
+        dt = 5e-5 # 暫定で固定
+
+        n_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.02
+        n_2 = 0.1 + (torch.rand((), generator=g_case) - 0.5) * 0.02
+        n_3 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.02
+        n_4 = 0.1 + (torch.rand((), generator=g_case) - 0.5) * 0.02
+
+        T_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.02
+        T_2 = 0.8 + (torch.rand((), generator=g_case) - 0.5) * 0.02
+        T_3 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.02
+        T_4 = 0.8 + (torch.rand((), generator=g_case) - 0.5) * 0.02
 
         # モデル設定
         model_cfg = BGK1D.ModelConfig(
             grid=BGK1D.Grid1D1V(nx=512, nv=256, Lx=1.0, v_max=10.0),
-            time=BGK1D.TimeConfig(dt=5e-5, T_total=0.05),
+            time=BGK1D.TimeConfig(dt=dt, T_total=0.05),
             params=BGK1D.BGK1D1VParams(tau_tilde=tau),
-            scheme_params=BGK1D.implicit.Params(picard_iter=1_000, picard_tol=1e-6, abs_tol=1e-13),
+            scheme_params=BGK1D.implicit.Params(picard_iter=1_000, picard_tol=1e-7, abs_tol=1e-13),
             initial=BGK1D.InitialCondition1D(initial_regions=(
-                {"x_range": (0.0, 0.5), "n": 1.0,   "u": 0.0, "T": 1.0},
-                {"x_range": (0.5, 1.0), "n": 0.125, "u": 0.0, "T": 0.8},
+                {"x_range": (0.0, 0.2), "n": float(n_1), "u": 0.0, "T": float(T_1)},
+                {"x_range": (0.2, 0.4), "n": float(n_2), "u": 0.0, "T": float(T_2)},
+                {"x_range": (0.4, 0.7), "n": float(n_3), "u": 0.0, "T": float(T_3)},
+                {"x_range": (0.7, 1.0), "n": float(n_4), "u": 0.0, "T": float(T_4)},
                 )
             )
         )
@@ -55,6 +71,7 @@ def main():
                               scheme="implicit",
                               backend="cuda_kernel",
                               model_cfg=model_cfg,
+                              device=device,
                               log_level="err",
                               use_tqdm=False))
 
@@ -89,7 +106,6 @@ def main():
             n_hist[step + 1] = n.detach().cpu().float().numpy()
             u_hist[step + 1] = u.detach().cpu().float().numpy()
             T_hist[step + 1] = T.detach().cpu().float().numpy()
-
             picard_iter_hist[step + 1] = int(bench.get("picard_iter", -1))
             std_resid_hist[step + 1]   = float(bench.get("std_picard_residual", np.nan))
 
@@ -102,7 +118,7 @@ def main():
         )
 
         np.savez_compressed(
-            os.path.join(out_dir, f"case_{case_id:03d}.npz"),
+            os.path.join(out_dir, f"case_{case_id:05d}.npz"),
             meta=np.string_(json.dumps(meta)),
             n=n_hist, u=u_hist, T=T_hist,
             picard_iter=picard_iter_hist,
