@@ -24,20 +24,34 @@ from kineticEQ.CNN.BGK1D1V.models import MomentCNN1D
 
 def _load_ckpt_state(ckpt_path: str) -> dict:
     """
-    Supports:
-      - {"model_state": state_dict, ...}
+    kineticEQ/CNN/BGK1D1V/train.py が保存する形式に対応:
+      ckpt = {"epoch":..., "model": state_dict, "opt":..., ...}
+
+    さらに以下も吸収:
+      - {"model_state": state_dict}
+      - {"state_dict": state_dict}
       - raw state_dict
+      - DataParallel/DDP の module. prefix
     """
     obj = torch.load(ckpt_path, map_location="cpu")
-    if isinstance(obj, dict) and "model_state" in obj and isinstance(obj["model_state"], dict):
-        return obj["model_state"]
-    if isinstance(obj, dict) and all(isinstance(k, str) for k in obj.keys()):
-        # could be raw state_dict
-        return obj
-    raise ValueError(
-        f"Unsupported checkpoint format: {type(obj)} "
-        f"keys={list(obj.keys())[:5] if isinstance(obj, dict) else ''}"
-    )
+
+    # dict checkpoint
+    if isinstance(obj, dict):
+        # kineticEQ train.py
+        for k in ["model", "model_state", "state_dict", "model_state_dict"]:
+            if k in obj and isinstance(obj[k], dict):
+                return obj[k]
+        # raw state_dict
+        if all(isinstance(k, str) for k in obj.keys()):
+            return obj
+
+    # nn.Module保存など
+    if hasattr(obj, "state_dict"):
+        sd = obj.state_dict()
+        if isinstance(sd, dict):
+            return sd
+
+    raise ValueError(f"Unsupported checkpoint format: {type(obj)}")
 
 
 def _strip_module_prefix(state: dict) -> dict:
