@@ -32,7 +32,7 @@ def main():
     # 計算負荷の分散
     g = torch.Generator()
     g.manual_seed(0)  # 全rankで同じ
-    all_cases = torch.randperm(1_000, generator=g).tolist()
+    all_cases = torch.randperm(80, generator=g).tolist()
     my_cases = all_cases[rank::world_size]
 
     for case_id in my_cases:
@@ -43,15 +43,15 @@ def main():
         tau = 5e-7 # 暫定で固定
         dt = 5e-5 # 暫定で固定
 
-        n_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.02
-        n_2 = 0.1 + (torch.rand((), generator=g_case) - 0.5) * 0.02
-        n_3 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.02
-        n_4 = 0.1 + (torch.rand((), generator=g_case) - 0.5) * 0.02
+        n_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.04
+        n_2 = 0.1 + (torch.rand((), generator=g_case) - 0.5) * 0.04
+        n_3 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.04
+        n_4 = 0.1 + (torch.rand((), generator=g_case) - 0.5) * 0.04
 
-        T_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.02
-        T_2 = 0.8 + (torch.rand((), generator=g_case) - 0.5) * 0.02
-        T_3 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.02
-        T_4 = 0.8 + (torch.rand((), generator=g_case) - 0.5) * 0.02
+        T_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.04
+        T_2 = 0.8 + (torch.rand((), generator=g_case) - 0.5) * 0.04
+        T_3 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.04
+        T_4 = 0.8 + (torch.rand((), generator=g_case) - 0.5) * 0.04
 
         # モデル設定
         model_cfg = BGK1D.ModelConfig(
