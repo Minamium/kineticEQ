@@ -41,7 +41,7 @@ def main():
         # 乱数生成
         g_case = torch.Generator(device="cpu")
         g_case.manual_seed(1234 + int(case_id))
-        tau = 5e-7 # 暫定で固定
+        tau = 5e-6 # 暫定で固定
         dt = 5e-5 # 暫定で固定
 
         n_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.04
