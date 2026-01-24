@@ -7,6 +7,7 @@ import torch.distributed as dist
 from kineticEQ import Engine, Config, BGK1D
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calculate_moments
 import numpy as np
+import time
 
 def setup_dist():
     # torchrun起動の環境変数をキャッチ
@@ -96,6 +97,7 @@ def main():
         std_resid_hist[0] = 0.0
 
         # evolve
+        start_time = time.time()
         for step in range(n_steps):
             maker.stepper(step)
             bench = getattr(maker.stepper, "benchlog", None) or {}
@@ -125,7 +127,7 @@ def main():
             std_picard_residual=std_resid_hist,
         )
 
-        print(f"Rank {rank}: saved case {case_id} tau={tau:.3e}", flush=True)
+        print(f"Rank {rank}: saved case {case_id} tau={tau:.3e} elapsed={time.time() - start_time:.3f}sec", flush=True)
 
     # 同期
     if is_dist:
