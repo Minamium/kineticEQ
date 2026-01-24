@@ -119,7 +119,7 @@ def main():
 
         np.savez_compressed(
             os.path.join(out_dir, f"case_{case_id:05d}.npz"),
-            meta=np.string_(json.dumps(meta)),
+            meta=np.bytes_(json.dumps(meta).encode("utf-8")),
             n=n_hist, u=u_hist, T=T_hist,
             picard_iter=picard_iter_hist,
             std_picard_residual=std_resid_hist,
