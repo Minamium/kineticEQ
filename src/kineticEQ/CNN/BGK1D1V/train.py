@@ -91,6 +91,11 @@ def main():
     ap.add_argument("--s_min", type=float, default=1e-3, help="minimum scale clamp to avoid exploding normalized residuals")
     ap.add_argument("--grad_clip", type=float, default=1.0, help="clip grad-norm (0 disables)")
 
+    ap.add_argument("--sched_plateau", action="store_true")
+    ap.add_argument("--sched_patience", type=int, default=3)
+    ap.add_argument("--sched_factor", type=float, default=0.5)
+    ap.add_argument("--sched_min_lr", type=float, default=1e-6)
+
     args = ap.parse_args()
 
     # ---- reproducibility ----
@@ -113,6 +118,16 @@ def main():
     # ---- model/optim ----
     model = MomentCNN1D(in_ch=5, hidden=128, out_ch=3, kernel=11, n_blocks=5).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+
+    scheduler = None
+    if bool(args.sched_plateau):
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt,
+            mode="min",
+            factor=float(args.sched_factor),
+            patience=int(args.sched_patience),
+            min_lr=float(args.sched_min_lr),
+        )
 
     # AMP (new API; warning-free)
     use_amp = (args.amp and device.type == "cuda")
@@ -206,6 +221,15 @@ def main():
         va_loss_sum = 0.0
         va_n = 0
 
+        val_pred_dn_over_n0_linf = 0.0
+        val_pred_dT_over_T0_linf = 0.0
+        val_pred_dm_abs_linf = 0.0
+        val_pred_du_abs_linf = 0.0
+        val_true_dn_over_n0_linf = 0.0
+        val_true_dT_over_T0_linf = 0.0
+        val_true_dm_abs_linf = 0.0
+        val_true_du_abs_linf = 0.0
+
         with torch.no_grad():
             vbar = tqdm(
                 enumerate(val_dl, start=1),
@@ -228,6 +252,65 @@ def main():
                         s_min=float(args.s_min),
                     )
 
+                n0 = x[:, 0:1, :]
+                u0 = x[:, 1:2, :]
+                T0 = x[:, 2:3, :]
+
+                dn_p = pred[:, 0:1, :]
+                dm_p = pred[:, 1:2, :]
+                dT_p = pred[:, 2:3, :]
+
+                dn_t = y[:, 0:1, :]
+                dm_t = y[:, 1:2, :]
+                dT_t = y[:, 2:3, :]
+
+                n1_p = n0 + dn_p
+                n1_p_safe = torch.clamp(n1_p, min=1e-12)
+                u1_p = (n0 * u0 + dm_p) / n1_p_safe
+                du_p = u1_p - u0
+
+                n1_t = n0 + dn_t
+                n1_t_safe = torch.clamp(n1_t, min=1e-12)
+                u1_t = (n0 * u0 + dm_t) / n1_t_safe
+                du_t = u1_t - u0
+
+                denom_n = torch.abs(n0) + 1e-30
+                denom_T = torch.abs(T0) + 1e-30
+
+                val_pred_dn_over_n0_linf = max(
+                    val_pred_dn_over_n0_linf,
+                    float(torch.amax(torch.abs(dn_p) / denom_n).detach().cpu()),
+                )
+                val_pred_dT_over_T0_linf = max(
+                    val_pred_dT_over_T0_linf,
+                    float(torch.amax(torch.abs(dT_p) / denom_T).detach().cpu()),
+                )
+                val_pred_dm_abs_linf = max(
+                    val_pred_dm_abs_linf,
+                    float(torch.amax(torch.abs(dm_p)).detach().cpu()),
+                )
+                val_pred_du_abs_linf = max(
+                    val_pred_du_abs_linf,
+                    float(torch.amax(torch.abs(du_p)).detach().cpu()),
+                )
+
+                val_true_dn_over_n0_linf = max(
+                    val_true_dn_over_n0_linf,
+                    float(torch.amax(torch.abs(dn_t) / denom_n).detach().cpu()),
+                )
+                val_true_dT_over_T0_linf = max(
+                    val_true_dT_over_T0_linf,
+                    float(torch.amax(torch.abs(dT_t) / denom_T).detach().cpu()),
+                )
+                val_true_dm_abs_linf = max(
+                    val_true_dm_abs_linf,
+                    float(torch.amax(torch.abs(dm_t)).detach().cpu()),
+                )
+                val_true_du_abs_linf = max(
+                    val_true_du_abs_linf,
+                    float(torch.amax(torch.abs(du_t)).detach().cpu()),
+                )
+
                 bs = x.size(0)
                 va_loss_sum += float(loss.item()) * bs
                 va_n += bs
@@ -236,6 +319,9 @@ def main():
                     vbar.set_postfix({"loss": f"{(va_loss_sum/max(va_n,1)):.3e}"})
 
         val_loss = va_loss_sum / max(va_n, 1)
+
+        if scheduler is not None:
+            scheduler.step(val_loss)
 
         # ---------------- epoch summary ----------------
         is_best = val_loss < best_val
@@ -275,6 +361,14 @@ def main():
                 "u_eps": float(args.u_eps),
                 "s_min": float(args.s_min),
                 "grad_clip": float(args.grad_clip),
+                "val_pred_dn_over_n0_linf": float(val_pred_dn_over_n0_linf),
+                "val_pred_dT_over_T0_linf": float(val_pred_dT_over_T0_linf),
+                "val_pred_dm_abs_linf": float(val_pred_dm_abs_linf),
+                "val_pred_du_abs_linf": float(val_pred_du_abs_linf),
+                "val_true_dn_over_n0_linf": float(val_true_dn_over_n0_linf),
+                "val_true_dT_over_T0_linf": float(val_true_dT_over_T0_linf),
+                "val_true_dm_abs_linf": float(val_true_dm_abs_linf),
+                "val_true_du_abs_linf": float(val_true_du_abs_linf),
             }) + "\n")
 
     train_ds.close()
