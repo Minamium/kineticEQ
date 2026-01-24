@@ -23,7 +23,7 @@ def save_json(path: Path, obj):
 
 
 def make_loader(manifest: str, split: str, batch: int, workers: int, pin: bool):
-    ds = BGK1D1VNPZDeltaDataset(manifest_path=manifest, split=split, mmap=True, cache_npz=True)
+    ds = BGK1D1VNPZDeltaDataset(manifest_path=manifest, split=split, mmap=True, cache_npz=True, target="dnu")
     dl = DataLoader(
         ds,
         batch_size=batch,
@@ -69,7 +69,7 @@ def main():
     save_json(save_dir / "config.json", vars(args))
 
     # ---- model/optim ----
-    model = MomentCNN1D(in_ch=5, hidden=128, out_ch=3, kernel=11, n_blocks=4).to(device)
+    model = MomentCNN1D(in_ch=5, hidden=128, out_ch=3, kernel=11, n_blocks=5).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
     loss_fn = F.smooth_l1_loss
 

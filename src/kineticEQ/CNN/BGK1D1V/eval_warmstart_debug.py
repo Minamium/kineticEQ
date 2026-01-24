@@ -104,12 +104,25 @@ def load_model(ckpt_path: str, device: torch.device) -> tuple[MomentCNN1D, dict]
 
 
 @torch.no_grad()
-def predict_next_moments_delta(model: MomentCNN1D,
-                               n0: torch.Tensor, u0: torch.Tensor, T0: torch.Tensor,
-                               logdt: float, logtau: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor,
-                                                                     torch.Tensor, torch.Tensor, torch.Tensor]:
+def predict_next_moments_delta_dnu(
+    model: MomentCNN1D,
+    n0: torch.Tensor, u0: torch.Tensor, T0: torch.Tensor,
+    logdt: float, logtau: float,
+    n_floor: float = 1e-12,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor,
+    torch.Tensor, torch.Tensor, torch.Tensor
+]:
     """
-    Returns (n1,u1,T1,dn,du,dT). Model outputs Δ.
+    dnu 学習用:
+      model outputs dy = [Δn, Δ(nu), ΔT]
+
+    Returns:
+      (n1, u1, T1, dn, dm, dT)
+
+    Note:
+      u1 is reconstructed from momentum:
+        m0 = n0*u0, m1 = m0 + dm, n1 = n0 + dn, u1 = m1 / max(n1, n_floor)
     """
     nx = n0.numel()
     x = torch.empty((1, 5, nx), device=n0.device, dtype=torch.float32)
@@ -119,15 +132,20 @@ def predict_next_moments_delta(model: MomentCNN1D,
     x[0, 3].fill_(float(logdt))
     x[0, 4].fill_(float(logtau))
 
-    dy = model(x)[0]  # (3, nx)
+    dy = model(x)[0]  # (3, nx) float32
     dn = dy[0].to(n0.dtype)
-    du = dy[1].to(u0.dtype)
+    dm = dy[1].to(n0.dtype)   # momentum delta uses n dtype
     dT = dy[2].to(T0.dtype)
 
     n1 = n0 + dn
-    u1 = u0 + du
+    n1_safe = torch.clamp(n1, min=float(n_floor))
+
+    m0 = n0 * u0
+    m1 = m0 + dm
+    u1 = m1 / n1_safe
+
     T1 = T0 + dT
-    return n1, u1, T1, dn, du, dT
+    return n1, u1, T1, dn, dm, dT
 
 
 @torch.no_grad()
@@ -147,12 +165,14 @@ def _maxwellian_from_nuT(state, n: torch.Tensor, u: torch.Tensor, T: torch.Tenso
 
 
 @torch.no_grad()
-def build_fz_from_moments(state,
-                          n1: torch.Tensor, u1: torch.Tensor, T1: torch.Tensor,
-                          n_floor: float = 1e-12, T_floor: float = 1e-12) -> torch.Tensor:
+def build_fz_from_moments(
+    state,
+    n1: torch.Tensor, u1: torch.Tensor, T1: torch.Tensor,
+    n_floor: float = 1e-12, T_floor: float = 1e-12
+) -> torch.Tensor:
     """
     Build Maxwellian fz from moments (with boundary overwrite).
-    Note: boundary overwrite intentionally breaks exact moment reproduction.
+    Note: boundary overwrite intentionally breaks exact moment reproduction (full-domain).
     """
     if (not torch.isfinite(n1).all()) or (not torch.isfinite(u1).all()) or (not torch.isfinite(T1).all()):
         return state.f.clone()
@@ -168,9 +188,11 @@ def build_fz_from_moments(state,
     return fz
 
 
-def build_cfg(tau: float, dt: float, T_total: float,
-              nx: int = 512, nv: int = 256, Lx: float = 1.0, v_max: float = 10.0,
-              picard_iter: int = 1000, picard_tol: float = 1e-6, abs_tol: float = 1e-13) -> Config:
+def build_cfg(
+    tau: float, dt: float, T_total: float,
+    nx: int = 512, nv: int = 256, Lx: float = 1.0, v_max: float = 10.0,
+    picard_iter: int = 1000, picard_tol: float = 1e-6, abs_tol: float = 1e-13
+) -> Config:
     model_cfg = BGK1D.ModelConfig(
         grid=BGK1D.Grid1D1V(nx=nx, nv=nv, Lx=Lx, v_max=v_max),
         time=BGK1D.TimeConfig(dt=dt, T_total=T_total),
@@ -193,10 +215,6 @@ def build_cfg(tau: float, dt: float, T_total: float,
 
 
 def _rel_err(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-30) -> dict:
-    """
-    relative errors between a and b (same shape)
-    returns dict with l2, linf
-    """
     d = (b - a)
     l2 = torch.linalg.norm(d) / (torch.linalg.norm(a) + eps)
     linf = torch.max(torch.abs(d)) / (torch.max(torch.abs(a)) + eps)
@@ -204,9 +222,6 @@ def _rel_err(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-30) -> dict:
 
 
 def _abs_stats(x: torch.Tensor) -> dict:
-    """
-    absolute scale statistics (abs max / abs mean)
-    """
     ax = torch.abs(x)
     return {
         "abs_max": float(torch.max(ax).detach().cpu()),
@@ -215,23 +230,23 @@ def _abs_stats(x: torch.Tensor) -> dict:
 
 
 @torch.no_grad()
-def run_case_debug(cfg: Config,
-                   model: MomentCNN1D,
-                   n_steps: int,
-                   device: torch.device,
-                   mix_alpha: float,
-                   debug_steps: int,
-                   n_floor: float,
-                   T_floor: float) -> dict:
+def run_case_debug(
+    cfg: Config,
+    model: MomentCNN1D,
+    n_steps: int,
+    device: torch.device,
+    mix_alpha: float,
+    debug_steps: int,
+    n_floor: float,
+    T_floor: float,
+) -> dict:
     """
     baseline と warmstart を並走し、stepごとの誤差を観測。
     debug_steps: 先頭何stepだけ詳細ログを残すか
 
-    修正点:
-      - mix前の fz_pure を保持し、再構築誤差は fz_pure で評価
-      - 再構築誤差は内点(1:-1)でも評価（境界上書きの影響を除く）
-      - 真のΔW（baselineの n1_b-n0_b 等）もログ
-      - u の絶対スケール（真値/予測）もログ
+    dnu 版:
+      - model output: [Δn, Δ(nu), ΔT]
+      - u は (n,u) から復元して評価
     """
     torch.set_default_device(device)
 
@@ -256,16 +271,17 @@ def run_case_debug(cfg: Config,
 
     t0 = time.perf_counter()
     for s in range(n_steps):
-        # --- baseline current moments
+        # baseline current moments
         n0_b, u0_b, T0_b = calculate_moments(eng_base.state, eng_base.state.f)
 
-        # --- predict using baseline state moments (公平：同じ入力を使う)
-        n1p, u1p, T1p, dn, du, dT = predict_next_moments_delta(model, n0_b, u0_b, T0_b, logdt, logtau)
+        # predict using baseline inputs (fair)
+        n1p, u1p, T1p, dn, dm, dT = predict_next_moments_delta_dnu(
+            model, n0_b, u0_b, T0_b, logdt, logtau, n_floor=float(n_floor)
+        )
 
-        # --- build warmstart fz: keep pure Maxwellian (with boundary overwrite) separately
+        # build warmstart fz
         fz_pure = build_fz_from_moments(eng_warm.state, n1p, u1p, T1p, n_floor=n_floor, T_floor=T_floor)
 
-        # --- the actually used init fz (after optional mixing)
         fz_used = fz_pure
         if mix_alpha < 1.0:
             a = float(mix_alpha)
@@ -273,11 +289,11 @@ def run_case_debug(cfg: Config,
 
         ws._init_fz = fz_used
 
-        # --- step both
+        # step both
         eng_base.stepper(s)
         eng_warm.stepper(s)
 
-        # --- collect bench
+        # bench
         bench_b = getattr(eng_base.stepper, "benchlog", None) or {}
         bench_w = getattr(eng_warm.stepper, "benchlog", None) or {}
         it_hist_base[s] = int(bench_b.get("picard_iter", -1))
@@ -285,12 +301,11 @@ def run_case_debug(cfg: Config,
         resid_hist_base[s] = float(bench_b.get("std_picard_residual", np.nan))
         resid_hist_warm[s] = float(bench_w.get("std_picard_residual", np.nan))
 
-        # --- debug per-step metrics
         if s < debug_steps:
             # baseline true next moments
             n1_b, u1_b, T1_b = calculate_moments(eng_base.state, eng_base.state.f)
 
-            # warm next moments (after warm step)
+            # warm next moments
             n1_w, u1_w, T1_w = calculate_moments(eng_warm.state, eng_warm.state.f)
 
             # (i) prediction vs baseline true next
@@ -300,24 +315,20 @@ def run_case_debug(cfg: Config,
                 "T": _rel_err(T1_b, T1p),
             }
 
-            # (ii-a) discretization check: moments of constructed PURE fz vs (n1p,u1p,T1p)
-            # Full-domain (includes boundary overwrite)
+            # (ii-a) moments of PURE fz vs (n1p,u1p,T1p)
             n_fz, u_fz, T_fz = calculate_moments(eng_warm.state, fz_pure)
             fz_moment_err_full = {
                 "n": _rel_err(n1p, n_fz),
                 "u": _rel_err(u1p, u_fz),
                 "T": _rel_err(T1p, T_fz),
             }
-
-            # (ii-b) interior-only reproduction (exclude boundary cells)
-            # NOTE: This is the meaningful metric when boundary overwrite is a "spec".
             fz_moment_err_interior = {
                 "n": _rel_err(n1p[1:-1], n_fz[1:-1]),
                 "u": _rel_err(u1p[1:-1], u_fz[1:-1]),
                 "T": _rel_err(T1p[1:-1], T_fz[1:-1]),
             }
 
-            # (ii-c) moments of USED fz (after mixing) - not supposed to match n1p when mix_alpha<1
+            # (ii-c) USED fz moments stats
             n_used, u_used, T_used = calculate_moments(eng_warm.state, fz_used)
             used_fz_moments_stats = {
                 "n": _abs_stats(n_used),
@@ -325,37 +336,47 @@ def run_case_debug(cfg: Config,
                 "T": _abs_stats(T_used),
             }
 
-            # (iii) baseline vs warm state divergence (solution difference)
+            # (iii) baseline vs warm divergence
             sol_err = {
                 "n": _rel_err(n1_b, n1_w),
                 "u": _rel_err(u1_b, u1_w),
                 "T": _rel_err(T1_b, T1_w),
             }
 
-            # (iv-a) predicted step-to-step relative change magnitude
+            # (iv-a) predicted step-change metrics
+            # dn is dn
+            # dm corresponds to momentum change; to compare with du_true, compute du_pred = u1p-u0_b
+            du_pred = u1p - u0_b
             pred_step_change = {
                 "dn_over_n0_linf": float(torch.max(torch.abs(dn) / (torch.abs(n0_b) + 1e-30)).detach().cpu()),
                 "dT_over_T0_linf": float(torch.max(torch.abs(dT) / (torch.abs(T0_b) + 1e-30)).detach().cpu()),
-                "du_abs_linf": float(torch.max(torch.abs(du)).detach().cpu()),
+                "du_abs_linf": float(torch.max(torch.abs(du_pred)).detach().cpu()),
+                "dm_abs_linf": float(torch.max(torch.abs(dm)).detach().cpu()),
             }
 
-            # (iv-b) true step-to-step change magnitude from baseline
+            # (iv-b) true step-change metrics
             dn_true = n1_b - n0_b
             du_true = u1_b - u0_b
             dT_true = T1_b - T0_b
+            m0_true = n0_b * u0_b
+            m1_true = n1_b * u1_b
+            dm_true = m1_true - m0_true
             true_step_change = {
                 "dn_over_n0_linf": float(torch.max(torch.abs(dn_true) / (torch.abs(n0_b) + 1e-30)).detach().cpu()),
                 "dT_over_T0_linf": float(torch.max(torch.abs(dT_true) / (torch.abs(T0_b) + 1e-30)).detach().cpu()),
                 "du_abs_linf": float(torch.max(torch.abs(du_true)).detach().cpu()),
+                "dm_abs_linf": float(torch.max(torch.abs(dm_true)).detach().cpu()),
             }
 
-            # (v) u scale stats (helps interpret relative u error explosion)
+            # (v) scale stats
             u_scale = {
                 "u0_true": _abs_stats(u0_b),
                 "u1_true": _abs_stats(u1_b),
                 "u1_pred": _abs_stats(u1p),
-                "du_pred": _abs_stats(du),
+                "du_pred": _abs_stats(du_pred),
                 "du_true": _abs_stats(du_true),
+                "dm_pred": _abs_stats(dm),
+                "dm_true": _abs_stats(dm_true),
             }
 
             debug_log.append({
@@ -364,15 +385,11 @@ def run_case_debug(cfg: Config,
                 "picard_iter_warm": int(it_hist_warm[s]),
                 "std_resid_base": float(resid_hist_base[s]),
                 "std_resid_warm": float(resid_hist_warm[s]),
-
-                # key diagnostics
                 "pred_err_vs_baseline_next": pred_err,
                 "fz_moment_reproduction_err_full": fz_moment_err_full,
                 "fz_moment_reproduction_err_interior": fz_moment_err_interior,
                 "used_fz_moments_stats": used_fz_moments_stats,
                 "baseline_vs_warm_next_err": sol_err,
-
-                # step-change diagnostics
                 "pred_step_change_metrics": pred_step_change,
                 "true_step_change_metrics": true_step_change,
                 "u_scale_stats": u_scale,
@@ -380,7 +397,6 @@ def run_case_debug(cfg: Config,
 
     t1 = time.perf_counter()
 
-    # final moments for sanity
     nb, ub, Tb = calculate_moments(eng_base.state, eng_base.state.f)
     nw, uw, Tw = calculate_moments(eng_warm.state, eng_warm.state.f)
 
@@ -429,7 +445,7 @@ def parse_args():
 
     p.add_argument("--mix_alpha", type=float, default=1.0)
 
-    p.add_argument("--debug_steps", type=int, default=10, help="log detailed diagnostics for first N steps")
+    p.add_argument("--debug_steps", type=int, default=10)
     p.add_argument("--n_floor", type=float, default=1e-12)
     p.add_argument("--T_floor", type=float, default=1e-12)
 
@@ -461,6 +477,7 @@ def main():
             "n_floor": float(args.n_floor),
             "T_floor": float(args.T_floor),
             "model_arch": arch,
+            "target": "dnu",  # important metadata
         },
         "cases": [],
     }
@@ -491,7 +508,7 @@ def main():
         base_sum = out["picard_iter_sum_base"]
         warm_sum = out["picard_iter_sum_warm"]
         speed = (base_sum / max(warm_sum, 1))
-        case_out = {
+        results["cases"].append({
             "tau_tilde": float(tau),
             "n_steps": int(n_steps),
             "picard_sum_base": int(base_sum),
@@ -499,8 +516,7 @@ def main():
             "speedup_picard_sum": float(speed),
             "walltime_sec_total": float(out["walltime_sec"]),
             "detail": out,
-        }
-        results["cases"].append(case_out)
+        })
 
         print(
             f"[tau={tau:.3e}] picard_sum base={base_sum} warm={warm_sum} (x{speed:.2f}) "

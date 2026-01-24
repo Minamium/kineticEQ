@@ -20,7 +20,6 @@ def _resolve_npz_path(manifest: Dict[str, Any], rec_path: str) -> Path:
     p = Path(rec_path)
     if p.is_absolute():
         return p
-    # join with data_root recorded in manifest
     root = Path(manifest.get("data_root", "."))
     return (root / p).resolve()
 
@@ -35,8 +34,11 @@ class BGK1D1VNPZDeltaDataset(Dataset):
     """
     1 sample = (case_id, time t) with full spatial field (nx).
 
-    X: (5, nx)  = [n(t), u(t), T(t), log10(dt), log10(tau)]
-    Y: (3, nx)  = [n(t+1)-n(t), u(t+1)-u(t), T(t+1)-T(t)]
+    X: (5, nx) = [n(t), u(t), T(t), log10(dt), log10(tau)]
+
+    Y (delta): (3, nx)
+      target="dW":   [Δn, Δu, ΔT]  (legacy)
+      target="dnu":  [Δn, Δ(nu), ΔT]  (recommended)
     """
 
     def __init__(
@@ -46,21 +48,23 @@ class BGK1D1VNPZDeltaDataset(Dataset):
         dtype: torch.dtype = torch.float32,
         mmap: bool = True,
         cache_npz: bool = True,
+        target: str = "dnu",
     ):
         super().__init__()
         if split not in ("train", "val", "test"):
             raise ValueError(f"split must be train/val/test, got {split}")
+        if target not in ("dW", "dnu"):
+            raise ValueError(f"target must be 'dW' or 'dnu', got {target}")
 
         self.manifest_path = Path(manifest_path)
         self.manifest = _load_manifest(self.manifest_path)
         self.dtype = dtype
         self.mmap = mmap
         self.cache_npz = cache_npz
+        self.target = target
 
-        # split case ids
         split_case_ids = set(self.manifest["splits"][split])
 
-        # select file records
         self.records: List[Dict[str, Any]] = [
             r for r in self.manifest["files"] if int(r["case_id"]) in split_case_ids
         ]
@@ -75,7 +79,6 @@ class BGK1D1VNPZDeltaDataset(Dataset):
             # t = 0..n_steps-1 (needs t+1)
             total += n_steps
             self._offsets.append(total)
-
         self._total_len = total
 
         # tiny cache: last opened file
@@ -86,7 +89,6 @@ class BGK1D1VNPZDeltaDataset(Dataset):
         return self._total_len
 
     def _locate(self, idx: int) -> SampleIndex:
-        # binary search on offsets
         if idx < 0 or idx >= self._total_len:
             raise IndexError(idx)
         lo, hi = 0, len(self._offsets) - 1
@@ -106,12 +108,9 @@ class BGK1D1VNPZDeltaDataset(Dataset):
 
         rec = self.records[file_idx]
         npz_path = _resolve_npz_path(self.manifest, rec["path"])
-
-        # allow_pickle=False: safer
         z = np.load(npz_path, allow_pickle=False, mmap_mode=("r" if self.mmap else None))
 
         if self.cache_npz:
-            # close old cache
             if self._cache_npz is not None:
                 try:
                     self._cache_npz.close()
@@ -132,7 +131,6 @@ class BGK1D1VNPZDeltaDataset(Dataset):
         T = z["T"]
         t = s.t
 
-        # X: (5, nx)
         # W(t)
         n_t = torch.from_numpy(np.asarray(n[t], dtype=np.float32))
         u_t = torch.from_numpy(np.asarray(u[t], dtype=np.float32))
@@ -147,12 +145,24 @@ class BGK1D1VNPZDeltaDataset(Dataset):
 
         x = torch.stack([n_t, u_t, T_t, logdt_x, logtau_x], dim=0).to(dtype=self.dtype)
 
-        # Y: delta (3, nx)
+        # W(t+1)
         n_tp1 = torch.from_numpy(np.asarray(n[t + 1], dtype=np.float32))
         u_tp1 = torch.from_numpy(np.asarray(u[t + 1], dtype=np.float32))
         T_tp1 = torch.from_numpy(np.asarray(T[t + 1], dtype=np.float32))
 
-        y = torch.stack([n_tp1 - n_t, u_tp1 - u_t, T_tp1 - T_t], dim=0).to(dtype=self.dtype)
+        # Y: delta (3, nx)
+        dn = n_tp1 - n_t
+        dT = T_tp1 - T_t
+
+        if self.target == "dW":
+            du = u_tp1 - u_t
+            y = torch.stack([dn, du, dT], dim=0).to(dtype=self.dtype)
+        else:
+            # target == "dnu": Δ(nu)
+            m_t = n_t * u_t
+            m_tp1 = n_tp1 * u_tp1
+            dm = m_tp1 - m_t
+            y = torch.stack([dn, dm, dT], dim=0).to(dtype=self.dtype)
 
         return x, y
 
