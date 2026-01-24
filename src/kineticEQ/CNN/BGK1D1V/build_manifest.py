@@ -109,7 +109,7 @@ def build_manifest(
             case_ids.append(int(meta["case_id"]))
 
         except Exception as e:
-            bad_files.append({"path": str(p.as_posix()), "error": f"{type(e).__name__}: {e}"})
+            bad_files.append({"path": str(p.relative_to(data_root).as_posix()), "error": f"{type(e).__name__}: {e}"})
 
     if len(records) == 0:
         raise RuntimeError(f"All files are unreadable. Example error: {bad_files[:3]}")
