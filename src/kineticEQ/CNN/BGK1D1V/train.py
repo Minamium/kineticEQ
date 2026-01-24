@@ -37,6 +37,42 @@ def make_loader(manifest: str, split: str, batch: int, workers: int, pin: bool):
     return ds, dl
 
 
+# ---------------- loss (scaled) ----------------
+def loss_scaled_dnu(pred: torch.Tensor,
+                    y: torch.Tensor,
+                    x: torch.Tensor,
+                    eps: float = 1e-6,
+                    u_eps: float = 5e-2,
+                    s_min: float = 1e-3) -> torch.Tensor:
+    """
+    Scale-normalized SmoothL1 for target="dnu" outputs.
+
+    x: (B,5,nx)  = [n0, u0, T0, logdt, logtau]
+    y: (B,3,nx)  = [dn, d(nu) (or dm), dT]
+    pred: same as y
+
+    Scaling:
+      dn : |n0| + eps
+      dm : |n0|*(|u0| + u_eps) + eps    (prevents u0≈0 collapse)
+      dT : |T0| + eps
+
+    s_min clamps the scale to avoid exploding normalized residuals in near-vacuum/near-zero regions.
+    """
+    n0 = x[:, 0:1, :].abs()
+    u0 = x[:, 1:2, :].abs()
+    T0 = x[:, 2:3, :].abs()
+
+    s_n = n0 + eps
+    s_m = (n0 * (u0 + u_eps)) + eps
+    s_T = T0 + eps
+
+    s = torch.cat([s_n, s_m, s_T], dim=1)
+    s = torch.clamp(s, min=float(s_min))
+
+    e = F.smooth_l1_loss(pred / s, y / s, reduction="none")
+    return e.mean()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", type=str, required=True)
@@ -49,6 +85,12 @@ def main():
     ap.add_argument("--save_dir", type=str, default="cnn_runs/bgk1d1v")
     ap.add_argument("--log_interval", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0)
+
+    # ---- knobs for scaled loss ----
+    ap.add_argument("--u_eps", type=float, default=5e-2, help="dm scale uses |u0|+u_eps (prevents collapse at u0~0)")
+    ap.add_argument("--s_min", type=float, default=1e-3, help="minimum scale clamp to avoid exploding normalized residuals")
+    ap.add_argument("--grad_clip", type=float, default=1.0, help="clip grad-norm (0 disables)")
+
     args = ap.parse_args()
 
     # ---- reproducibility ----
@@ -71,19 +113,6 @@ def main():
     # ---- model/optim ----
     model = MomentCNN1D(in_ch=5, hidden=128, out_ch=3, kernel=11, n_blocks=5).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    
-    # loss func
-    def loss_scaled(pred, y, x, eps=1e-6):
-        # x: (B,5,nx)  n,u,T,logdt,logtau
-        n0 = x[:,0:1,:].abs()
-        T0 = x[:,2:3,:].abs()
-        # scale for each channel
-        s_n = n0 + eps
-        s_m = n0 + eps          # まずは簡易に n0 で割る
-        s_T = T0 + eps
-        s = torch.cat([s_n, s_m, s_T], dim=1)
-        e = F.smooth_l1_loss(pred/s, y/s, reduction="none")
-        return e.mean()
 
     # AMP (new API; warning-free)
     use_amp = (args.amp and device.type == "cuda")
@@ -126,9 +155,20 @@ def main():
 
             with torch.amp.autocast("cuda", enabled=use_amp):
                 pred = model(x)
-                loss = loss_scaled(pred, y, x)
+                loss = loss_scaled_dnu(
+                    pred, y, x,
+                    eps=1e-6,
+                    u_eps=float(args.u_eps),
+                    s_min=float(args.s_min),
+                )
 
             scaler.scale(loss).backward()
+
+            # (recommended) clip after unscale
+            if float(args.grad_clip) > 0.0:
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(args.grad_clip))
+
             scaler.step(opt)
             scaler.update()
 
@@ -151,6 +191,8 @@ def main():
                     "s/it": f"{sec_per_it:.2f}",
                     "ETA_ep(min)": f"{eta_ep/60:.1f}",
                     "samples/s": f"{sps:.1f}",
+                    "u_eps": f"{args.u_eps:.2g}",
+                    "s_min": f"{args.s_min:.2g}",
                 }
                 if device.type == "cuda":
                     postfix["max_mem(GB)"] = f"{torch.cuda.max_memory_allocated()/1e9:.2f}"
@@ -179,7 +221,12 @@ def main():
                 y = y.to(device, non_blocking=True)
                 with torch.amp.autocast("cuda", enabled=use_amp):
                     pred = model(x)
-                    loss = loss_scaled(pred, y, x)
+                    loss = loss_scaled_dnu(
+                        pred, y, x,
+                        eps=1e-6,
+                        u_eps=float(args.u_eps),
+                        s_min=float(args.s_min),
+                    )
 
                 bs = x.size(0)
                 va_loss_sum += float(loss.item()) * bs
@@ -225,6 +272,9 @@ def main():
                 "best_val": best_val,
                 "train_time_sec": train_time,
                 "lr": opt.param_groups[0]["lr"],
+                "u_eps": float(args.u_eps),
+                "s_min": float(args.s_min),
+                "grad_clip": float(args.grad_clip),
             }) + "\n")
 
     train_ds.close()
