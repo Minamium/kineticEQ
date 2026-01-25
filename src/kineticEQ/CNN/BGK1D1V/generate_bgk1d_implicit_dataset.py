@@ -78,8 +78,10 @@ def main():
         n_3 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4
         n_4 = 0.5 + (torch.rand((), generator=g_case) - 0.5) * 0.4
 
+        u_1 = 0.0
         u_2 = 0.0 + (torch.rand((), generator=g_case) - 0.5) * 0.04
         u_3 = 0.0 + (torch.rand((), generator=g_case) - 0.5) * 0.04
+        u_4 = 0.0
 
         T_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4
         T_2 = 0.8 + (torch.rand((), generator=g_case) - 0.5) * 0.4
@@ -93,10 +95,10 @@ def main():
             params=BGK1D.BGK1D1VParams(tau_tilde=tau),
             scheme_params=BGK1D.implicit.Params(picard_iter=1_000, picard_tol=1e-7, abs_tol=1e-13),
             initial=BGK1D.InitialCondition1D(initial_regions=(
-                {"x_range": (0.0, 0.2), "n": float(n_1), "u": 0.0, "T": float(T_1)},
-                {"x_range": (0.2, 0.4), "n": float(n_2), "u": u_2, "T": float(T_2)},
-                {"x_range": (0.4, 0.7), "n": float(n_3), "u": u_3, "T": float(T_3)},
-                {"x_range": (0.7, 1.0), "n": float(n_4), "u": 0.0, "T": float(T_4)},
+                {"x_range": (0.0, 0.2), "n": float(n_1), "u": float(u_1), "T": float(T_1)},
+                {"x_range": (0.2, 0.4), "n": float(n_2), "u": float(u_2), "T": float(T_2)},
+                {"x_range": (0.4, 0.7), "n": float(n_3), "u": float(u_3), "T": float(T_3)},
+                {"x_range": (0.7, 1.0), "n": float(n_4), "u": float(u_4), "T": float(T_4)},
                 )
             )
         )
