@@ -33,7 +33,7 @@ def main():
     # 計算負荷の分散
     g = torch.Generator()
     g.manual_seed(0)  # 全rankで同じ
-    all_cases = torch.randperm(160, generator=g).tolist()
+    all_cases = torch.randperm(240, generator=g).tolist()
     my_cases = all_cases[rank::world_size]
 
     for case_id in my_cases:
@@ -42,23 +42,44 @@ def main():
         g_case = torch.Generator(device="cpu")
         g_case.manual_seed(1234 + int(case_id))
 
-        # 半分のケースでtauを変える
-        if case_id < 80:
-            tau = 5e-6
-        else:
+        # --- tau: logscale sweep, 5e-7周辺を重点的に (中心70%) ---
+        # 70%: tau = 5e-7
+        # 30%: tau = 5e-7 * 10^{U[-0.3, +0.3]}  ≈ 0.5x .. 2x
+        if torch.rand((), generator=g_case).item() < 0.70:
             tau = 5e-7
+        else:
+            log10_factor = (torch.rand((), generator=g_case).item() * 0.6) - 0.3
+            tau = 5e-7 * (10.0 ** log10_factor)
 
-        dt = 5e-5 # 暫定で固定
+        # 安全柵（極端値が入らないように任意でクランプ）
+        # ここは必要なら調整：中心近傍sweepなので基本不要だが、保険として入れておくのはアリ
+        tau = float(max(min(tau, 2.0e-6), 5.0e-8))
 
-        n_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.04
-        n_2 = 0.1 + (torch.rand((), generator=g_case) - 0.5) * 0.04
-        n_3 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.04
-        n_4 = 0.1 + (torch.rand((), generator=g_case) - 0.5) * 0.04
+        # --- dt: logscale sweep, 5e-5周辺を重点的に (中心70%) ---
+        # 70%: dt = 5e-5
+        # 30%: dt = 5e-5 * 10^{U[-0.2, +0.2]}  ≈ 0.63x .. 1.58x
+        if torch.rand((), generator=g_case).item() < 0.70:
+            dt = 5e-5
+        else:
+            log10_factor = (torch.rand((), generator=g_case).item() * 0.4) - 0.2
+            dt = 5e-5 * (10.0 ** log10_factor)
 
-        T_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.04
-        T_2 = 0.8 + (torch.rand((), generator=g_case) - 0.5) * 0.04
-        T_3 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.04
-        T_4 = 0.8 + (torch.rand((), generator=g_case) - 0.5) * 0.04
+        # 安全柵（任意）
+        dt = float(max(min(dt, 2.0e-4), 1.0e-5))
+
+
+        n_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4
+        n_2 = 0.5 + (torch.rand((), generator=g_case) - 0.5) * 0.4
+        n_3 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4
+        n_4 = 0.5 + (torch.rand((), generator=g_case) - 0.5) * 0.4
+
+        u_2 = 0.0 + (torch.rand((), generator=g_case) - 0.5) * 0.04
+        u_3 = 0.0 + (torch.rand((), generator=g_case) - 0.5) * 0.04
+
+        T_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4
+        T_2 = 0.8 + (torch.rand((), generator=g_case) - 0.5) * 0.4
+        T_3 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4
+        T_4 = 0.8 + (torch.rand((), generator=g_case) - 0.5) * 0.4
 
         # モデル設定
         model_cfg = BGK1D.ModelConfig(
@@ -68,8 +89,8 @@ def main():
             scheme_params=BGK1D.implicit.Params(picard_iter=1_000, picard_tol=1e-7, abs_tol=1e-13),
             initial=BGK1D.InitialCondition1D(initial_regions=(
                 {"x_range": (0.0, 0.2), "n": float(n_1), "u": 0.0, "T": float(T_1)},
-                {"x_range": (0.2, 0.4), "n": float(n_2), "u": 0.0, "T": float(T_2)},
-                {"x_range": (0.4, 0.7), "n": float(n_3), "u": 0.0, "T": float(T_3)},
+                {"x_range": (0.2, 0.4), "n": float(n_2), "u": u_2, "T": float(T_2)},
+                {"x_range": (0.4, 0.7), "n": float(n_3), "u": u_3, "T": float(T_3)},
                 {"x_range": (0.7, 1.0), "n": float(n_4), "u": 0.0, "T": float(T_4)},
                 )
             )
