@@ -163,8 +163,9 @@ def main():
 
     # 同期
     if is_dist:
-        dist.barrier(device_ids=[local_rank])
-        dist.destroy_process_group()
+        pass
+        #dist.barrier(device_ids=[local_rank])
+        #dist.destroy_process_group()
 
 if __name__ == "__main__":
     main()
