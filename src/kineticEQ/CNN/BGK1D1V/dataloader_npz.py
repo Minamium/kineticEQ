@@ -62,6 +62,7 @@ class BGK1D1VNPZDeltaDataset(Dataset):
         self.mmap = mmap
         self.cache_npz = cache_npz
         self.target = target
+        self._const = {}
 
         split_case_ids = set(self.manifest["splits"][split])
 
@@ -132,23 +133,30 @@ class BGK1D1VNPZDeltaDataset(Dataset):
         t = s.t
 
         # W(t)
-        n_t = torch.from_numpy(np.asarray(n[t], dtype=np.float32))
-        u_t = torch.from_numpy(np.asarray(u[t], dtype=np.float32))
-        T_t = torch.from_numpy(np.asarray(T[t], dtype=np.float32))
+        n_t = torch.from_numpy(n[t])
+        u_t = torch.from_numpy(u[t])
+        T_t = torch.from_numpy(T[t])
 
         # dt, tau (case constants) -> broadcast to (nx,)
         nx = int(rec["nx"])
         logdt = float(np.log10(float(rec["dt"])))
         logtau = float(np.log10(float(rec["tau_tilde"])))
-        logdt_x = torch.full((nx,), logdt, dtype=torch.float32)
-        logtau_x = torch.full((nx,), logtau, dtype=torch.float32)
+
+        key = (nx, logdt, logtau)  # 順番は何でもよいが一貫させる
+        if key not in self._const:
+            self._const[key] = (
+                torch.full((nx,), logdt, dtype=torch.float32),
+                torch.full((nx,), logtau, dtype=torch.float32),
+            )
+        logdt_x, logtau_x = self._const[key]
+
 
         x = torch.stack([n_t, u_t, T_t, logdt_x, logtau_x], dim=0).to(dtype=self.dtype)
 
         # W(t+1)
-        n_tp1 = torch.from_numpy(np.asarray(n[t + 1], dtype=np.float32))
-        u_tp1 = torch.from_numpy(np.asarray(u[t + 1], dtype=np.float32))
-        T_tp1 = torch.from_numpy(np.asarray(T[t + 1], dtype=np.float32))
+        n_tp1 = torch.from_numpy(n[t + 1])
+        u_tp1 = torch.from_numpy(u[t + 1])
+        T_tp1 = torch.from_numpy(T[t + 1])
 
         # Y: delta (3, nx)
         dn = n_tp1 - n_t
