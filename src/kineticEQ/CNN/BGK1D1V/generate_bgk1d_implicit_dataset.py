@@ -27,6 +27,7 @@ def setup_dist():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out_dir", type=str, default="mgpu_output")
+    ap.add_argument("--cases", type=int, default=240)
     args = ap.parse_args()
 
     is_dist, rank, local_rank, world_size, device = setup_dist()
@@ -38,7 +39,7 @@ def main():
     # 計算負荷の分散
     g = torch.Generator()
     g.manual_seed(0)  # 全rankで同じ
-    all_cases = torch.randperm(240, generator=g).tolist()
+    all_cases = torch.randperm(args.cases, generator=g).tolist()
     my_cases = all_cases[rank::world_size]
 
     for case_id in my_cases:
