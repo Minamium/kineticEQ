@@ -185,7 +185,7 @@ def main():
             with torch.amp.autocast("cuda", enabled=use_amp):
                 pred = model(x)
                 loss = loss_scaled_dnu(
-                    pred.float(), y.float(), x.float(),
+                    pred, y, x,
                     eps=1e-6,
                     u_eps=float(args.u_eps),
                     s_min=float(args.s_min),
