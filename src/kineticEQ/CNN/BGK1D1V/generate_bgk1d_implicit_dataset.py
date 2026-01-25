@@ -8,6 +8,7 @@ from kineticEQ import Engine, Config, BGK1D
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calculate_moments
 import numpy as np
 import time
+import argparse
 
 def setup_dist():
     # torchrun起動の環境変数をキャッチ
@@ -24,10 +25,14 @@ def setup_dist():
         return False, 0, 0, 1, torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out_dir", type=str, default="mgpu_output")
+    args = ap.parse_args()
+
     is_dist, rank, local_rank, world_size, device = setup_dist()
 
     # 出力ディレクトリ作成
-    out_dir = f"mgpu_output/shard_rank{rank:02d}"
+    out_dir = f"{args.out_dir}/shard_rank{rank:02d}"
     os.makedirs(out_dir, exist_ok=True)
 
     # 計算負荷の分散
