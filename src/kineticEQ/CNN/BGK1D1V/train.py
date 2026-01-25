@@ -59,6 +59,7 @@ def loss_scaled_dnu(pred: torch.Tensor,
 
     s_min clamps the scale to avoid exploding normalized residuals in near-vacuum/near-zero regions.
     """
+    pred = pred.float(); y = y.float(); x = x.float()
     n0 = x[:, 0:1, :].abs()
     u0 = x[:, 1:2, :].abs()
     T0 = x[:, 2:3, :].abs()
