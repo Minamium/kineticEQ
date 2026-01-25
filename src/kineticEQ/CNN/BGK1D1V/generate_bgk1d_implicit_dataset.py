@@ -33,7 +33,7 @@ def main():
     # 計算負荷の分散
     g = torch.Generator()
     g.manual_seed(0)  # 全rankで同じ
-    all_cases = torch.randperm(80, generator=g).tolist()
+    all_cases = torch.randperm(160, generator=g).tolist()
     my_cases = all_cases[rank::world_size]
 
     for case_id in my_cases:
@@ -41,7 +41,13 @@ def main():
         # 乱数生成
         g_case = torch.Generator(device="cpu")
         g_case.manual_seed(1234 + int(case_id))
-        tau = 5e-6 # 暫定で固定
+
+        # 半分のケースでtauを変える
+        if case_id < 80:
+            tau = 5e-6
+        else:
+            tau = 5e-7
+
         dt = 5e-5 # 暫定で固定
 
         n_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.04
@@ -119,7 +125,7 @@ def main():
             case_id=int(case_id), rank=int(rank),
         )
 
-        np.savez_compressed(
+        np.savez(
             os.path.join(out_dir, f"case_{case_id:05d}.npz"),
             meta=np.bytes_(json.dumps(meta).encode("utf-8")),
             n=n_hist, u=u_hist, T=T_hist,
