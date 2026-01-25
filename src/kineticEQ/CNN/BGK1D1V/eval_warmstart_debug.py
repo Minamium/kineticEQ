@@ -1,3 +1,5 @@
+# kineticEQ/CNN/BGK1D1V/eval_warmstart_debug.py
+
 import os
 import sys
 import json

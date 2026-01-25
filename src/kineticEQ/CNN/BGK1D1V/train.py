@@ -42,6 +42,7 @@ def loss_scaled_dnu(pred: torch.Tensor,
                     y: torch.Tensor,
                     x: torch.Tensor,
                     eps: float = 1e-6,
+                    nb: int = 1,
                     u_eps: float = 5e-2,
                     s_min: float = 1e-3) -> torch.Tensor:
     """
@@ -70,7 +71,18 @@ def loss_scaled_dnu(pred: torch.Tensor,
     s = torch.clamp(s, min=float(s_min))
 
     e = F.smooth_l1_loss(pred / s, y / s, reduction="none")
-    return e.mean()
+    
+    # ---- boundary mask: interior=1, boundary=0 ----
+    nx = e.shape[-1]
+    if nb > 0 and 2 * nb < nx:
+        w = e.new_ones((1, 1, nx))
+        w[..., :nb] = 0.0
+        w[..., -nb:] = 0.0
+        e = e * w
+        denom = w.sum() * e.shape[0] * e.shape[1]   # 有効要素数 = B*3*nx_eff
+        return e.sum() / denom.clamp_min(1.0)
+    else:
+        return e.mean()
 
 
 def main():
@@ -117,7 +129,7 @@ def main():
     save_json(save_dir / "config.json", vars(args))
 
     # ---- model/optim ----
-    model = MomentCNN1D(in_ch=5, hidden=256, out_ch=3, kernel=11, n_blocks=8).to(device)
+    model = MomentCNN1D(in_ch=5, hidden=256, out_ch=3, kernel=11, n_blocks=8, gn_groups=64).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     scheduler = None
