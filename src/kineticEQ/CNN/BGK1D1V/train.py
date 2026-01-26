@@ -38,52 +38,135 @@ def make_loader(manifest: str, split: str, batch: int, workers: int, pin: bool, 
 
 
 # ---------------- loss (scaled) ----------------
-def loss_scaled_dnu(pred: torch.Tensor,
-                    y: torch.Tensor,
-                    x: torch.Tensor,
-                    eps: float = 1e-6,
-                    nb: int = 1,
-                    u_eps: float = 5e-2,
-                    s_min: float = 1e-3) -> torch.Tensor:
+def loss_weighted_dnu_with_u(
+    pred: torch.Tensor,
+    y: torch.Tensor,
+    x: torch.Tensor,
+    *,
+    eps: float = 1e-6,
+    nb: int = 1,
+    u_eps: float = 5e-2,
+    s_min: float = 1e-3,
+    # ---- weighting knobs ----
+    w_mode: str = "dm",          # "dm" or "du" or "none"
+    w_lambda: float = 5.0,       # weight strength
+    w_scale: float = 1.0,        # normalization scale for |dm| or |du| (roughly typical magnitude)
+    w_power: float = 1.0,        # emphasize tails: 1=linear, 2=quadratic
+    w_max: float = 30.0,         # cap weight to avoid exploding grads
+    # ---- u auxiliary loss ----
+    beta_u: float = 0.3,         # 0 disables u-loss
+    u_loss_kind: str = "du",     # "du" or "u1"
+    n_floor: float = 1e-12,
+) -> torch.Tensor:
     """
-    Scale-normalized SmoothL1 for target="dnu" outputs.
+    Weighted scaled SmoothL1 for target="dnu" with optional u/du auxiliary loss.
 
-    x: (B,5,nx)  = [n0, u0, T0, logdt, logtau]
-    y: (B,3,nx)  = [dn, d(nu) (or dm), dT]
-    pred: same as y
+    pred,y: (B,3,nx) = [dn, dm, dT]
+    x    : (B,5,nx) = [n0, u0, T0, logdt, logtau]
 
-    Scaling:
-      dn : |n0| + eps
-      dm : |n0|*(|u0| + u_eps) + eps    (prevents u0≈0 collapse)
-      dT : |T0| + eps
-
-    s_min clamps the scale to avoid exploding normalized residuals in near-vacuum/near-zero regions.
+    Core loss: SmoothL1( pred/s , y/s ) with s based on (n0,u0,T0) as before.
+    Weighting: w = 1 + w_lambda * clamp( (|dm_true|/w_scale)^w_power, 0, w_max-1 )
+               or same with |du_true|
+    Aux: L_u = SmoothL1(du_pred, du_true) or SmoothL1(u1_pred,u1_true)
     """
     pred = pred.float(); y = y.float(); x = x.float()
-    n0 = x[:, 0:1, :].abs()
-    u0 = x[:, 1:2, :].abs()
-    T0 = x[:, 2:3, :].abs()
 
-    s_n = n0 + eps
-    s_m = (n0 * (u0 + u_eps)) + eps
-    s_T = T0 + eps
+    # --- unpack ---
+    n0 = x[:, 0:1, :]
+    u0 = x[:, 1:2, :]
+    T0 = x[:, 2:3, :]
 
+    dn_p = pred[:, 0:1, :]
+    dm_p = pred[:, 1:2, :]
+    dT_p = pred[:, 2:3, :]
+
+    dn_t = y[:, 0:1, :]
+    dm_t = y[:, 1:2, :]
+    dT_t = y[:, 2:3, :]
+
+    # --- scaling (same spirit as your loss_scaled_dnu) ---
+    n0a = n0.abs()
+    u0a = u0.abs()
+    T0a = T0.abs()
+
+    s_n = n0a + eps
+    s_m = (n0a * (u0a + float(u_eps))) + eps
+    s_T = T0a + eps
     s = torch.cat([s_n, s_m, s_T], dim=1)
     s = torch.clamp(s, min=float(s_min))
 
-    e = F.smooth_l1_loss(pred / s, y / s, reduction="none")
-    
-    # ---- boundary mask: interior=1, boundary=0 ----
+    # --- elementwise SmoothL1 (no reduction) ---
+    e = F.smooth_l1_loss(pred / s, y / s, reduction="none")  # (B,3,nx)
+
+    # --- boundary mask ---
     nx = e.shape[-1]
     if nb > 0 and 2 * nb < nx:
-        w = e.new_ones((1, 1, nx))
-        w[..., :nb] = 0.0
-        w[..., -nb:] = 0.0
-        e = e * w
-        denom = w.sum() * e.shape[0] * e.shape[1]   # 有効要素数 = B*3*nx_eff
-        return e.sum() / denom.clamp_min(1.0)
+        bmask = e.new_ones((1, 1, nx))
+        bmask[..., :nb] = 0.0
+        bmask[..., -nb:] = 0.0
     else:
-        return e.mean()
+        bmask = None
+
+    # --- build weights w(x,y): focus on hard updates ---
+    if w_mode == "none":
+        w = e.new_ones((e.shape[0], 1, nx))
+    elif w_mode == "dm":
+        mag = dm_t.abs()
+        w = 1.0 + float(w_lambda) * torch.clamp((mag / float(w_scale)).pow(float(w_power)), 0.0, float(w_max) - 1.0)
+    elif w_mode == "du":
+        # du_true computed from (dn_t, dm_t)
+        n1_t = n0 + dn_t
+        n1_t_safe = torch.clamp(n1_t, min=float(n_floor))
+        u1_t = (n0 * u0 + dm_t) / n1_t_safe
+        du_t = u1_t - u0
+        mag = du_t.abs()
+        w = 1.0 + float(w_lambda) * torch.clamp((mag / float(w_scale)).pow(float(w_power)), 0.0, float(w_max) - 1.0)
+    else:
+        raise ValueError(f"unknown w_mode={w_mode}")
+
+    # apply boundary mask to weights too (avoid bias from boundaries)
+    if bmask is not None:
+        w = w * bmask
+
+    # weighted core loss
+    e_core = e * w  # (B,3,nx)
+
+    if bmask is not None:
+        denom = (w.sum() * e.shape[1]).clamp_min(1.0)  # sum over B*nx, then *3ch
+        L_core = e_core.sum() / denom
+    else:
+        L_core = e_core.mean()
+
+    # --- auxiliary u/du loss (prevents "dm/dn ok but u broken") ---
+    if float(beta_u) > 0.0:
+        # pred u1, true u1 from (dn,dm)
+        n1_p = n0 + dn_p
+        n1_t = n0 + dn_t
+        n1_p_safe = torch.clamp(n1_p, min=float(n_floor))
+        n1_t_safe = torch.clamp(n1_t, min=float(n_floor))
+
+        u1_p = (n0 * u0 + dm_p) / n1_p_safe
+        u1_t = (n0 * u0 + dm_t) / n1_t_safe
+
+        if u_loss_kind == "u1":
+            eu = F.smooth_l1_loss(u1_p, u1_t, reduction="none")  # (B,1,nx)
+        elif u_loss_kind == "du":
+            du_p = u1_p - u0
+            du_t = u1_t - u0
+            eu = F.smooth_l1_loss(du_p, du_t, reduction="none")
+        else:
+            raise ValueError(f"unknown u_loss_kind={u_loss_kind}")
+
+        if bmask is not None:
+            eu = eu * bmask
+            denom_u = bmask.sum() * eu.shape[0] * eu.shape[1]
+            L_u = eu.sum() / denom_u.clamp_min(1.0)
+        else:
+            L_u = eu.mean()
+
+        return L_core + float(beta_u) * L_u
+
+    return L_core
 
 
 def main():
@@ -184,7 +267,7 @@ def main():
 
             with torch.amp.autocast("cuda", enabled=use_amp):
                 pred = model(x)
-                loss = loss_scaled_dnu(
+                loss = loss_scaled_dnu_with_u(
                     pred, y, x,
                     eps=1e-6,
                     u_eps=float(args.u_eps),
@@ -259,7 +342,7 @@ def main():
                 y = y.to(device, non_blocking=True)
                 with torch.amp.autocast("cuda", enabled=use_amp):
                     pred = model(x)
-                    loss = loss_scaled_dnu(
+                    loss = loss_scaled_dnu_with_u(
                         pred, y, x,
                         eps=1e-6,
                         u_eps=float(args.u_eps),
