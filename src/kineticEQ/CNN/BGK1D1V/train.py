@@ -341,6 +341,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
 
     # ---- knobs for weighted loss ----
+    ap.add_argument("--nb", type=int, default=10)
     ap.add_argument("--u_eps", type=float, default=5e-2)
     ap.add_argument("--s_min", type=float, default=1e-2)
     ap.add_argument("--grad_clip", type=float, default=1.0)
@@ -448,7 +449,7 @@ def main():
                         pred, y, x,
                         nv=int(args.nv),
                         v_max=float(args.v_max),
-                        nb=1,
+                        nb=int(args.nb),
                         n_floor=float(args.n_floor),
                         T_floor=float(args.T_floor),
                         kind=str(args.fm_kind),
@@ -463,7 +464,7 @@ def main():
                     L_aux = loss_weighted_dnu_with_u(
                         pred, y, x,
                         eps=1e-6,
-                        nb=1,
+                        nb=int(args.nb),
                         u_eps=float(args.u_eps),
                         s_min=float(args.s_min),
                         w_mode=str(args.w_mode),
@@ -554,7 +555,7 @@ def main():
                             pred, y, x,
                             nv=int(args.nv),
                             v_max=float(args.v_max),
-                            nb=1,
+                            nb=int(args.nb),
                             n_floor=float(args.n_floor),
                             T_floor=float(args.T_floor),
                             kind=str(args.fm_kind),
@@ -568,7 +569,7 @@ def main():
                         L_aux = loss_weighted_dnu_with_u(
                             pred, y, x,
                             eps=1e-6,
-                            nb=1,
+                            nb=int(args.nb),
                             u_eps=float(args.u_eps),
                             s_min=float(args.s_min),
                             w_mode=str(args.w_mode),
