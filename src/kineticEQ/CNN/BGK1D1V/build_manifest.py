@@ -149,8 +149,8 @@ def main():
                     help="Output manifest json")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--train", type=float, default=0.8)
-    ap.add_argument("--val", type=float, default=0.1)
-    ap.add_argument("--test", type=float, default=0.1)
+    ap.add_argument("--val", type=float, default=0.15)
+    ap.add_argument("--test", type=float, default=0.05)
     ap.add_argument("--ignore_bad", action="store_true",
                     help="If set, continue even if some npz files are unreadable.")
     args = ap.parse_args()
