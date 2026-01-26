@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
 from pathlib import Path
+from dataclasses import dataclass
 
 from tqdm.auto import tqdm
 
@@ -16,6 +18,10 @@ from torch.utils.data import DataLoader
 
 from .models import MomentCNN1D
 from .dataloader_npz import BGK1D1VNPZDeltaDataset
+
+# --- core utils (requested) ---
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calculate_moments
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_maxwellian import maxwellian
 
 
 def save_json(path: Path, obj):
@@ -37,22 +43,22 @@ def make_loader(manifest: str, split: str, batch: int, workers: int, pin: bool, 
     return ds, dl
 
 
-# ---------------- loss (scaled) ----------------
+# ---------------- loss (scaled + weighted + u-aux) ----------------
 def loss_weighted_dnu_with_u(
     pred: torch.Tensor,
     y: torch.Tensor,
     x: torch.Tensor,
     *,
     eps: float = 1e-6,
-    nb: int = 1,
+    nb: int = 10,
     u_eps: float = 5e-2,
     s_min: float = 1e-3,
     # ---- weighting knobs ----
     w_mode: str = "dm",          # "dm" or "du" or "none"
     w_lambda: float = 5.0,       # weight strength
-    w_scale: float = 1.0,        # normalization scale for |dm| or |du| (roughly typical magnitude)
-    w_power: float = 1.0,        # emphasize tails: 1=linear, 2=quadratic
-    w_max: float = 30.0,         # cap weight to avoid exploding grads
+    w_scale: float = 1.0,        # normalization scale for |dm| or |du|
+    w_power: float = 1.0,        # 1=linear, 2=quadratic
+    w_max: float = 30.0,         # cap weight
     # ---- u auxiliary loss ----
     beta_u: float = 0.3,         # 0 disables u-loss
     u_loss_kind: str = "du",     # "du" or "u1"
@@ -63,11 +69,6 @@ def loss_weighted_dnu_with_u(
 
     pred,y: (B,3,nx) = [dn, dm, dT]
     x    : (B,5,nx) = [n0, u0, T0, logdt, logtau]
-
-    Core loss: SmoothL1( pred/s , y/s ) with s based on (n0,u0,T0) as before.
-    Weighting: w = 1 + w_lambda * clamp( (|dm_true|/w_scale)^w_power, 0, w_max-1 )
-               or same with |du_true|
-    Aux: L_u = SmoothL1(du_pred, du_true) or SmoothL1(u1_pred,u1_true)
     """
     pred = pred.float(); y = y.float(); x = x.float()
 
@@ -84,7 +85,7 @@ def loss_weighted_dnu_with_u(
     dm_t = y[:, 1:2, :]
     dT_t = y[:, 2:3, :]
 
-    # --- scaling (same spirit as your loss_scaled_dnu) ---
+    # --- scaling ---
     n0a = n0.abs()
     u0a = u0.abs()
     T0a = T0.abs()
@@ -107,39 +108,43 @@ def loss_weighted_dnu_with_u(
     else:
         bmask = None
 
-    # --- build weights w(x,y): focus on hard updates ---
+    # --- build weights ---
     if w_mode == "none":
         w = e.new_ones((e.shape[0], 1, nx))
     elif w_mode == "dm":
         mag = dm_t.abs()
-        w = 1.0 + float(w_lambda) * torch.clamp((mag / float(w_scale)).pow(float(w_power)), 0.0, float(w_max) - 1.0)
+        w = 1.0 + float(w_lambda) * torch.clamp(
+            (mag / float(w_scale)).pow(float(w_power)),
+            0.0,
+            float(w_max) - 1.0,
+        )
     elif w_mode == "du":
-        # du_true computed from (dn_t, dm_t)
         n1_t = n0 + dn_t
         n1_t_safe = torch.clamp(n1_t, min=float(n_floor))
         u1_t = (n0 * u0 + dm_t) / n1_t_safe
         du_t = u1_t - u0
         mag = du_t.abs()
-        w = 1.0 + float(w_lambda) * torch.clamp((mag / float(w_scale)).pow(float(w_power)), 0.0, float(w_max) - 1.0)
+        w = 1.0 + float(w_lambda) * torch.clamp(
+            (mag / float(w_scale)).pow(float(w_power)),
+            0.0,
+            float(w_max) - 1.0,
+        )
     else:
         raise ValueError(f"unknown w_mode={w_mode}")
 
-    # apply boundary mask to weights too (avoid bias from boundaries)
     if bmask is not None:
         w = w * bmask
 
-    # weighted core loss
     e_core = e * w  # (B,3,nx)
 
     if bmask is not None:
-        denom = (w.sum() * e.shape[1]).clamp_min(1.0)  # sum over B*nx, then *3ch
+        denom = (w.sum() * e.shape[1]).clamp_min(1.0)  # sum(B*nx)*3
         L_core = e_core.sum() / denom
     else:
         L_core = e_core.mean()
 
-    # --- auxiliary u/du loss (prevents "dm/dn ok but u broken") ---
+    # --- auxiliary u/du loss ---
     if float(beta_u) > 0.0:
-        # pred u1, true u1 from (dn,dm)
         n1_p = n0 + dn_p
         n1_t = n0 + dn_t
         n1_p_safe = torch.clamp(n1_p, min=float(n_floor))
@@ -169,6 +174,158 @@ def loss_weighted_dnu_with_u(
     return L_core
 
 
+# ---------------- fm loss (Maxwellian match) ----------------
+@dataclass
+class _DummyState:
+    # maxwellian(state) / calculate_moments(state, state.f) 用の最小state
+    v: torch.Tensor          # (nv,)
+    dv: float
+    n: torch.Tensor | None = None   # (B,nx) or (nx,)
+    u: torch.Tensor | None = None
+    T: torch.Tensor | None = None
+    f: torch.Tensor | None = None   # (B,nx,nv) (ここでは使わないが、ユーティリティ側が参照する可能性に備える)
+    f_m: torch.Tensor | None = None
+
+
+def _vgrid(v_max: float, nv: int, device, dtype) -> torch.Tensor:
+    return torch.linspace(-float(v_max), float(v_max), int(nv), device=device, dtype=dtype)
+
+
+def _maxwellian_fallback(n: torch.Tensor, u: torch.Tensor, T: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """
+    n,u,T: (B,nx)
+    v    : (nv,)
+    return: (B,nx,nv)
+    """
+    B, nx = n.shape
+    vv = v.view(1, 1, -1)            # (1,1,nv)
+    nn = n.unsqueeze(-1)             # (B,nx,1)
+    uu = u.unsqueeze(-1)             # (B,nx,1)
+    TT = T.unsqueeze(-1)             # (B,nx,1)
+
+    coef = nn / torch.sqrt(2.0 * math.pi * TT)
+    expo = torch.exp(-0.5 * (vv - uu).pow(2) / TT)
+    return coef * expo
+
+
+def loss_fm_from_dnu(
+    pred: torch.Tensor,
+    y: torch.Tensor,
+    x: torch.Tensor,
+    *,
+    nv: int,
+    v_max: float,
+    nb: int = 1,
+    n_floor: float = 1e-12,
+    T_floor: float = 1e-12,
+    kind: str = "rel_smoothl1",   # "smoothl1" | "rel_smoothl1" | "mse" | "rel_mse"
+    rel_eps: float = 1e-12,
+    v_stride: int = 1,            # 2なら速度点を半分に間引いて軽量化
+) -> torch.Tensor:
+    """
+    pred,y: (B,3,nx) = [dn, dm, dT]
+    x     : (B,5,nx) = [n0, u0, T0, logdt, logtau]
+
+    Maxwellian一致をlossにする（fm_t vs fm_y）
+    ※maxwellian(state) を第一候補に使い、形状不一致/例外時はフォールバック式で計算。
+    """
+    pred = pred.float(); y = y.float(); x = x.float()
+    device = pred.device
+    dtype = pred.dtype
+
+    n0 = x[:, 0:1, :]
+    u0 = x[:, 1:2, :]
+    T0 = x[:, 2:3, :]
+
+    dn_p, dm_p, dT_p = pred[:, 0:1, :], pred[:, 1:2, :], pred[:, 2:3, :]
+    dn_t, dm_t, dT_t = y[:, 0:1, :],    y[:, 1:2, :],    y[:, 2:3, :]
+
+    # t+1 moments (pred/true)
+    n1_p = torch.clamp(n0 + dn_p, min=float(n_floor))
+    n1_t = torch.clamp(n0 + dn_t, min=float(n_floor))
+
+    u1_p = (n0 * u0 + dm_p) / n1_p
+    u1_t = (n0 * u0 + dm_t) / n1_t
+
+    T1_p = torch.clamp(T0 + dT_p, min=float(T_floor))
+    T1_t = torch.clamp(T0 + dT_t, min=float(T_floor))
+
+    # squeeze to (B,nx)
+    n1_p2 = n1_p.squeeze(1)
+    u1_p2 = u1_p.squeeze(1)
+    T1_p2 = T1_p.squeeze(1)
+    n1_t2 = n1_t.squeeze(1)
+    u1_t2 = u1_t.squeeze(1)
+    T1_t2 = T1_t.squeeze(1)
+
+    # boundary mask (x-direction)
+    nx = pred.shape[-1]
+    if nb > 0 and 2 * nb < nx:
+        bmask = pred.new_ones((1, nx, 1))
+        bmask[:, :nb, :] = 0.0
+        bmask[:, -nb:, :] = 0.0
+    else:
+        bmask = None
+
+    # v grid
+    v = _vgrid(v_max=v_max, nv=nv, device=device, dtype=dtype)
+    if int(v_stride) > 1:
+        v = v[::int(v_stride)]
+
+    # try util maxwellian(state) first
+    dv = float(2.0 * v_max / max(nv - 1, 1))
+    st = _DummyState(v=v, dv=dv)
+
+    def _try_maxwellian(n, u, T) -> torch.Tensor:
+        # util側の期待形状が不明なので、まず(B,nx,nv)のダミーfを置いて呼び出し、駄目ならfallback
+        try:
+            st.n = n
+            st.u = u
+            st.T = T
+            st.f = torch.empty((n.shape[0], n.shape[1], st.v.numel()), device=device, dtype=dtype)
+            fm = maxwellian(st)  # expected: same shape as st.f
+            # normalize to (B,nx,nv)
+            if isinstance(fm, torch.Tensor):
+                if fm.dim() == 3:
+                    return fm
+                # ありがちな(B,nv,nx)も救済
+                if fm.dim() == 3 and fm.shape[1] == n.shape[1]:
+                    return fm
+            # utilがstate.f_mに書く実装の可能性
+            if isinstance(getattr(st, "f_m", None), torch.Tensor):
+                fm2 = st.f_m
+                if fm2.dim() == 3:
+                    return fm2
+            raise RuntimeError("maxwellian(util) returned non-tensor or unsupported shape")
+        except Exception:
+            return _maxwellian_fallback(n, u, T, st.v)
+
+    fm_p = _try_maxwellian(n1_p2, u1_p2, T1_p2)  # (B,nx,nv_eff)
+    fm_t = _try_maxwellian(n1_t2, u1_t2, T1_t2)
+
+    if kind == "smoothl1":
+        diff = fm_p - fm_t
+        e = F.smooth_l1_loss(diff, torch.zeros_like(diff), reduction="none")
+    elif kind == "rel_smoothl1":
+        diff = (fm_p - fm_t) / (fm_t.abs() + float(rel_eps))
+        e = F.smooth_l1_loss(diff, torch.zeros_like(diff), reduction="none")
+    elif kind == "mse":
+        e = (fm_p - fm_t).pow(2)
+    elif kind == "rel_mse":
+        diff = (fm_p - fm_t) / (fm_t.abs() + float(rel_eps))
+        e = diff.pow(2)
+    else:
+        raise ValueError(f"unknown kind={kind}")
+
+    if bmask is not None:
+        e = e * bmask  # broadcast (1,nx,1)
+
+        denom = (bmask.sum() * e.shape[0] * e.shape[-1]).clamp_min(1.0)
+        return e.sum() / denom
+    else:
+        return e.mean()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", type=str, required=True)
@@ -183,17 +340,16 @@ def main():
     ap.add_argument("--log_interval", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0)
 
-    # ---- knobs for scaled loss ----
-    ap.add_argument("--u_eps", type=float, default=5e-2, help="dm scale uses |u0|+u_eps (prevents collapse at u0~0)")
-    ap.add_argument("--s_min", type=float, default=1e-2, help="minimum scale clamp to avoid exploding normalized residuals")
-    ap.add_argument("--grad_clip", type=float, default=1.0, help="clip grad-norm (0 disables)")
+    # ---- knobs for weighted loss ----
+    ap.add_argument("--u_eps", type=float, default=5e-2)
+    ap.add_argument("--s_min", type=float, default=1e-2)
+    ap.add_argument("--grad_clip", type=float, default=1.0)
 
     ap.add_argument("--sched_plateau", action="store_true")
     ap.add_argument("--sched_patience", type=int, default=3)
     ap.add_argument("--sched_factor", type=float, default=0.5)
     ap.add_argument("--sched_min_lr", type=float, default=1e-6)
-    
-    # ---- weighted / u-aux loss knobs ----
+
     ap.add_argument("--w_mode", type=str, default="dm", choices=["dm", "du", "none"])
     ap.add_argument("--w_lambda", type=float, default=5.0)
     ap.add_argument("--w_scale", type=float, default=1e-3)
@@ -203,6 +359,17 @@ def main():
     ap.add_argument("--beta_u", type=float, default=0.3)
     ap.add_argument("--u_loss_kind", type=str, default="du", choices=["du", "u1"])
     ap.add_argument("--n_floor", type=float, default=1e-12)
+    ap.add_argument("--T_floor", type=float, default=1e-12)
+
+    # ---- Maxwellian (fm) loss knobs ----
+    ap.add_argument("--beta_fm", type=float, default=1.0, help="fm loss weight (0 disables)")
+    ap.add_argument("--beta_aux", type=float, default=0.05, help="aux dnu loss weight (stabilizer)")
+    ap.add_argument("--fm_kind", type=str, default="rel_smoothl1",
+                    choices=["smoothl1", "rel_smoothl1", "mse", "rel_mse"])
+    ap.add_argument("--fm_rel_eps", type=float, default=1e-12)
+    ap.add_argument("--fm_v_stride", type=int, default=1, help="stride on velocity grid for fm-loss (2 halves cost)")
+    ap.add_argument("--nv", type=int, default=256, help="velocity grid size for fm-loss")
+    ap.add_argument("--v_max", type=float, default=10.0, help="velocity grid half-range for fm-loss")
 
     args = ap.parse_args()
 
@@ -219,8 +386,6 @@ def main():
 
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
-
-    # save config
     save_json(save_dir / "config.json", vars(args))
 
     # ---- model/optim ----
@@ -237,7 +402,6 @@ def main():
             min_lr=float(args.sched_min_lr),
         )
 
-    # AMP (new API; warning-free)
     use_amp = (args.amp and device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
@@ -248,8 +412,7 @@ def main():
     best_val = float("inf")
     log_path = save_dir / "log.jsonl"
 
-    # tqdm設定（sbatchログでも崩れにくい）
-    disable_bar = False  # 必要なら: not sys.stdout.isatty()
+    disable_bar = False
 
     for ep in range(1, args.epochs + 1):
         # ---------------- train ----------------
@@ -278,25 +441,47 @@ def main():
 
             with torch.amp.autocast("cuda", enabled=use_amp):
                 pred = model(x)
-                loss = loss_weighted_dnu_with_u(
-                    pred, y, x,
-                    eps=1e-6,
-                    nb=1,
-                    u_eps=float(args.u_eps),
-                    s_min=float(args.s_min),
-                    w_mode=str(args.w_mode),
-                    w_lambda=float(args.w_lambda),
-                    w_scale=float(args.w_scale),
-                    w_power=float(args.w_power),
-                    w_max=float(args.w_max),
-                    beta_u=float(args.beta_u),
-                    u_loss_kind=str(args.u_loss_kind),
-                    n_floor=float(args.n_floor),
-                )
+
+                # (A) fm loss (main)
+                if float(args.beta_fm) > 0.0:
+                    L_fm = loss_fm_from_dnu(
+                        pred, y, x,
+                        nv=int(args.nv),
+                        v_max=float(args.v_max),
+                        nb=1,
+                        n_floor=float(args.n_floor),
+                        T_floor=float(args.T_floor),
+                        kind=str(args.fm_kind),
+                        rel_eps=float(args.fm_rel_eps),
+                        v_stride=int(args.fm_v_stride),
+                    )
+                else:
+                    L_fm = pred.new_zeros(())
+
+                # (B) auxiliary dnu loss (stabilizer; your current one)
+                if float(args.beta_aux) > 0.0:
+                    L_aux = loss_weighted_dnu_with_u(
+                        pred, y, x,
+                        eps=1e-6,
+                        nb=1,
+                        u_eps=float(args.u_eps),
+                        s_min=float(args.s_min),
+                        w_mode=str(args.w_mode),
+                        w_lambda=float(args.w_lambda),
+                        w_scale=float(args.w_scale),
+                        w_power=float(args.w_power),
+                        w_max=float(args.w_max),
+                        beta_u=float(args.beta_u),
+                        u_loss_kind=str(args.u_loss_kind),
+                        n_floor=float(args.n_floor),
+                    )
+                else:
+                    L_aux = pred.new_zeros(())
+
+                loss = float(args.beta_fm) * L_fm + float(args.beta_aux) * L_aux
 
             scaler.scale(loss).backward()
 
-            # (recommended) clip after unscale
             if float(args.grad_clip) > 0.0:
                 scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(args.grad_clip))
@@ -308,7 +493,6 @@ def main():
             tr_loss_sum += float(loss.item()) * bs
             tr_n += bs
 
-            # ---- progress ----
             if (it % args.log_interval == 0) or (it == 1) or (it == steps):
                 elapsed = time.time() - t_ep0
                 sec_per_it = elapsed / max(it, 1)
@@ -323,8 +507,10 @@ def main():
                     "s/it": f"{sec_per_it:.2f}",
                     "ETA_ep(min)": f"{eta_ep/60:.1f}",
                     "samples/s": f"{sps:.1f}",
-                    "u_eps": f"{args.u_eps:.2g}",
-                    "s_min": f"{args.s_min:.2g}",
+                    "beta_fm": f"{args.beta_fm:.2g}",
+                    "beta_aux": f"{args.beta_aux:.2g}",
+                    "fm_kind": f"{args.fm_kind}",
+                    "v_stride": f"{args.fm_v_stride}",
                 }
                 if device.type == "cuda":
                     postfix["max_mem(GB)"] = f"{torch.cuda.max_memory_allocated()/1e9:.2f}"
@@ -362,22 +548,44 @@ def main():
                 y = y.to(device, non_blocking=True)
                 with torch.amp.autocast("cuda", enabled=use_amp):
                     pred = model(x)
-                    loss = loss_weighted_dnu_with_u(
-                        pred, y, x,
-                        eps=1e-6,
-                        nb=1,
-                        u_eps=float(args.u_eps),
-                        s_min=float(args.s_min),
-                        w_mode=str(args.w_mode),
-                        w_lambda=float(args.w_lambda),
-                        w_scale=float(args.w_scale),
-                        w_power=float(args.w_power),
-                        w_max=float(args.w_max),
-                        beta_u=float(args.beta_u),
-                        u_loss_kind=str(args.u_loss_kind),
-                        n_floor=float(args.n_floor),
-                    )
 
+                    if float(args.beta_fm) > 0.0:
+                        L_fm = loss_fm_from_dnu(
+                            pred, y, x,
+                            nv=int(args.nv),
+                            v_max=float(args.v_max),
+                            nb=1,
+                            n_floor=float(args.n_floor),
+                            T_floor=float(args.T_floor),
+                            kind=str(args.fm_kind),
+                            rel_eps=float(args.fm_rel_eps),
+                            v_stride=int(args.fm_v_stride),
+                        )
+                    else:
+                        L_fm = pred.new_zeros(())
+
+                    if float(args.beta_aux) > 0.0:
+                        L_aux = loss_weighted_dnu_with_u(
+                            pred, y, x,
+                            eps=1e-6,
+                            nb=1,
+                            u_eps=float(args.u_eps),
+                            s_min=float(args.s_min),
+                            w_mode=str(args.w_mode),
+                            w_lambda=float(args.w_lambda),
+                            w_scale=float(args.w_scale),
+                            w_power=float(args.w_power),
+                            w_max=float(args.w_max),
+                            beta_u=float(args.beta_u),
+                            u_loss_kind=str(args.u_loss_kind),
+                            n_floor=float(args.n_floor),
+                        )
+                    else:
+                        L_aux = pred.new_zeros(())
+
+                    loss = float(args.beta_fm) * L_fm + float(args.beta_aux) * L_aux
+
+                # metrics (same as before)
                 n0 = x[:, 0:1, :]
                 u0 = x[:, 1:2, :]
                 T0 = x[:, 2:3, :]
@@ -449,7 +657,6 @@ def main():
         if scheduler is not None:
             scheduler.step(val_loss)
 
-        # ---------------- epoch summary ----------------
         is_best = val_loss < best_val
         if is_best:
             best_val = val_loss
@@ -475,7 +682,6 @@ def main():
         if is_best:
             torch.save(ckpt, save_dir / "best.pt")
 
-        # append jsonl
         with log_path.open("a") as f:
             f.write(json.dumps({
                 "epoch": ep,
@@ -487,6 +693,13 @@ def main():
                 "u_eps": float(args.u_eps),
                 "s_min": float(args.s_min),
                 "grad_clip": float(args.grad_clip),
+                "beta_fm": float(args.beta_fm),
+                "beta_aux": float(args.beta_aux),
+                "fm_kind": str(args.fm_kind),
+                "fm_rel_eps": float(args.fm_rel_eps),
+                "fm_v_stride": int(args.fm_v_stride),
+                "nv": int(args.nv),
+                "v_max": float(args.v_max),
                 "val_pred_dn_over_n0_linf": float(val_pred_dn_over_n0_linf),
                 "val_pred_dT_over_T0_linf": float(val_pred_dT_over_T0_linf),
                 "val_pred_dm_abs_linf": float(val_pred_dm_abs_linf),
