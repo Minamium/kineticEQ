@@ -147,7 +147,7 @@ def predict_next_moments_delta_dnu(
     u1 = m1 / n1_safe
 
     T1 = T0 + dT
-    return n1, u1, T1, dn, dm, dT
+    return n1[1:-1], u1[1:-1], T1[1:-1], dn[1:-1], dm[1:-1], dT[1:-1]
 
 
 @torch.no_grad()
@@ -277,7 +277,11 @@ def run_case_debug(
         n0_b, u0_b, T0_b = calculate_moments(eng_base.state, eng_base.state.f)
 
         # predict using baseline inputs (fair)
-        n1p, u1p, T1p, dn, dm, dT = predict_next_moments_delta_dnu(
+        n1p = n0_b.clone()
+        u1p = u0_b.clone()
+        T1p = T0_b.clone()
+        
+        n1p[1:-1], u1p[1:-1], T1p[1:-1], dn, dm, dT = predict_next_moments_delta_dnu(
             model, n0_b, u0_b, T0_b, logdt, logtau, n_floor=float(n_floor)
         )
 
