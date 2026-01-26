@@ -94,7 +94,7 @@ def main():
             grid=BGK1D.Grid1D1V(nx=512, nv=256, Lx=1.0, v_max=10.0),
             time=BGK1D.TimeConfig(dt=dt, T_total=0.05),
             params=BGK1D.BGK1D1VParams(tau_tilde=tau),
-            scheme_params=BGK1D.implicit.Params(picard_iter=1_000, picard_tol=1e-7, abs_tol=1e-13),
+            scheme_params=BGK1D.implicit.Params(picard_iter=1_000, picard_tol=1e-10, abs_tol=1e-13),
             initial=BGK1D.InitialCondition1D(initial_regions=(
                 {"x_range": (0.0, 0.2), "n": float(n_1), "u": float(u_1), "T": float(T_1)},
                 {"x_range": (0.2, 0.4), "n": float(n_2), "u": float(u_2), "T": float(T_2)},
