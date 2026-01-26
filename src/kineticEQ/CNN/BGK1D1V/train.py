@@ -192,6 +192,17 @@ def main():
     ap.add_argument("--sched_patience", type=int, default=3)
     ap.add_argument("--sched_factor", type=float, default=0.5)
     ap.add_argument("--sched_min_lr", type=float, default=1e-6)
+    
+    # ---- weighted / u-aux loss knobs ----
+    ap.add_argument("--w_mode", type=str, default="dm", choices=["dm", "du", "none"])
+    ap.add_argument("--w_lambda", type=float, default=5.0)
+    ap.add_argument("--w_scale", type=float, default=1e-3)
+    ap.add_argument("--w_power", type=float, default=1.0)
+    ap.add_argument("--w_max", type=float, default=30.0)
+
+    ap.add_argument("--beta_u", type=float, default=0.3)
+    ap.add_argument("--u_loss_kind", type=str, default="du", choices=["du", "u1"])
+    ap.add_argument("--n_floor", type=float, default=1e-12)
 
     args = ap.parse_args()
 
@@ -267,11 +278,20 @@ def main():
 
             with torch.amp.autocast("cuda", enabled=use_amp):
                 pred = model(x)
-                loss = loss_scaled_dnu_with_u(
+                loss = loss_weighted_dnu_with_u(
                     pred, y, x,
                     eps=1e-6,
+                    nb=1,
                     u_eps=float(args.u_eps),
                     s_min=float(args.s_min),
+                    w_mode=str(args.w_mode),
+                    w_lambda=float(args.w_lambda),
+                    w_scale=float(args.w_scale),
+                    w_power=float(args.w_power),
+                    w_max=float(args.w_max),
+                    beta_u=float(args.beta_u),
+                    u_loss_kind=str(args.u_loss_kind),
+                    n_floor=float(args.n_floor),
                 )
 
             scaler.scale(loss).backward()
@@ -342,11 +362,20 @@ def main():
                 y = y.to(device, non_blocking=True)
                 with torch.amp.autocast("cuda", enabled=use_amp):
                     pred = model(x)
-                    loss = loss_scaled_dnu_with_u(
+                    loss = loss_weighted_dnu_with_u(
                         pred, y, x,
                         eps=1e-6,
+                        nb=1,
                         u_eps=float(args.u_eps),
                         s_min=float(args.s_min),
+                        w_mode=str(args.w_mode),
+                        w_lambda=float(args.w_lambda),
+                        w_scale=float(args.w_scale),
+                        w_power=float(args.w_power),
+                        w_max=float(args.w_max),
+                        beta_u=float(args.beta_u),
+                        u_loss_kind=str(args.u_loss_kind),
+                        n_floor=float(args.n_floor),
                     )
 
                 n0 = x[:, 0:1, :]
