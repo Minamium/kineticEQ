@@ -147,7 +147,7 @@ def predict_next_moments_delta_dnu(
     u1 = m1 / n1_safe
 
     T1 = T0 + dT
-    return n1[1:-1], u1[1:-1], T1[1:-1], dn[1:-1], dm[1:-1], dT[1:-1]
+    return n1[1:-1], u1[1:-1], T1[1:-1], dn, dm, dT
 
 
 @torch.no_grad()
