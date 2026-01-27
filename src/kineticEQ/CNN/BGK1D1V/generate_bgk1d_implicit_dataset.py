@@ -61,27 +61,41 @@ def main():
         # ここは必要なら調整：中心近傍sweepなので基本不要だが、保険として入れておくのはアリ
         tau = float(max(min(tau, 2.0e-6), 5.0e-8))
 
-        # --- dt: logscale sweep, 5e-5周辺を重点的に (中心70%) ---
-        # 70%: dt = 5e-5
-        # 30%: dt = 5e-5 * 10^{U[-0.2, +0.2]}  ≈ 0.63x .. 1.58x
+        # --- dt: logscale sweep, 5e-4周辺を重点的に (中心70%) ---
+        # 70%: dt = 5e-4
+        # 30%: dt = 5e-4 * 10^{U[-0.2, +0.2]}  ≈ 0.63x .. 1.58x
         if torch.rand((), generator=g_case).item() < 0.70:
-            dt = 5e-5
+            dt = 5e-4
         else:
             log10_factor = (torch.rand((), generator=g_case).item() * 0.4) - 0.2
-            dt = 5e-5 * (10.0 ** log10_factor)
+            dt = 5e-4 * (10.0 ** log10_factor)
 
         # 安全柵（任意）
         dt = float(max(min(dt, 2.0e-4), 1.0e-5))
 
+        # 領域位置のsweep(幅最低0.1を保証)
+        wmin = 0.10
+        # 4領域なので最小幅の合計は 4*wmin、残りをランダム配分
+        rem = 1.0 - 4.0*wmin
+        r = torch.rand((4,), generator=g_case)
+        r = r / r.sum()
+        w = wmin + rem * r  # 4つの幅、必ず各>=wmin、総和=1
 
+        x0 = float(w[0])
+        x1 = float(w[0] + w[1])
+        x2 = float(w[0] + w[1] + w[2])
+
+
+        # --- 初期分布 ---
+        # 4領域の密度をランダムに設定
         n_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4
         n_2 = 0.5 + (torch.rand((), generator=g_case) - 0.5) * 0.4
         n_3 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4
         n_4 = 0.5 + (torch.rand((), generator=g_case) - 0.5) * 0.4
 
         u_1 = 0.0
-        u_2 = 0.0 + (torch.rand((), generator=g_case) - 0.5) * 0.04
-        u_3 = 0.0 + (torch.rand((), generator=g_case) - 0.5) * 0.04
+        u_2 = 0.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4 * float(np.sqrt(T_2))
+        u_3 = 0.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4 * float(np.sqrt(T_3))
         u_4 = 0.0
 
         T_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4
@@ -94,12 +108,12 @@ def main():
             grid=BGK1D.Grid1D1V(nx=512, nv=256, Lx=1.0, v_max=10.0),
             time=BGK1D.TimeConfig(dt=dt, T_total=0.05),
             params=BGK1D.BGK1D1VParams(tau_tilde=tau),
-            scheme_params=BGK1D.implicit.Params(picard_iter=1_000, picard_tol=1e-10, abs_tol=1e-13),
+            scheme_params=BGK1D.implicit.Params(picard_iter=10_000, picard_tol=1e-6, abs_tol=1e-13),
             initial=BGK1D.InitialCondition1D(initial_regions=(
-                {"x_range": (0.0, 0.2), "n": float(n_1), "u": float(u_1), "T": float(T_1)},
-                {"x_range": (0.2, 0.4), "n": float(n_2), "u": float(u_2), "T": float(T_2)},
-                {"x_range": (0.4, 0.7), "n": float(n_3), "u": float(u_3), "T": float(T_3)},
-                {"x_range": (0.7, 1.0), "n": float(n_4), "u": float(u_4), "T": float(T_4)},
+                {"x_range": (0.0, x0), "n": float(n_1), "u": float(u_1), "T": float(T_1)},
+                {"x_range": (x0,  x1), "n": float(n_2), "u": float(u_2), "T": float(T_2)},
+                {"x_range": (x1,  x2), "n": float(n_3), "u": float(u_3), "T": float(T_3)},
+                {"x_range": (x2, 1.0), "n": float(n_4), "u": float(u_4), "T": float(T_4)},
                 )
             )
         )
