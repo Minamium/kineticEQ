@@ -46,7 +46,6 @@ def make_loader(manifest: str, split: str, batch: int, workers: int, pin: bool, 
 
 
 # ---------------- normalized residuals on next moments ----------------
-@torch.no_grad()
 def compute_stdW_residuals(
     pred: torch.Tensor,
     y: torch.Tensor,
