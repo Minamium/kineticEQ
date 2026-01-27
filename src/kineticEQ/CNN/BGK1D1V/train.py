@@ -84,8 +84,11 @@ def compute_stdW_residuals(
     T1_t = torch.clamp(T0 + dT_t, min=float(T_floor))
 
     rn = (n1_p - n1_t) / (torch.max(n1_t.abs(), n1_p.abs()) + float(eps))
-    ru = (u1_p - u1_t) / (torch.max(u1_t.abs(), u1_p.abs()) + float(eps))
     rT = (T1_p - T1_t) / (torch.max(T1_t.abs(), T1_p.abs()) + float(eps))
+
+    # ru を熱速度で正規化
+    vth = torch.maximum(torch.sqrt(T1_t), torch.sqrt(T1_p))
+    ru = (u1_p - u1_t) / (vth + float(eps))
 
     nx = rn.shape[-1]
     if nb > 0 and 2 * nb < nx:
@@ -146,7 +149,7 @@ def parse_args():
 
     # loss knobs
     ap.add_argument("--loss_kind", type=str, default="smoothl1", choices=["smoothl1", "mse", "l1"])
-    ap.add_argument("--loss_eps", type=float, default=1e-12)
+    ap.add_argument("--loss_eps", type=float, default=1e-6)
     ap.add_argument("--nb", type=int, default=10)
     ap.add_argument("--n_floor", type=float, default=1e-12)
     ap.add_argument("--T_floor", type=float, default=1e-12)
