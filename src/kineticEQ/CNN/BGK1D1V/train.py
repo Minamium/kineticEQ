@@ -83,9 +83,9 @@ def compute_stdW_residuals(
     T1_p = torch.clamp(T0 + dT_p, min=float(T_floor))
     T1_t = torch.clamp(T0 + dT_t, min=float(T_floor))
 
-    rn = (n1_p - n1_t) / (n1_t.abs() + float(eps))
-    ru = (u1_p - u1_t) / (u1_t.abs() + float(eps))
-    rT = (T1_p - T1_t) / (T1_t.abs() + float(eps))
+    rn = (n1_p - n1_t) / (torch.max(n1_t.abs(), n1_p.abs()) + float(eps))
+    ru = (u1_p - u1_t) / (torch.max(u1_t.abs(), u1_p.abs()) + float(eps))
+    rT = (T1_p - T1_t) / (torch.max(T1_t.abs(), T1_p.abs()) + float(eps))
 
     nx = rn.shape[-1]
     if nb > 0 and 2 * nb < nx:

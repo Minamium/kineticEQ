@@ -209,6 +209,7 @@ def build_cfg(
         model="BGK1D1V",
         scheme="implicit",
         backend="cuda_kernel",
+        device="cuda",
         model_cfg=model_cfg,
         log_level="err",
         use_tqdm=False,
@@ -250,7 +251,6 @@ def run_case_debug(
       - model output: [Δn, Δ(nu), ΔT]
       - u は (n,u) から復元して評価
     """
-    torch.set_default_device(device)
 
     eng_base = Engine(cfg)
     eng_warm = Engine(cfg)
