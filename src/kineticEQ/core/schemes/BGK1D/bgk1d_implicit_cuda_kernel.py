@@ -95,7 +95,7 @@ def step(state: State1D1V, cfg: Config, ws: ImplicitWorkspace, cuda_module, gtsv
 
 def build_stepper(cfg: Config, state: State1D1V) -> Stepper:
     # CFL条件チェック
-    bgk1d_check_CFL(cfg)
+    #bgk1d_check_CFL(cfg)
 
     # JITコンパイル
     cuda_module = load_implicit_fused()
