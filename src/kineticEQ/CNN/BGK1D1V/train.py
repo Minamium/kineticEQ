@@ -15,6 +15,9 @@ from torch.utils.data import DataLoader
 from .models import MomentCNN1D
 from .dataloader_npz import BGK1D1VNPZDeltaDataset
 
+# --- optional warmstart debug eval (epoch-end) ---
+from .eval_warmstart_debug import build_cfg, run_case_debug
+
 
 # ---------------- utils ----------------
 def save_json(path: Path, obj):
@@ -158,6 +161,18 @@ def parse_args():
     ap.add_argument("--sched_patience", type=int, default=3)
     ap.add_argument("--sched_factor", type=float, default=0.5)
     ap.add_argument("--sched_min_lr", type=float, default=1e-6)
+
+    # ---- epoch-end warmstart eval (print only; uses LAST model) ----
+    ap.add_argument("--warm_eval", action="store_true", help="run warmstart debug at each epoch end (print only)")
+    ap.add_argument("--warm_eval_tau", type=float, default=5e-7)
+    ap.add_argument("--warm_eval_dt", type=float, default=5e-5)
+    ap.add_argument("--warm_eval_T_total", type=float, default=0.01)
+    ap.add_argument("--warm_eval_picard_iter", type=int, default=1000)
+    ap.add_argument("--warm_eval_picard_tol", type=float, default=1e-4)
+    ap.add_argument("--warm_eval_abs_tol", type=float, default=1e-13)
+    ap.add_argument("--warm_eval_debug_steps", type=int, default=0, help="0 disables per-step debug_log collection")
+    ap.add_argument("--warm_eval_n_floor", type=float, default=1e-12)
+    ap.add_argument("--warm_eval_T_floor", type=float, default=1e-12)
     return ap.parse_args()
 
 
@@ -401,6 +416,53 @@ def main():
                 "grad_clip": float(args.grad_clip),
                 "amp": bool(args.amp),
             }) + "\n")
+
+        # ---------------- epoch-end warmstart debug (LATEST model; print only) ----------------
+        if bool(args.warm_eval):
+            try:
+                # keep it deterministic & no grad
+                model.eval()
+                device_eval = device
+
+                cfg = build_cfg(
+                    tau=float(args.warm_eval_tau),
+                    dt=float(args.warm_eval_dt),
+                    T_total=float(args.warm_eval_T_total),
+                    nx=int(cfg_nx := 512),   # NOTE: if you want to match training nx, set explicitly
+                    nv=int(cfg_nv := 256),
+                    Lx=1.0,
+                    v_max=10.0,
+                    picard_iter=int(args.warm_eval_picard_iter),
+                    picard_tol=float(args.warm_eval_picard_tol),
+                    abs_tol=float(args.warm_eval_abs_tol),
+                )
+
+                # infer n_steps from cfg
+                n_steps = int(round(cfg.model_cfg.time.T_total / cfg.model_cfg.time.dt))
+
+                for a in (1.0, 0.9, 0.8):
+                    out = run_case_debug(
+                        cfg=cfg,
+                        model=model,                      # <-- latest weights in memory
+                        n_steps=n_steps,
+                        device=device_eval,
+                        mix_alpha=float(a),
+                        debug_steps=int(args.warm_eval_debug_steps),
+                        n_floor=float(args.warm_eval_n_floor),
+                        T_floor=float(args.warm_eval_T_floor),
+                    )
+                    base_sum = int(out["picard_iter_sum_base"])
+                    warm_sum = int(out["picard_iter_sum_warm"])
+                    speed = (base_sum / max(warm_sum, 1))
+                    print(
+                        f"[warm-eval ep{ep:03d}] "
+                        f"tau={args.warm_eval_tau:.3e} alpha={a:.2f} "
+                        f"picard_sum base={base_sum} warm={warm_sum} (x{speed:.2f})",
+                        flush=True,
+                    )
+            except Exception as e:
+                print(f"[warm-eval ep{ep:03d}] FAILED: {type(e).__name__}: {e}", flush=True)
+
 
     train_ds.close()
     val_ds.close()
