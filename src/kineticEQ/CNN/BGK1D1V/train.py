@@ -164,7 +164,7 @@ def parse_args():
     # ---- epoch-end warmstart eval (print only; uses LAST model) ----
     ap.add_argument("--warm_eval", action="store_true", help="run warmstart debug at each epoch end (print only)")
     ap.add_argument("--warm_eval_tau", type=float, default=5e-7)
-    ap.add_argument("--warm_eval_dt", type=float, default=5e-5)
+    ap.add_argument("--warm_eval_dt", type=float, default=5e-4)
     ap.add_argument("--warm_eval_T_total", type=float, default=0.02)
     ap.add_argument("--warm_eval_picard_iter", type=int, default=1000)
     ap.add_argument("--warm_eval_picard_tol", type=float, default=1e-4)
