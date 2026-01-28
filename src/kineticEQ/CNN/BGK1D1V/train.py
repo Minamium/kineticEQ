@@ -204,9 +204,9 @@ def parse_args():
     ap.add_argument("--warm_eval", action="store_true", help="run warmstart debug at each epoch end (print only)")
     ap.add_argument("--warm_eval_tau", type=float, default=5e-7)
     ap.add_argument("--warm_eval_dt", type=float, default=5e-5)
-    ap.add_argument("--warm_eval_T_total", type=float, default=0.02)
+    ap.add_argument("--warm_eval_T_total", type=float, default=0.05)
     ap.add_argument("--warm_eval_picard_iter", type=int, default=1000)
-    ap.add_argument("--warm_eval_picard_tol", type=float, default=1e-4)
+    ap.add_argument("--warm_eval_picard_tol", type=float, default=1e-3)
     ap.add_argument("--warm_eval_abs_tol", type=float, default=1e-13)
     ap.add_argument("--warm_eval_debug_steps", type=int, default=0, help="0 disables per-step debug_log collection")
     ap.add_argument("--warm_eval_n_floor", type=float, default=1e-12)
@@ -239,7 +239,7 @@ def main():
     save_dir.mkdir(parents=True, exist_ok=True)
     save_json(save_dir / "config.json", vars(args))
 
-    model = MomentCNN1D(in_ch=5, hidden=256, out_ch=3, kernel=5, n_blocks=4).to(device)
+    model = MomentCNN1D(in_ch=5, hidden=256, out_ch=3, kernel=5, n_blocks=6).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr))
 
     scheduler = None
