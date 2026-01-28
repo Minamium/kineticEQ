@@ -239,7 +239,7 @@ def main():
     save_dir.mkdir(parents=True, exist_ok=True)
     save_json(save_dir / "config.json", vars(args))
 
-    model = MomentCNN1D(in_ch=5, hidden=256, out_ch=3, kernel=11, n_blocks=8).to(device)
+    model = MomentCNN1D(in_ch=5, hidden=256, out_ch=3, kernel=5, n_blocks=4).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr))
 
     scheduler = None

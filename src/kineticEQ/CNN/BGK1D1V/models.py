@@ -33,11 +33,9 @@ class MomentCNN1D(nn.Module):
             nn.SiLU(),
         )
 
-        # dilation schedule: 1,2,4,8,... (repeat)
-        dilations = [2 ** (i % 4) for i in range(n_blocks)]
         self.blocks = nn.ModuleList([
-            ResBlock1D(hidden, kernel=kernel, dilation=dilations[i], gn_groups=gn_groups, res_scale=0.1)
-            for i in range(n_blocks)
+            ResBlock1D(hidden, kernel=kernel, gn_groups=gn_groups, res_scale=0.1)
+            for _ in range(n_blocks)
         ])
 
         self.head = nn.Conv1d(hidden, out_ch, kernel_size=1)
@@ -55,18 +53,18 @@ class MomentCNN1D(nn.Module):
 
 
 class ResBlock1D(nn.Module):
-    def __init__(self, ch, kernel, dilation=1, gn_groups=32, res_scale=0.1):
+    def __init__(self, ch, kernel, gn_groups=32, res_scale=0.1):
         super().__init__()
-        pad = dilation * (kernel // 2)
+        pad = kernel // 2
         self.res_scale = float(res_scale)
 
         self.gn1  = nn.GroupNorm(gn_groups, ch)
         self.act1 = nn.SiLU()
-        self.conv1 = nn.Conv1d(ch, ch, kernel_size=kernel, padding=pad, dilation=dilation)
+        self.conv1 = nn.Conv1d(ch, ch, kernel_size=kernel, padding=pad)
 
         self.gn2  = nn.GroupNorm(gn_groups, ch)
         self.act2 = nn.SiLU()
-        self.conv2 = nn.Conv1d(ch, ch, kernel_size=kernel, padding=pad, dilation=dilation)
+        self.conv2 = nn.Conv1d(ch, ch, kernel_size=kernel, padding=pad)
 
         # optional: stabilize residual branch init
         nn.init.zeros_(self.conv2.weight)
