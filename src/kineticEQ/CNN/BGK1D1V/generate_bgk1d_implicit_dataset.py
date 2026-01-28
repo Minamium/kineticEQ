@@ -94,8 +94,8 @@ def main():
         n_4 = 0.5 + (torch.rand((), generator=g_case) - 0.5) * 0.4
 
         u_1 = 0.0
-        u_2 = 0.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4 * float(np.sqrt(T_2))
-        u_3 = 0.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4 * float(np.sqrt(T_3))
+        u_2 = 0.0 #+ (torch.rand((), generator=g_case) - 0.5) * 0.4 * float(np.sqrt(T_2))
+        u_3 = 0.0 #+ (torch.rand((), generator=g_case) - 0.5) * 0.4 * float(np.sqrt(T_3))
         u_4 = 0.0
 
         T_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4
