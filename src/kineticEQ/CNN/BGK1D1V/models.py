@@ -22,7 +22,7 @@ class MomentCNN1D(nn.Module):
       入力データはk時点でのモーメント値の絶対値, 教師データはPicard収束後のk+1時点のモーメント値との更新量とする(Δ学習).
 
     """
-    def __init__(self, in_ch=5, hidden=256, out_ch=3, kernel=11, n_blocks=8, gn_groups=32):
+    def __init__(self, in_ch=5, hidden=128, out_ch=3, kernel=5, n_blocks=2, gn_groups=32):
         super().__init__()
         assert hidden % gn_groups == 0, "hidden must be divisible by gn_groups"
         self.kernel = kernel
