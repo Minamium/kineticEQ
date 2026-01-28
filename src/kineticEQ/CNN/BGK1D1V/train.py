@@ -85,14 +85,14 @@ def compute_stdW_residuals(
 
     # n, T は絶対値で正規化, u は(熱速度, 絶対値)のいずれかで正規化
     # rn
-    rn = (n1_p - n1_t) / n1_t.abs() + float(eps)
+    rn = (n1_p - n1_t) / (n1_t.abs() + float(eps))
 
     # ru
     den = torch.stack([u1_t.abs(), torch.sqrt(T1_t)], dim=0).max(dim=0).values
     ru = (u1_p - u1_t) / (den + float(eps))
 
     # rT
-    rT = (T1_p - T1_t) / T1_t.abs() + float(eps)
+    rT = (T1_p - T1_t) / (T1_t.abs() + float(eps))
 
     nx = rn.shape[-1]
     if nb > 0 and 2 * nb < nx:
@@ -115,23 +115,53 @@ def std_w_loss_from_residuals(
     valid_count: torch.Tensor,
     *,
     kind: str = "smoothl1",
+    mse_ratio: float = 0.1,
+    tail_frac: float = 0.01,      # 上位1%だけMSEを当てる
+    eps: float = 1e-12,
 ):
     """
-    Given residuals (masked), compute mean loss over channels and space.
-    valid_count: number of valid x-cells per sample line (scalar tensor)
+    SmoothL1（全点） + Tail(MSE)（上位 tail_frac のみ）で平均化した損失を返す。
+    rn,ru,rT は境界マスク済み（マスク部は0）を想定。
+    valid_count: 1サンプルあたりの有効セル数（scalar tensor）
     """
     r = torch.cat([rn, ru, rT], dim=1)  # (B,3,nx)
+    B, C, nx = r.shape
+
+    # ---- base loss (all points) ----
     if kind == "smoothl1":
-        # masked zeros are already in r; normalize by valid_count*B*3
-        e = F.smooth_l1_loss(r, torch.zeros_like(r), reduction="sum")
+        base = F.smooth_l1_loss(r, torch.zeros_like(r), reduction="sum")
     elif kind == "mse":
-        e = (r * r).sum()
+        base = (r * r).sum()
     elif kind == "l1":
-        e = r.abs().sum()
+        base = r.abs().sum()
     else:
         raise ValueError(f"unknown kind={kind}")
 
-    B = r.shape[0]
+    # ---- tail MSE: only top-k |r| among valid points ----
+    # valid points are those not masked => r != 0 (masked region is exactly 0)
+    r_flat = r.reshape(B, -1)                 # (B, 3*nx)
+    abs_flat = r_flat.abs()
+
+    valid_mask = abs_flat > 0                 # masked cells are 0
+    tail_mse_sum = r_flat.new_tensor(0.0)
+
+    # per-sample top-k (stable against different valid counts per sample)
+    for b in range(B):
+        vb = valid_mask[b]
+        if not torch.any(vb):
+            continue
+        vals = abs_flat[b, vb]                # (Nv,)
+        Nv = int(vals.numel())
+        k = max(1, int(round(tail_frac * Nv)))
+        # threshold = k-th largest
+        thr = torch.topk(vals, k, largest=True, sorted=False).values.min()
+        tail_sel = vb & (abs_flat[b] >= (thr - eps))
+        # MSE on selected tail points
+        tail_mse_sum = tail_mse_sum + (r_flat[b, tail_sel] ** 2).sum()
+
+    e = base + float(mse_ratio) * tail_mse_sum
+
+    # normalize by effective count (valid_count is per-sample per-channel-line count)
     denom = (valid_count * B * 3.0).clamp_min(1.0)
     return e / denom
 
@@ -157,6 +187,7 @@ def parse_args():
     ap.add_argument("--nb", type=int, default=10)
     ap.add_argument("--n_floor", type=float, default=1e-8)
     ap.add_argument("--T_floor", type=float, default=1e-8)
+    ap.add_argument("--mse_ratio", type=float, default=0.5)
 
     # optimization knobs
     ap.add_argument("--grad_clip", type=float, default=1.0)
@@ -256,7 +287,7 @@ def main():
                     T_floor=float(args.T_floor),
                     eps=float(args.loss_eps),
                 )
-                loss = std_w_loss_from_residuals(rn, ru, rT, valid, kind=str(args.loss_kind))
+                loss = std_w_loss_from_residuals(rn, ru, rT, valid, kind=str(args.loss_kind), mse_ratio=float(args.mse_ratio))
 
             scaler.scale(loss).backward()
             if float(args.grad_clip) > 0.0:
@@ -334,7 +365,7 @@ def main():
                         T_floor=float(args.T_floor),
                         eps=float(args.loss_eps),
                     )
-                    loss = std_w_loss_from_residuals(rn, ru, rT, valid, kind=str(args.loss_kind))
+                    loss = std_w_loss_from_residuals(rn, ru, rT, valid, kind=str(args.loss_kind), mse_ratio=float(args.mse_ratio))
 
                 bs = x.size(0)
                 va_loss_sum += float(loss.item()) * bs
