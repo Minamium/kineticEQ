@@ -83,13 +83,16 @@ def compute_stdW_residuals(
     T1_p = torch.clamp(T0 + dT_p, min=float(T_floor))
     T1_t = torch.clamp(T0 + dT_t, min=float(T_floor))
 
+    # n, T は絶対値で正規化, u は(熱速度, 絶対値)のいずれかで正規化
+    # rn
     rn = (n1_p - n1_t) / (torch.max(n1_t.abs(), n1_p.abs()) + float(eps))
-    ru = (u1_p - u1_t) / (torch.max(u1_t.abs(), u1_p.abs()) + float(eps))
-    rT = (T1_p - T1_t) / (torch.max(T1_t.abs(), T1_p.abs()) + float(eps))
 
-    # ru を熱速度で正規化
-    #vth = torch.maximum(torch.sqrt(T1_t), torch.sqrt(T1_p))
-    #ru = (u1_p - u1_t) / (torch.max(vth + float(eps))
+    # ru
+    den = torch.stack([u1_t.abs(), u1_p.abs(), torch.sqrt(T1_t), torch.sqrt(T1_p)], dim=0).max(dim=0).values
+    ru = (u1_p - u1_t) / (den + float(eps))
+
+    # rT
+    rT = (T1_p - T1_t) / (torch.max(T1_t.abs(), T1_p.abs()) + float(eps))
 
     nx = rn.shape[-1]
     if nb > 0 and 2 * nb < nx:
