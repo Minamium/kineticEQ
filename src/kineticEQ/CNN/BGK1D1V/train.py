@@ -221,7 +221,7 @@ def main():
     print(f"loss function: {args.loss_kind}", flush=True)
     print(f"mse_ratio: {args.mse_ratio}", flush=True)
     print(f"tail_frac: {args.tail_frac}", flush=True)
-    
+
 
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
@@ -341,7 +341,9 @@ def main():
                     "|rn|": f"{rn_mae:.2e}",
                     "|ru|": f"{ru_mae:.2e}",
                     "|rT|": f"{rT_mae:.2e}",
+                    "rn_max": f"{tr_rn_abs_max:.2e}",
                     "ru_max": f"{tr_ru_abs_max:.2e}",
+                    "rT_max": f"{tr_rT_abs_max:.2e}",
                 })
 
         train_loss = tr_loss_sum / max(tr_n, 1)
