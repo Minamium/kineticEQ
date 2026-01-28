@@ -93,15 +93,15 @@ def main():
         n_3 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4
         n_4 = 0.5 + (torch.rand((), generator=g_case) - 0.5) * 0.4
 
-        u_1 = 0.0
-        u_2 = 0.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4 * float(np.sqrt(T_2))
-        u_3 = 0.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4 * float(np.sqrt(T_3))
-        u_4 = 0.0
-
         T_1 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4
         T_2 = 0.8 + (torch.rand((), generator=g_case) - 0.5) * 0.4
         T_3 = 1.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4
         T_4 = 0.8 + (torch.rand((), generator=g_case) - 0.5) * 0.4
+
+        u_1 = 0.0
+        u_2 = 0.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4 * float(np.sqrt(T_2))
+        u_3 = 0.0 + (torch.rand((), generator=g_case) - 0.5) * 0.4 * float(np.sqrt(T_3))
+        u_4 = 0.0
 
         # モデル設定
         model_cfg = BGK1D.ModelConfig(
