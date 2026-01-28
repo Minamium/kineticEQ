@@ -339,7 +339,7 @@ def main():
                 rT_mae = tr_rT_abs_sum / max(tr_count, 1.0)
                 pbar.set_postfix({
                     "loss": f"{(tr_loss_sum/max(tr_n,1)):.3e}",
-                    "tail": f"{float(tr_tail_loss_sum/max(tr_n,1)):.3e}",
+                    "tail": f"{float(tr_tail_loss_sum/max(tr_n,1)) * float(args.mse_ratio):.3e}",
                     "base": f"{float(tr_base_loss_sum/max(tr_n,1)):.3e}",
                     "lr": f"{lr:.1e}",
                     "|rn|": f"{rn_mae:.2e}",
