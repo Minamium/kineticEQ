@@ -415,7 +415,7 @@ def main():
 
         val_loss = va_loss_sum / max(va_n, 1)
         val_base_loss = va_base_loss_sum / max(va_n, 1)
-        val_tail_loss = va_tail_loss_sum / max(va_n, 1)
+        val_tail_loss = (va_tail_loss_sum / max(va_n, 1)) * float(args.mse_ratio)
         va_rn_mae = va_rn_abs_sum / max(va_count, 1.0)
         va_ru_mae = va_ru_abs_sum / max(va_count, 1.0)
         va_rT_mae = va_rT_abs_sum / max(va_count, 1.0)
