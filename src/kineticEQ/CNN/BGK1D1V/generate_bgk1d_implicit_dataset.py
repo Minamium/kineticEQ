@@ -71,7 +71,7 @@ def main():
             dt = 5e-4 * (10.0 ** log10_factor)
 
         # 安全柵（任意）
-        dt = float(max(min(dt, 2.0e-4), 1.0e-5))
+        dt = float(max(min(dt, 2.0e-3), 1.0e-4))
 
         # 領域位置のsweep(幅最低0.1を保証)
         wmin = 0.10
