@@ -85,14 +85,14 @@ def compute_stdW_residuals(
 
     # n, T は絶対値で正規化, u は(熱速度, 絶対値)のいずれかで正規化
     # rn
-    rn = (n1_p - n1_t) / (torch.max(n1_t.abs(), n1_p.abs()) + float(eps))
+    rn = (n1_p - n1_t) / n1_t.abs() + float(eps)
 
     # ru
-    den = torch.stack([u1_t.abs(), u1_p.abs(), torch.sqrt(T1_t), torch.sqrt(T1_p)], dim=0).max(dim=0).values
+    den = torch.stack([u1_t.abs(), torch.sqrt(T1_t)], dim=0).max(dim=0).values
     ru = (u1_p - u1_t) / (den + float(eps))
 
     # rT
-    rT = (T1_p - T1_t) / (torch.max(T1_t.abs(), T1_p.abs()) + float(eps))
+    rT = (T1_p - T1_t) / T1_t.abs() + float(eps)
 
     nx = rn.shape[-1]
     if nb > 0 and 2 * nb < nx:
@@ -155,8 +155,8 @@ def parse_args():
     ap.add_argument("--loss_kind", type=str, default="smoothl1", choices=["smoothl1", "mse", "l1"])
     ap.add_argument("--loss_eps", type=float, default=1e-6)
     ap.add_argument("--nb", type=int, default=10)
-    ap.add_argument("--n_floor", type=float, default=1e-12)
-    ap.add_argument("--T_floor", type=float, default=1e-12)
+    ap.add_argument("--n_floor", type=float, default=1e-8)
+    ap.add_argument("--T_floor", type=float, default=1e-8)
 
     # optimization knobs
     ap.add_argument("--grad_clip", type=float, default=1.0)
@@ -171,7 +171,7 @@ def parse_args():
     # ---- epoch-end warmstart eval (print only; uses LAST model) ----
     ap.add_argument("--warm_eval", action="store_true", help="run warmstart debug at each epoch end (print only)")
     ap.add_argument("--warm_eval_tau", type=float, default=5e-7)
-    ap.add_argument("--warm_eval_dt", type=float, default=5e-4)
+    ap.add_argument("--warm_eval_dt", type=float, default=5e-5)
     ap.add_argument("--warm_eval_T_total", type=float, default=0.02)
     ap.add_argument("--warm_eval_picard_iter", type=int, default=1000)
     ap.add_argument("--warm_eval_picard_tol", type=float, default=1e-4)
