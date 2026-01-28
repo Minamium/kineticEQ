@@ -116,11 +116,11 @@ def std_w_loss_from_residuals(
     *,
     kind: str = "smoothl1",
     mse_ratio: float = 0.3,
-    tail_frac: float = 0.1,      # 上位tail_frac%だけMSEを当てる
+    tail_frac: float = 0.1,      # 上位 tail_frac% のみMSEを当てる
     eps: float = 1e-12,
 ):
     """
-    SmoothL1（全点） + Tail(MSE)（上位 tail_frac のみ）で平均化した損失を返す。
+    SmoothL1（全点） + Tail(MSE)（上位 tail_frac% のみ）で平均化した損失を返す。
     rn,ru,rT は境界マスク済み（マスク部は0）を想定。
     valid_count: 1サンプルあたりの有効セル数（scalar tensor）
     """
@@ -265,6 +265,8 @@ def main():
 
         tr_loss_sum = 0.0
         tr_n = 0
+        tr_base_loss_sum = 0.0
+        tr_tail_loss_sum = 0.0
 
         # channel-wise stats on residuals
         tr_rn_abs_sum = 0.0
@@ -309,6 +311,8 @@ def main():
 
             bs = x.size(0)
             tr_loss_sum += float(loss.item()) * bs
+            tr_base_loss_sum += float(base_loss.item()) * bs
+            tr_tail_loss_sum += float(tail_loss.item()) * bs
             tr_n += bs
 
             # accumulate stats (abs mean + abs max) on valid region
@@ -335,8 +339,8 @@ def main():
                 rT_mae = tr_rT_abs_sum / max(tr_count, 1.0)
                 pbar.set_postfix({
                     "loss": f"{(tr_loss_sum/max(tr_n,1)):.3e}",
-                    "tail": f"{float(tail_loss.item()):.3e}",
-                    "base": f"{float(base_loss.item()):.3e}",
+                    "tail": f"{float(tr_tail_loss_sum/max(tr_n,1)):.3e}",
+                    "base": f"{float(tr_base_loss_sum/max(tr_n,1)):.3e}",
                     "lr": f"{lr:.1e}",
                     "|rn|": f"{rn_mae:.2e}",
                     "|ru|": f"{ru_mae:.2e}",
