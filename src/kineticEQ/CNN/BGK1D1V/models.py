@@ -4,100 +4,154 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-# MomentCNN1D
+
 class MomentCNN1D(nn.Module):
     """
     MomentCNN1D:
       入力:  (B, 5, nx)  = (n, u, T, log10dt, log10tau)
-      出力:  (B, 3, nx)  = (Δn, Δu, ΔT)
+      出力:  (B, 3, nx)  = (Δn, Δ(nu), ΔT)  ※2ch目は Δu ではなく運動量更新 dm=Δ(nu) の想定
 
-      CNN構造:
-        基本入力はモーメントベクトルWと物理空間分割数nxによる(W, nx), その他dt, tau_tildeをログスケールで入力
-        1次元畳み込みでカーネルサイズは基本を7として調整, paddingは"same padding"相当
-        隠れ層は~~層で各層のニューロン数は~~, 活性化関数は~~を基本として調整, 
-
-        ResNet構造については~~
-
-    学習方針:
-      入力データはk時点でのモーメント値の絶対値, 教師データはPicard収束後のk+1時点のモーメント値との更新量とする(Δ学習).
-
+    設計意図:
+      - stem + 軽量ResBlock（bottleneck + depthwise conv + dilation）で推論を軽く
+      - base head は全域の滑らかな更新を担当
+      - tail head は外れ値（大残差）だけを補正する
+      - gate は「普段閉じる」初期化にして、tail が最初から全点へ混入しないようにする
     """
-    def __init__(self, in_ch=5, hidden=128, out_ch=3, kernel=5, n_blocks=2, gn_groups=32,
-                 bottleneck=0.5, dilation_cycle=(1, 2), use_gate_head=True):
+    def __init__(
+        self,
+        in_ch: int = 5,
+        hidden: int = 128,
+        out_ch: int = 3,
+        kernel: int = 5,
+        n_blocks: int = 2,
+        gn_groups: int = 32,
+        bottleneck: float = 0.5,
+        dilation_cycle: tuple[int, ...] = (1, 2),
+        use_gate_head: bool = True,
+        gate_bias_init: float = -4.0,   # <- 普段は閉 (sigmoid(-4)≈0.018)
+        gate_scale: float = 1.0,        # <- tail寄与の全体係数（必要なら0.1とか）
+        gate_per_channel: bool = False, # <- Trueで(B,3,nx)ゲート（より強いが少し重い）
+    ):
         super().__init__()
-        # GroupNorm groups auto-fix (hidden < 32 対策)
-        gn_groups = int(min(gn_groups, hidden))
-        while hidden % gn_groups != 0 and gn_groups > 1:
+
+        hidden = int(hidden)
+        n_blocks = int(n_blocks)
+        out_ch = int(out_ch)
+
+        # ---- GroupNorm groups auto-fix ----
+        gn_groups = int(min(int(gn_groups), hidden))
+        while gn_groups > 1 and (hidden % gn_groups) != 0:
             gn_groups -= 1
 
+        self.use_gate_head = bool(use_gate_head)
+        self.gate_scale = float(gate_scale)
+        self.gate_per_channel = bool(gate_per_channel)
+
+        # ---- stem ----
         self.stem = nn.Sequential(
-            nn.Conv1d(in_ch, hidden, kernel_size=kernel, padding=(kernel//2)),
+            nn.Conv1d(in_ch, hidden, kernel_size=kernel, padding=(kernel // 2)),
             nn.GroupNorm(gn_groups, hidden),
             nn.SiLU(),
         )
 
+        # ---- blocks ----
         blocks = []
-        for i in range(int(n_blocks)):
-            dil = int(dilation_cycle[i % len(dilation_cycle)])
-            blocks.append(LiteResBlock1D(hidden, kernel=kernel, dilation=dil,
-                                         gn_groups=gn_groups, res_scale=0.1, bottleneck=bottleneck))
+        dcyc = tuple(int(d) for d in dilation_cycle) if len(dilation_cycle) > 0 else (1,)
+        for i in range(n_blocks):
+            dil = int(dcyc[i % len(dcyc)])
+            blocks.append(
+                LiteResBlock1D(
+                    ch=hidden,
+                    kernel=kernel,
+                    dilation=dil,
+                    gn_groups=gn_groups,
+                    res_scale=0.1,
+                    bottleneck=bottleneck,
+                )
+            )
         self.blocks = nn.Sequential(*blocks)
 
-        # ---- head ----
-        # base head: always there
+        # ---- base head ----
         self.head_base = nn.Conv1d(hidden, out_ch, kernel_size=1)
         nn.init.zeros_(self.head_base.weight)
         if self.head_base.bias is not None:
             nn.init.zeros_(self.head_base.bias)
 
-        # optional: gate + tail head (外れ値専用の補正)
-        self.use_gate_head = bool(use_gate_head)
+        # ---- optional: gate + tail head ----
         if self.use_gate_head:
+            gate_out = out_ch if self.gate_per_channel else 1
             self.gate = nn.Sequential(
-                nn.Conv1d(hidden, 1, kernel_size=1),
-                nn.Sigmoid()
+                nn.Conv1d(hidden, gate_out, kernel_size=1),
+                nn.Sigmoid(),
             )
             self.head_tail = nn.Conv1d(hidden, out_ch, kernel_size=1)
-            # tail側は最初は0に近く、学習で必要な時だけ効くように
+
+            # tail head: start near zero
             nn.init.zeros_(self.head_tail.weight)
             if self.head_tail.bias is not None:
                 nn.init.zeros_(self.head_tail.bias)
 
-    def forward(self, x):
+            # IMPORTANT: gate should start "closed"
+            gate_conv = self.gate[0]
+            nn.init.zeros_(gate_conv.weight)
+            if gate_conv.bias is not None:
+                nn.init.constant_(gate_conv.bias, float(gate_bias_init))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.stem(x)
         h = self.blocks(h)
+
         y = self.head_base(h)
         if self.use_gate_head:
-            g = self.gate(h)          # (B,1,nx) : 外れ値っぽい場所だけ 1 に寄る
-            y = y + g * self.head_tail(h)
+            g = self.gate(h)  # (B,1,nx) or (B,3,nx)
+            # gate_per_channel=False のときは broadcast で (B,3,nx) に拡張される
+            y = y + (self.gate_scale * g) * self.head_tail(h)
         return y
 
 
 class LiteResBlock1D(nn.Module):
     """
     ch -> mid (1x1) -> depthwise(k, dilation) -> ch (1x1)
+    軽量・高速化狙いの ResBlock
     """
-    def __init__(self, ch, kernel=5, dilation=1, gn_groups=32, res_scale=0.1, bottleneck=0.5):
+    def __init__(
+        self,
+        ch: int,
+        kernel: int = 5,
+        dilation: int = 1,
+        gn_groups: int = 32,
+        res_scale: float = 0.1,
+        bottleneck: float = 0.5,
+    ):
         super().__init__()
         self.res_scale = float(res_scale)
 
+        ch = int(ch)
         mid = int(max(8, int(round(ch * float(bottleneck)))))
-        # mid も GroupNorm の割り切りを安全化
-        gn_mid = int(min(gn_groups, mid))
-        while mid % gn_mid != 0 and gn_mid > 1:
+
+        # GroupNorm for mid
+        gn_mid = int(min(int(gn_groups), mid))
+        while gn_mid > 1 and (mid % gn_mid) != 0:
             gn_mid -= 1
 
-        pad = (kernel // 2) * dilation
+        pad = (kernel // 2) * int(dilation)
 
         self.pre = nn.Sequential(
-            nn.GroupNorm(gn_groups, ch),
+            nn.GroupNorm(int(gn_groups), ch),
             nn.SiLU(),
             nn.Conv1d(ch, mid, kernel_size=1),
         )
         self.dw = nn.Sequential(
             nn.GroupNorm(gn_mid, mid),
             nn.SiLU(),
-            nn.Conv1d(mid, mid, kernel_size=kernel, padding=pad, dilation=dilation, groups=mid),  # depthwise
+            nn.Conv1d(
+                mid,
+                mid,
+                kernel_size=kernel,
+                padding=pad,
+                dilation=int(dilation),
+                groups=mid,  # depthwise
+            ),
         )
         self.post = nn.Sequential(
             nn.GroupNorm(gn_mid, mid),
@@ -105,12 +159,12 @@ class LiteResBlock1D(nn.Module):
             nn.Conv1d(mid, ch, kernel_size=1),
         )
 
-        # 安定化：残差枝の最後は小さく開始
+        # stabilize: last conv in residual branch starts at ~0
         nn.init.zeros_(self.post[-1].weight)
         if self.post[-1].bias is not None:
             nn.init.zeros_(self.post[-1].bias)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.pre(x)
         h = self.dw(h)
         h = self.post(h)
