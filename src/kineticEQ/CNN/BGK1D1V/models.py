@@ -34,7 +34,7 @@ class MomentCNN1D(nn.Module):
         )
 
         self.blocks = nn.ModuleList([
-            ResBlock1D(hidden, kernel=1, gn_groups=gn_groups, res_scale=0.1)
+            ResBlock1D(hidden, kernel=kernel, gn_groups=gn_groups, res_scale=0.1)
             for _ in range(n_blocks)
         ])
 
