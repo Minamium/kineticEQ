@@ -349,6 +349,8 @@ def main():
         model.eval()
         va_loss_sum = 0.0
         va_n = 0
+        va_base_loss_sum = 0.0
+        va_tail_loss_sum = 0.0
 
         va_rn_abs_sum = 0.0
         va_ru_abs_sum = 0.0
@@ -382,6 +384,8 @@ def main():
 
                 bs = x.size(0)
                 va_loss_sum += float(loss.item()) * bs
+                va_base_loss_sum += float(val_base_loss.item()) * bs
+                va_tail_loss_sum += float(val_tail_loss.item()) * bs
                 va_n += bs
 
                 B = rn.shape[0]
@@ -399,6 +403,8 @@ def main():
                 va_rT_abs_max = max(va_rT_abs_max, float(arT.max().item()))
 
         val_loss = va_loss_sum / max(va_n, 1)
+        val_base_loss = va_base_loss_sum / max(va_n, 1)
+        val_tail_loss = va_tail_loss_sum / max(va_n, 1)
         va_rn_mae = va_rn_abs_sum / max(va_count, 1.0)
         va_ru_mae = va_ru_abs_sum / max(va_count, 1.0)
         va_rT_mae = va_rT_abs_sum / max(va_count, 1.0)
