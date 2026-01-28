@@ -218,6 +218,11 @@ def parse_args():
 def main():
     args = parse_args()
 
+    print(f"loss function: {args.loss_kind}", flush=True)
+    print(f"mse_ratio: {args.mse_ratio}", flush=True)
+    print(f"tail_frac: {args.tail_frac}", flush=True)
+    
+
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
