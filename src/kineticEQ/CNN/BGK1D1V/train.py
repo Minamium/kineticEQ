@@ -115,8 +115,8 @@ def std_w_loss_from_residuals(
     valid_count: torch.Tensor,
     *,
     kind: str = "smoothl1",
-    mse_ratio: float = 0.1,
-    tail_frac: float = 0.01,      # 上位1%だけMSEを当てる
+    mse_ratio: float = 0.3,
+    tail_frac: float = 0.1,      # 上位tail_frac%だけMSEを当てる
     eps: float = 1e-12,
 ):
     """
@@ -188,6 +188,7 @@ def parse_args():
     ap.add_argument("--n_floor", type=float, default=1e-8)
     ap.add_argument("--T_floor", type=float, default=1e-8)
     ap.add_argument("--mse_ratio", type=float, default=0.5)
+    ap.add_argument("--tail_frac", type=float, default=0.1)
 
     # optimization knobs
     ap.add_argument("--grad_clip", type=float, default=1.0)
