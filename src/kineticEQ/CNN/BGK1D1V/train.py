@@ -163,7 +163,7 @@ def std_w_loss_from_residuals(
 
     # normalize by effective count (valid_count is per-sample per-channel-line count)
     denom = (valid_count * B * 3.0).clamp_min(1.0)
-    return e / denom
+    return (e / denom), (base / denom), (tail_mse_sum / denom)
 
 
 # ---------------- args ----------------
@@ -187,8 +187,8 @@ def parse_args():
     ap.add_argument("--nb", type=int, default=10)
     ap.add_argument("--n_floor", type=float, default=1e-8)
     ap.add_argument("--T_floor", type=float, default=1e-8)
-    ap.add_argument("--mse_ratio", type=float, default=0.5)
-    ap.add_argument("--tail_frac", type=float, default=0.1)
+    ap.add_argument("--mse_ratio", type=float, default=0.8)
+    ap.add_argument("--tail_frac", type=float, default=0.05)
 
     # optimization knobs
     ap.add_argument("--grad_clip", type=float, default=1.0)
@@ -288,7 +288,12 @@ def main():
                     T_floor=float(args.T_floor),
                     eps=float(args.loss_eps),
                 )
-                loss = std_w_loss_from_residuals(rn, ru, rT, valid, kind=str(args.loss_kind), mse_ratio=float(args.mse_ratio))
+                loss, base_loss, tail_loss = std_w_loss_from_residuals(
+                    rn, ru, rT, valid,
+                    kind=str(args.loss_kind),
+                    mse_ratio=float(args.mse_ratio),
+                    tail_frac=float(args.tail_frac)
+                )
 
             scaler.scale(loss).backward()
             if float(args.grad_clip) > 0.0:
@@ -325,6 +330,8 @@ def main():
                 rT_mae = tr_rT_abs_sum / max(tr_count, 1.0)
                 pbar.set_postfix({
                     "loss": f"{(tr_loss_sum/max(tr_n,1)):.3e}",
+                    "tail": f"{float(tail_loss.item()):.3e}",
+                    "base": f"{float(base_loss.item()):.3e}",
                     "lr": f"{lr:.1e}",
                     "|rn|": f"{rn_mae:.2e}",
                     "|ru|": f"{ru_mae:.2e}",
@@ -366,7 +373,12 @@ def main():
                         T_floor=float(args.T_floor),
                         eps=float(args.loss_eps),
                     )
-                    loss = std_w_loss_from_residuals(rn, ru, rT, valid, kind=str(args.loss_kind), mse_ratio=float(args.mse_ratio))
+                    loss, val_base_loss, val_tail_loss = std_w_loss_from_residuals(
+                        rn, ru, rT, valid,
+                        kind=str(args.loss_kind),
+                        mse_ratio=float(args.mse_ratio),
+                        tail_frac=float(args.tail_frac)
+                    )
 
                 bs = x.size(0)
                 va_loss_sum += float(loss.item()) * bs
@@ -400,7 +412,7 @@ def main():
 
         print(
             f"[epoch {ep:03d}] "
-            f"train={train_loss:.6e} val={val_loss:.6e} "
+            f"train={train_loss:.6e}, val={val_loss:.6e}, val_base={val_base_loss:.6e}, val_tail={val_tail_loss:.6e} "
             f"time={train_time:.1f}s best={best_val:.6e} "
             f"|rn|={va_rn_mae:.2e} |ru|={va_ru_mae:.2e} |rT|={va_rT_mae:.2e} "
             f"ru_max={va_ru_abs_max:.2e}",
@@ -414,6 +426,8 @@ def main():
             "best_val": best_val,
             "train_loss": train_loss,
             "val_loss": val_loss,
+            "val_base_loss": val_base_loss,
+            "val_tail_loss": val_tail_loss,
             "manifest": args.manifest,
             "args": vars(args),
         }
@@ -426,6 +440,8 @@ def main():
                 "epoch": ep,
                 "train_loss": train_loss,
                 "val_loss": val_loss,
+                "val_base_loss": float(val_base_loss),
+                "val_tail_loss": float(val_tail_loss),
                 "best_val": best_val,
                 "lr": opt.param_groups[0]["lr"],
                 "train_time_sec": train_time,
