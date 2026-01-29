@@ -90,7 +90,6 @@ def compute_stdW_residuals(
     T1_p = torch.clamp(T0 + dT_p, min=float(T_floor))
     T1_t = torch.clamp(T0 + dT_t, min=float(T_floor))
 
-    # n, T は絶対値で正規化, u は(熱速度, 絶対値)のいずれかで正規化
     # rn
     rn = (n1_p - n1_t) / (n1_t.abs() + float(eps))
 
@@ -115,26 +114,70 @@ def compute_stdW_residuals(
     return rn, ru, rT, valid
 
 
-def std_w_loss_from_residuals(
+def build_shock_mask_from_x(
+    x: torch.Tensor,
+    *,
+    nb: int = 10,
+    shock_q: float = 0.90,   # 0.90 -> top10% as shock
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """
+    x: (B,5,nx) のうち n,u,T を使って shock 指標 s=|Δn|+|Δu|+|ΔT| を作り、
+    上位(1-shock_q)を1とする mask を返す。境界 nb は 0。
+    returns: mask (B,1,nx) float (0/1)
+    """
+    B, _, nx = x.shape
+    n = x[:, 0:1, :].float()
+    u = x[:, 1:2, :].float()
+    T = x[:, 2:3, :].float()
+
+    dn = (n[..., 1:] - n[..., :-1]).abs()
+    du = (u[..., 1:] - u[..., :-1]).abs()
+    dT = (T[..., 1:] - T[..., :-1]).abs()
+
+    z = torch.zeros((B, 1, 1), device=x.device, dtype=torch.float32)
+    g = torch.cat([dn + du + dT, z], dim=-1)  # (B,1,nx)
+
+    bmask = None
+    if nb > 0 and 2 * nb < nx:
+        bmask = g.new_ones((1, 1, nx))
+        bmask[..., :nb] = 0.0
+        bmask[..., -nb:] = 0.0
+        g = g * bmask
+
+    g_flat = g.reshape(B, -1)  # (B,nx)
+
+    # all-zero safety: quantile==0 -> mask becomes all-ones; we want all-zeros in that case
+    g_max = torch.amax(g_flat, dim=1, keepdim=True)
+    thr = torch.quantile(g_flat, q=float(shock_q), dim=1, keepdim=True)
+    mask = (g_flat >= (thr - eps)).float()
+    mask = torch.where(g_max > 0.0, mask, torch.zeros_like(mask))
+
+    mask = mask.reshape(B, 1, nx)
+    if bmask is not None:
+        mask = mask * bmask
+    return mask
+
+
+def std_w_loss_from_residuals_shock(
     rn: torch.Tensor,
     ru: torch.Tensor,
     rT: torch.Tensor,
     valid_count: torch.Tensor,
+    shock_mask: torch.Tensor,
     *,
     kind: str = "smoothl1",
-    mse_ratio: float = 0.3,
-    tail_frac: float = 0.1,      # 上位 tail_frac% のみMSEを当てる
-    eps: float = 1e-12,
+    shock_ratio: float = 0.8,
 ):
     """
-    SmoothL1（全点） + Tail(MSE)（上位 tail_frac% のみ）で平均化した損失を返す。
+    base: 全点 SmoothL1 / MSE / L1
+    + shock: shock_mask==1 の点のみ MSE を追加
     rn,ru,rT は境界マスク済み（マスク部は0）を想定。
-    valid_count: 1サンプルあたりの有効セル数（scalar tensor）
+    shock_mask: (B,1,nx) 0/1（境界0）
     """
     r = torch.cat([rn, ru, rT], dim=1)  # (B,3,nx)
     B, C, nx = r.shape
 
-    # ---- base loss (all points) ----
     if kind == "smoothl1":
         base = F.smooth_l1_loss(r, torch.zeros_like(r), reduction="sum")
     elif kind == "mse":
@@ -144,33 +187,13 @@ def std_w_loss_from_residuals(
     else:
         raise ValueError(f"unknown kind={kind}")
 
-    # ---- tail MSE: only top-k |r| among valid points ----
-    # valid points are those not masked => r != 0 (masked region is exactly 0)
-    r_flat = r.reshape(B, -1)                 # (B, 3*nx)
-    abs_flat = r_flat.abs()
+    sm = shock_mask.float().expand(B, 3, nx)
+    shock_mse_sum = ((r * sm) ** 2).sum()
 
-    valid_mask = abs_flat > 0                 # masked cells are 0
-    tail_mse_sum = r_flat.new_tensor(0.0)
+    e = base + float(shock_ratio) * shock_mse_sum
 
-    # per-sample top-k (stable against different valid counts per sample)
-    for b in range(B):
-        vb = valid_mask[b]
-        if not torch.any(vb):
-            continue
-        vals = abs_flat[b, vb]                # (Nv,)
-        Nv = int(vals.numel())
-        k = max(1, int(round(tail_frac * Nv)))
-        # threshold = k-th largest
-        thr = torch.topk(vals, k, largest=True, sorted=False).values.min()
-        tail_sel = vb & (abs_flat[b] >= (thr - eps))
-        # MSE on selected tail points
-        tail_mse_sum = tail_mse_sum + (r_flat[b, tail_sel] ** 2).sum()
-
-    e = base + float(mse_ratio) * tail_mse_sum
-
-    # normalize by effective count (valid_count is per-sample per-channel-line count)
     denom = (valid_count * B * 3.0).clamp_min(1.0)
-    return (e / denom), (base / denom), (tail_mse_sum / denom)
+    return (e / denom), (base / denom), (shock_mse_sum / denom)
 
 
 # ---------------- args ----------------
@@ -197,8 +220,10 @@ def parse_args():
     ap.add_argument("--nb", type=int, default=10)
     ap.add_argument("--n_floor", type=float, default=1e-8)
     ap.add_argument("--T_floor", type=float, default=1e-8)
-    ap.add_argument("--mse_ratio", type=float, default=0.8)
-    ap.add_argument("--tail_frac", type=float, default=0.05)
+
+    # shock-mask loss knobs
+    ap.add_argument("--shock_ratio", type=float, default=0.8)
+    ap.add_argument("--shock_q", type=float, default=0.90)  # 0.90 -> top10% shock
 
     # optimization knobs
     ap.add_argument("--grad_clip", type=float, default=1.0)
@@ -229,13 +254,12 @@ def main():
     args = parse_args()
 
     print(f"loss function: {args.loss_kind}", flush=True)
-    print(f"mse_ratio: {args.mse_ratio}", flush=True)
-    print(f"tail_frac: {args.tail_frac}", flush=True)
+    print(f"shock_ratio: {args.shock_ratio}", flush=True)
+    print(f"shock_q: {args.shock_q}", flush=True)
     print(f"delta_type: {args.delta_type}", flush=True)
 
     # 最良モデルのSPEEDを保存するための変数
     best_speed = 0.0
-
 
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
@@ -280,7 +304,7 @@ def main():
         tr_loss_sum = 0.0
         tr_n = 0
         tr_base_loss_sum = 0.0
-        tr_tail_loss_sum = 0.0
+        tr_shock_loss_sum = 0.0
 
         # channel-wise stats on residuals
         tr_rn_abs_sum = 0.0
@@ -301,7 +325,6 @@ def main():
             with torch.amp.autocast("cuda", enabled=use_amp):
                 pred = model(x)
 
-                # residuals (for both loss + logging)
                 rn, ru, rT, valid = compute_stdW_residuals(
                     pred, y, x,
                     nb=int(args.nb),
@@ -310,11 +333,15 @@ def main():
                     eps=float(args.loss_eps),
                     delta_type=args.delta_type
                 )
-                loss, base_loss, tail_loss = std_w_loss_from_residuals(
-                    rn, ru, rT, valid,
+
+                shock_mask = build_shock_mask_from_x(
+                    x, nb=int(args.nb), shock_q=float(args.shock_q)
+                )
+
+                loss, base_loss, shock_loss = std_w_loss_from_residuals_shock(
+                    rn, ru, rT, valid, shock_mask,
                     kind=str(args.loss_kind),
-                    mse_ratio=float(args.mse_ratio),
-                    tail_frac=float(args.tail_frac)
+                    shock_ratio=float(args.shock_ratio),
                 )
 
             scaler.scale(loss).backward()
@@ -327,11 +354,9 @@ def main():
             bs = x.size(0)
             tr_loss_sum += float(loss.item()) * bs
             tr_base_loss_sum += float(base_loss.item()) * bs
-            tr_tail_loss_sum += float(tail_loss.item()) * bs
+            tr_shock_loss_sum += float(shock_loss.item()) * bs
             tr_n += bs
 
-            # accumulate stats (abs mean + abs max) on valid region
-            # valid region count per sample is "valid" (scalar), per batch is valid*B
             B = rn.shape[0]
             batch_count = float(valid.item()) * float(B)
             tr_count += batch_count
@@ -348,13 +373,12 @@ def main():
 
             if (it == 1) or (it % int(args.log_interval) == 0):
                 lr = opt.param_groups[0]["lr"]
-                # channel-wise mean abs residual so far
                 rn_mae = tr_rn_abs_sum / max(tr_count, 1.0)
                 ru_mae = tr_ru_abs_sum / max(tr_count, 1.0)
                 rT_mae = tr_rT_abs_sum / max(tr_count, 1.0)
                 pbar.set_postfix({
                     "loss": f"{(tr_loss_sum/max(tr_n,1)):.3e}",
-                    "tail": f"{float(tr_tail_loss_sum/max(tr_n,1)) * float(args.mse_ratio):.3e}",
+                    "shock": f"{float(tr_shock_loss_sum/max(tr_n,1)) * float(args.shock_ratio):.3e}",
                     "base": f"{float(tr_base_loss_sum/max(tr_n,1)):.3e}",
                     "lr": f"{lr:.1e}",
                     "|rn|": f"{rn_mae:.2e}",
@@ -376,7 +400,7 @@ def main():
         va_loss_sum = 0.0
         va_n = 0
         va_base_loss_sum = 0.0
-        va_tail_loss_sum = 0.0
+        va_shock_loss_sum = 0.0
 
         va_rn_abs_sum = 0.0
         va_ru_abs_sum = 0.0
@@ -402,17 +426,19 @@ def main():
                         eps=float(args.loss_eps),
                         delta_type=args.delta_type
                     )
-                    loss, val_base_loss, val_tail_loss = std_w_loss_from_residuals(
-                        rn, ru, rT, valid,
+                    shock_mask = build_shock_mask_from_x(
+                        x, nb=int(args.nb), shock_q=float(args.shock_q)
+                    )
+                    loss, val_base_loss, val_shock_loss = std_w_loss_from_residuals_shock(
+                        rn, ru, rT, valid, shock_mask,
                         kind=str(args.loss_kind),
-                        mse_ratio=float(args.mse_ratio),
-                        tail_frac=float(args.tail_frac)
+                        shock_ratio=float(args.shock_ratio),
                     )
 
                 bs = x.size(0)
                 va_loss_sum += float(loss.item()) * bs
                 va_base_loss_sum += float(val_base_loss.item()) * bs
-                va_tail_loss_sum += float(val_tail_loss.item()) * bs
+                va_shock_loss_sum += float(val_shock_loss.item()) * bs
                 va_n += bs
 
                 B = rn.shape[0]
@@ -431,7 +457,7 @@ def main():
 
         val_loss = va_loss_sum / max(va_n, 1)
         val_base_loss = va_base_loss_sum / max(va_n, 1)
-        val_tail_loss = (va_tail_loss_sum / max(va_n, 1)) * float(args.mse_ratio)
+        val_shock_loss = (va_shock_loss_sum / max(va_n, 1)) * float(args.shock_ratio)
         va_rn_mae = va_rn_abs_sum / max(va_count, 1.0)
         va_ru_mae = va_ru_abs_sum / max(va_count, 1.0)
         va_rT_mae = va_rT_abs_sum / max(va_count, 1.0)
@@ -445,7 +471,7 @@ def main():
 
         print(
             f"[epoch {ep:03d}] "
-            f"train={train_loss:.6e}, val={val_loss:.6e}, val_base={val_base_loss:.6e}, val_tail={val_tail_loss:.6e} "
+            f"train={train_loss:.6e}, val={val_loss:.6e}, val_base={val_base_loss:.6e}, val_shock={val_shock_loss:.6e} "
             f"time={train_time:.1f}s best={best_val:.6e} "
             f"|rn|={va_rn_mae:.2e} |ru|={va_ru_mae:.2e} |rT|={va_rT_mae:.2e} "
             f"ru_max={va_ru_abs_max:.2e}",
@@ -460,7 +486,7 @@ def main():
             "train_loss": train_loss,
             "val_loss": val_loss,
             "val_base_loss": val_base_loss,
-            "val_tail_loss": val_tail_loss,
+            "val_shock_loss": val_shock_loss,
             "manifest": args.manifest,
             "args": vars(args),
         }
@@ -474,7 +500,7 @@ def main():
                 "train_loss": train_loss,
                 "val_loss": val_loss,
                 "val_base_loss": float(val_base_loss),
-                "val_tail_loss": float(val_tail_loss),
+                "val_shock_loss": float(val_shock_loss),
                 "best_val": best_val,
                 "lr": opt.param_groups[0]["lr"],
                 "train_time_sec": train_time,
@@ -500,14 +526,18 @@ def main():
                 "nb": int(args.nb),
                 "n_floor": float(args.n_floor),
                 "T_floor": float(args.T_floor),
+                "shock_ratio": float(args.shock_ratio),
+                "shock_q": float(args.shock_q),
                 "grad_clip": float(args.grad_clip),
                 "amp": bool(args.amp),
             }) + "\n")
 
-        # ---------------- epoch-end warmstart debug (LATEST model; print only) ----------------
+        # ---------------- epoch-end warmstart debug (LATEST model; alpha-max best; save ckpt) ----------------
         if bool(args.warm_eval):
+            speed_ep_best = 0.0
+            speed_ep_by_alpha = {}
+
             try:
-                # keep it deterministic & no grad
                 model.eval()
                 device_eval = device
 
@@ -515,7 +545,7 @@ def main():
                     tau=float(args.warm_eval_tau),
                     dt=float(args.warm_eval_dt),
                     T_total=float(args.warm_eval_T_total),
-                    nx=int(cfg_nx := 512),   # NOTE: if you want to match training nx, set explicitly
+                    nx=int(cfg_nx := 512),
                     nv=int(cfg_nv := 256),
                     Lx=1.0,
                     v_max=10.0,
@@ -524,14 +554,12 @@ def main():
                     abs_tol=float(args.warm_eval_abs_tol),
                 )
 
-                # infer n_steps from cfg
                 n_steps = int(round(cfg.model_cfg.time.T_total / cfg.model_cfg.time.dt))
-                speed = 0.0
 
                 for a in (1.0, 0.9, 0.8):
                     out = run_case_debug(
                         cfg=cfg,
-                        model=model,                      # <-- latest weights in memory
+                        model=model,
                         n_steps=n_steps,
                         device=device_eval,
                         mix_alpha=float(a),
@@ -543,22 +571,29 @@ def main():
                     base_sum = int(out["picard_iter_sum_base"])
                     warm_sum = int(out["picard_iter_sum_warm"])
                     speed = (base_sum / max(warm_sum, 1))
+
+                    speed_ep_by_alpha[f"{a:.2f}"] = float(speed)
+                    speed_ep_best = max(speed_ep_best, float(speed))
+
                     print(
                         f"[warm-eval ep{ep:03d}] "
                         f"tau={args.warm_eval_tau:.3e} alpha={a:.2f} "
                         f"picard_sum base={base_sum} warm={warm_sum} (x{speed:.2f})",
                         flush=True,
                     )
+
             except Exception as e:
                 print(f"[warm-eval ep{ep:03d}] FAILED: {type(e).__name__}: {e}", flush=True)
 
-            # SPEED最良モデルを保存
-            if speed > best_speed:
-                best_speed = speed
-                torch.save(model.state_dict(), save_dir / "best_speed.pt")
-
-            
-
+            if speed_ep_best > best_speed:
+                best_speed = speed_ep_best
+                torch.save({
+                    "epoch": ep,
+                    "model": model.state_dict(),
+                    "best_speed": float(best_speed),
+                    "speed_by_alpha": speed_ep_by_alpha,
+                    "args": vars(args),
+                }, save_dir / "best_speed.pt")
 
     train_ds.close()
     val_ds.close()
