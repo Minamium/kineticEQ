@@ -155,6 +155,7 @@ def predict_next_moments_delta(
     elif delta_type == "dw":
         du = dy[1].to(n0.dtype)
         u1 = u0 + du
+        dm = du
     else:
         raise ValueError(f"unknown delta_type={delta_type}")
     

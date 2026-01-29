@@ -526,6 +526,7 @@ def main():
 
                 # infer n_steps from cfg
                 n_steps = int(round(cfg.model_cfg.time.T_total / cfg.model_cfg.time.dt))
+                speed = 0.0
 
                 for a in (1.0, 0.9, 0.8):
                     out = run_case_debug(
@@ -537,6 +538,7 @@ def main():
                         debug_steps=int(args.warm_eval_debug_steps),
                         n_floor=float(args.warm_eval_n_floor),
                         T_floor=float(args.warm_eval_T_floor),
+                        delta_type=args.delta_type,
                     )
                     base_sum = int(out["picard_iter_sum_base"])
                     warm_sum = int(out["picard_iter_sum_warm"])
