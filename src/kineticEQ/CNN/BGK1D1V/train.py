@@ -55,6 +55,7 @@ def compute_stdW_residuals(
     n_floor: float = 1e-12,
     T_floor: float = 1e-12,
     eps: float = 1e-12,
+    delta_type: str = "dnu",
 ):
     """
     Return channel-wise normalized residuals r_n, r_u, r_T with boundary masked.
@@ -77,8 +78,14 @@ def compute_stdW_residuals(
     n1_p_safe = torch.clamp(n1_p, min=float(n_floor))
     n1_t_safe = torch.clamp(n1_t, min=float(n_floor))
 
-    u1_p = (n0 * u0 + dm_p) / n1_p_safe
-    u1_t = (n0 * u0 + dm_t) / n1_t_safe
+    if delta_type == "dw":
+        u1_p = (u0 + dm_p)
+        u1_t = (u0 + dm_t)
+    elif delta_type == "dnu":
+        u1_p = (n0 * u0 + dm_p) / n1_p_safe
+        u1_t = (n0 * u0 + dm_t) / n1_t_safe
+    else:
+        raise ValueError(f"unknown delta_type={delta_type}")
 
     T1_p = torch.clamp(T0 + dT_p, min=float(T_floor))
     T1_t = torch.clamp(T0 + dT_t, min=float(T_floor))
@@ -181,6 +188,9 @@ def parse_args():
     ap.add_argument("--save_dir", type=str, default="cnn_runs/bgk1d1v_stdW")
     ap.add_argument("--seed", type=int, default=0)
 
+    # learning target
+    ap.add_argument("--delta_type", type=str, default="dw", choices=["dnu", "dw"])
+
     # loss knobs
     ap.add_argument("--loss_kind", type=str, default="smoothl1", choices=["smoothl1", "mse", "l1"])
     ap.add_argument("--loss_eps", type=float, default=1e-6)
@@ -221,6 +231,7 @@ def main():
     print(f"loss function: {args.loss_kind}", flush=True)
     print(f"mse_ratio: {args.mse_ratio}", flush=True)
     print(f"tail_frac: {args.tail_frac}", flush=True)
+    print(f"delta_type: {args.delta_type}", flush=True)
 
     # 最良モデルのSPEEDを保存するための変数
     best_speed = 0.0
@@ -297,6 +308,7 @@ def main():
                     n_floor=float(args.n_floor),
                     T_floor=float(args.T_floor),
                     eps=float(args.loss_eps),
+                    delta_type=args.delta_type
                 )
                 loss, base_loss, tail_loss = std_w_loss_from_residuals(
                     rn, ru, rT, valid,
@@ -388,6 +400,7 @@ def main():
                         n_floor=float(args.n_floor),
                         T_floor=float(args.T_floor),
                         eps=float(args.loss_eps),
+                        delta_type=args.delta_type
                     )
                     loss, val_base_loss, val_tail_loss = std_w_loss_from_residuals(
                         rn, ru, rT, valid,
