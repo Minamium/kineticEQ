@@ -453,7 +453,7 @@ def parse_args():
     p.add_argument("--dt", type=float, default=5e-5)
     p.add_argument("--T_total", type=float, default=0.01)
     p.add_argument("--n_steps", type=int, default=-1)
-    p.add_argument("--delta_type", type=str, default="dnu", choices=["dnu", "dw"])
+    p.add_argument("--delta_type", type=str, default="dw", choices=["dnu", "dw"])
 
     p.add_argument("--nx", type=int, default=512)
     p.add_argument("--nv", type=int, default=256)
