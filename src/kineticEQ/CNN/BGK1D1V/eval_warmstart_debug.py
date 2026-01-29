@@ -143,17 +143,20 @@ def predict_next_moments_delta(
 
     dy = model(x)[0]  # (3, nx) float32
     dn = dy[0].to(n0.dtype)
-    dm = dy[1].to(n0.dtype)   # momentum delta uses n dtype
     dT = dy[2].to(T0.dtype)
 
     n1 = n0 + dn
     if delta_type == "dnu":
+        dm = dy[1].to(n0.dtype)   # momentum delta uses n dtype
         n1_safe = torch.clamp(n1, min=float(n_floor))
         m0 = n0 * u0
         m1 = m0 + dm
         u1 = m1 / n1_safe
-    else:
+    elif delta_type == "dw":
+        du = dy[1].to(n0.dtype)
         u1 = u0 + du
+    else:
+        raise ValueError(f"unknown delta_type={delta_type}")
     
     T1 = T0 + dT
     return n1[1:-1], u1[1:-1], T1[1:-1], dn, dm, dT
