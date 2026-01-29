@@ -106,11 +106,12 @@ def load_model(ckpt_path: str, device: torch.device) -> tuple[MomentCNN1D, dict]
 
 
 @torch.no_grad()
-def predict_next_moments_delta_dnu(
+def predict_next_moments_delta(
     model: MomentCNN1D,
     n0: torch.Tensor, u0: torch.Tensor, T0: torch.Tensor,
     logdt: float, logtau: float,
     n_floor: float = 1e-12,
+    delta_type: str = "dnu"
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor,
     torch.Tensor, torch.Tensor, torch.Tensor
@@ -118,9 +119,15 @@ def predict_next_moments_delta_dnu(
     """
     dnu 学習用:
       model outputs dy = [Δn, Δ(nu), ΔT]
+      
+    dw 学習用:
+      model outputs dy = [Δn, Δu, ΔT]
 
-    Returns:
+    Returns:(dnu 学習用)
       (n1, u1, T1, dn, dm, dT)
+
+    Returns:(dw 学習用)
+      (n1, u1, T1, dn, du, dT)
 
     Note:
       u1 is reconstructed from momentum:
@@ -140,12 +147,14 @@ def predict_next_moments_delta_dnu(
     dT = dy[2].to(T0.dtype)
 
     n1 = n0 + dn
-    n1_safe = torch.clamp(n1, min=float(n_floor))
-
-    m0 = n0 * u0
-    m1 = m0 + dm
-    u1 = m1 / n1_safe
-
+    if delta_type == "dnu":
+        n1_safe = torch.clamp(n1, min=float(n_floor))
+        m0 = n0 * u0
+        m1 = m0 + dm
+        u1 = m1 / n1_safe
+    else:
+        u1 = u0 + du
+    
     T1 = T0 + dT
     return n1[1:-1], u1[1:-1], T1[1:-1], dn, dm, dT
 
@@ -242,6 +251,7 @@ def run_case_debug(
     debug_steps: int,
     n_floor: float,
     T_floor: float,
+    delta_type: str,
 ) -> dict:
     """
     baseline と warmstart を並走し、stepごとの誤差を観測。
@@ -281,8 +291,8 @@ def run_case_debug(
         u1p = u0_b.clone()
         T1p = T0_b.clone()
         
-        n1p[1:-1], u1p[1:-1], T1p[1:-1], dn, dm, dT = predict_next_moments_delta_dnu(
-            model, n0_b, u0_b, T0_b, logdt, logtau, n_floor=float(n_floor)
+        n1p[1:-1], u1p[1:-1], T1p[1:-1], dn, dm, dT = predict_next_moments_delta(
+            model, n0_b, u0_b, T0_b, logdt, logtau, n_floor=float(n_floor), delta_type=delta_type
         )
 
         # build warmstart fz
@@ -439,6 +449,7 @@ def parse_args():
     p.add_argument("--dt", type=float, default=5e-5)
     p.add_argument("--T_total", type=float, default=0.01)
     p.add_argument("--n_steps", type=int, default=-1)
+    p.add_argument("--delta_type", type=str, default="dnu", choices=["dnu", "dw"])
 
     p.add_argument("--nx", type=int, default=512)
     p.add_argument("--nv", type=int, default=256)
@@ -483,7 +494,7 @@ def main():
             "n_floor": float(args.n_floor),
             "T_floor": float(args.T_floor),
             "model_arch": arch,
-            "target": "dnu",  # important metadata
+            "target": args.delta_type,  # important metadata
         },
         "cases": [],
     }
@@ -509,6 +520,7 @@ def main():
             debug_steps=int(args.debug_steps),
             n_floor=float(args.n_floor),
             T_floor=float(args.T_floor),
+            delta_type=args.delta_type,
         )
 
         base_sum = out["picard_iter_sum_base"]

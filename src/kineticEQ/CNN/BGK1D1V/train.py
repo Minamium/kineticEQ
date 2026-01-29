@@ -222,6 +222,9 @@ def main():
     print(f"mse_ratio: {args.mse_ratio}", flush=True)
     print(f"tail_frac: {args.tail_frac}", flush=True)
 
+    # 最良モデルのSPEEDを保存するための変数
+    best_speed = 0.0
+
 
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
@@ -533,6 +536,13 @@ def main():
                     )
             except Exception as e:
                 print(f"[warm-eval ep{ep:03d}] FAILED: {type(e).__name__}: {e}", flush=True)
+
+            # SPEED最良モデルを保存
+            if speed > best_speed:
+                best_speed = speed
+                torch.save(model.state_dict(), save_dir / "best_speed.pt")
+
+            
 
 
     train_ds.close()
