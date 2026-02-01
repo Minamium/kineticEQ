@@ -461,7 +461,7 @@ def parse_args():
     p.add_argument("--v_max", type=float, default=10.0)
 
     p.add_argument("--picard_iter", type=int, default=1000)
-    p.add_argument("--picard_tol", type=float, default=1e-4)
+    p.add_argument("--picard_tol", type=float, default=1e-3)
     p.add_argument("--abs_tol", type=float, default=1e-13)
 
     p.add_argument("--mix_alpha", type=float, default=1.0)
