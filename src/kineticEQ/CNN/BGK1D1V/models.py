@@ -28,7 +28,7 @@ class MomentCNN1D(nn.Module):
         bottleneck: float = 0.5,
         dilation_cycle: tuple[int, ...] = (1, 2),
         use_gate_head: bool = True,
-        gate_bias_init: float = -3.0,   # <- (sigmoid(-3)≈0.047)
+        gate_bias_init: float = -4.0,   # <- 普段は閉 (sigmoid(-4)≈0.018)
         gate_scale: float = 1.0,        # <- tail寄与の全体係数（必要なら0.1とか）
         gate_per_channel: bool = False, # <- Trueで(B,3,nx)ゲート（より強いが少し重い）
     ):
