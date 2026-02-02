@@ -9,7 +9,7 @@ class MomentCNN1D(nn.Module):
     """
     MomentCNN1D:
       入力:  (B, 5, nx)  = (n, u, T, log10dt, log10tau)
-      出力:  (B, 3, nx)  = (Δn, Δ(nu), ΔT)  ※2ch目は Δu ではなく運動量更新 dm=Δ(nu) の想定
+      出力:  (B, 3, nx)  = (Δn, (Δnu or Δu), ΔT)  引数で選択可能
 
     設計意図:
       - stem + 軽量ResBlock（bottleneck + depthwise conv + dilation）で推論を軽く
@@ -28,7 +28,7 @@ class MomentCNN1D(nn.Module):
         bottleneck: float = 0.5,
         dilation_cycle: tuple[int, ...] = (1, 2),
         use_gate_head: bool = True,
-        gate_bias_init: float = -4.0,   # <- 普段は閉 (sigmoid(-4)≈0.018)
+        gate_bias_init: float = -3.0,   # <- (sigmoid(-3)≈0.047)
         gate_scale: float = 1.0,        # <- tail寄与の全体係数（必要なら0.1とか）
         gate_per_channel: bool = False, # <- Trueで(B,3,nx)ゲート（より強いが少し重い）
     ):
