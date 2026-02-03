@@ -49,7 +49,7 @@ class MomentCNN1D(nn.Module):
 
         # ---- stem ----
         self.stem = nn.Sequential(
-            nn.Conv1d(in_ch, hidden, kernel_size=kernel, padding=(kernel // 2)),
+            nn.Conv1d(in_ch, hidden, kernel_size=kernel, padding=(kernel // 2), padding_mode="replicate"),
             nn.GroupNorm(gn_groups, hidden),
             nn.SiLU(),
         )
@@ -151,6 +151,7 @@ class LiteResBlock1D(nn.Module):
                 padding=pad,
                 dilation=int(dilation),
                 groups=mid,  # depthwise
+                padding_mode="replicate",
             ),
         )
         self.post = nn.Sequential(
