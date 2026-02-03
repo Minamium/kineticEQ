@@ -13,10 +13,13 @@ from .BGK1D import bgk1d_explicit_cuda_kernel, bgk1d_implicit_cuda_kernel, bgk1d
 from .BGK2D2V import bgk2d2v_explicit_torch
 
 _FACTORIES: dict[tuple[Model, Scheme, Backend], StepperBuilder] = {
+    # BGK1D1V
     (Model.BGK1D1V, Scheme.EXPLICIT, Backend.TORCH): bgk1d_explicit_torch.build_stepper,
     (Model.BGK1D1V, Scheme.EXPLICIT, Backend.CUDA_KERNEL): bgk1d_explicit_cuda_kernel.build_stepper,
     (Model.BGK1D1V, Scheme.IMPLICIT, Backend.CUDA_KERNEL): bgk1d_implicit_cuda_kernel.build_stepper,
     (Model.BGK1D1V, Scheme.HOLO, Backend.CUDA_KERNEL): bgk1d_holo_cuda_kernel.build_stepper,
+    
+    # BGK2D2V
     (Model.BGK2D2V, Scheme.EXPLICIT, Backend.TORCH): bgk2d2v_explicit_torch.build_stepper,
     # 例：CUDAカーネルを後で追加
     # (Model.BGK2D2V, Scheme.EXPLICIT, Backend.CUDA_KERNEL): bgk2d2v_explicit_cuda.build_stepper,
