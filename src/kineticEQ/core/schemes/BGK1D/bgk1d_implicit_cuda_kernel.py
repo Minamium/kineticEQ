@@ -60,6 +60,48 @@ def load_moments_cnn_model(model_path: str, device: torch.device) -> MomentCNN1D
     model.to(device).eval()
     return model
 
+@torch.no_grad()
+def _maxwellian_from_nuT(state: State1D1V, n: torch.Tensor, u: torch.Tensor, T: torch.Tensor) -> torch.Tensor:
+    """
+    Non-destructive Maxwellian builder (eval_warmstart_debug と同等).
+    Requires: state.v_col (nx, nv), state.inv_sqrt_2pi (scalar tensor)
+    Returns: (nx, nv)
+    """
+    # coeff = n / sqrt(2pi*T)
+    coeff = (n * state.inv_sqrt_2pi) / torch.sqrt(T)          # (nx,)
+    invT  = 0.5 / T                                           # (nx,)
+    diff  = state.v_col - u[:, None]                          # (nx, nv)
+    expo  = diff.mul(diff)
+    expo.mul_(-invT[:, None])
+    torch.exp(expo, out=expo)
+    expo.mul_(coeff[:, None])
+    return expo
+
+@torch.no_grad()
+def _build_fz_from_moments(
+    state: State1D1V,
+    n1: torch.Tensor, u1: torch.Tensor, T1: torch.Tensor,
+    n_floor: float = 1e-12, T_floor: float = 1e-12,
+) -> torch.Tensor:
+    """
+    eval_warmstart_debug.build_fz_from_moments と同等:
+      - n,T を floor
+      - Maxwellian を作る
+      - 境界は state.f の境界を保持
+    """
+    if (not torch.isfinite(n1).all()) or (not torch.isfinite(u1).all()) or (not torch.isfinite(T1).all()):
+        return state.f.clone()
+
+    n1 = torch.clamp(n1, min=float(n_floor))
+    T1 = torch.clamp(T1, min=float(T_floor))
+
+    fz = _maxwellian_from_nuT(state, n1, u1, T1)
+
+    # keep boundary from current distribution
+    fz[0, :].copy_(state.f[0, :])
+    fz[-1, :].copy_(state.f[-1, :])
+    return fz
+
 
 # モデルによる推論
 @torch.no_grad()
@@ -101,25 +143,41 @@ def step(
 ) -> tuple[State1D1V, dict]:
     # 初期候補：前ステップを参照, 外部フックがあればそちらを優先, CNNモデルを最優先
     if cfg.model_cfg.scheme_params.moments_cnn_modelpath is not None:
-        # 入力のモーメント値計算
+        if model is None:
+            raise RuntimeError("moments_cnn_modelpath is set but model is None")
+
+        # --- (1) current moments from current f (baselineと同じ入力規約) ---
         n0, u0, T0 = calculate_moments(state, state.f)
 
-        state.n = n0.clone()
-        state.u = u0.clone()
-        state.T = T0.clone()
-
-        state.n[1:-1], state.u[1:-1], state.T[1:-1], _, _, _ = predict_next_moments_delta(
+        # --- (2) predict next moments (dw: dy=[dn,du,dT]) ---
+        # n1p,u1p,T1p are full-length tensors
+        n1p = n0.clone()
+        u1p = u0.clone()
+        T1p = T0.clone()
+        n1p[1:-1], u1p[1:-1], T1p[1:-1], _, _, _ = predict_next_moments_delta(
             model,
             n0, u0, T0,
             math.log10(cfg.model_cfg.time.dt),
-            math.log10(cfg.model_cfg.params.tau_tilde)
+            math.log10(cfg.model_cfg.params.tau_tilde),
         )
-        ws.fz.copy_(state.f)
 
-        state.n = torch.clamp(state.n, min=1e-12)
-        state.T = torch.clamp(state.T, min=1e-12)
+        # --- (3) build fz non-destructively and inject via ws._init_fz (evalと同型) ---
+        fz_used = _build_fz_from_moments(
+            state,
+            n1p, u1p, T1p,
+            n_floor=1e-12,
+            T_floor=1e-12,
+        )
+        ws._init_fz = fz_used
 
-        ws.fz[1:-1, :] = maxwellian(state)[1:-1, :]
+        # 以降は「init_fzがあればそれを使う」既存パスへ落とす
+        init_fz = getattr(ws, "_init_fz", None)
+        if init_fz is None:
+            ws.fz.copy_(state.f)
+        else:
+            ws.fz.copy_(init_fz)
+            ws._init_fz = None
+
     else:
         init_fz = getattr(ws, "_init_fz", None)
         if init_fz is None:
@@ -127,6 +185,7 @@ def step(
         else:
             ws.fz.copy_(init_fz)   # shape (nx, nv)
             ws._init_fz = None
+
 
     residual_val = float('inf')
 
