@@ -114,7 +114,8 @@ def step(
             math.log10(cfg.model_cfg.time.dt),
             math.log10(cfg.model_cfg.params.tau_tilde)
         )
-        ws.fz = maxwellian(state)
+        ws.fz.copy_(state.f)
+        ws.fz[1:-1, :] = maxwellian(state)[1:-1, :]
     else:
         init_fz = getattr(ws, "_init_fz", None)
         if init_fz is None:
