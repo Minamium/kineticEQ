@@ -199,8 +199,8 @@ def build_fz_from_moments(
     fz = _maxwellian_from_nuT(state, n1, u1, T1)
 
     # keep boundary from current distribution
-    #fz[0, :].copy_(state.f[0, :])
-    #fz[-1, :].copy_(state.f[-1, :])
+    fz[0, :].copy_(state.f[0, :])
+    fz[-1, :].copy_(state.f[-1, :])
     return fz
 
 
