@@ -19,6 +19,7 @@ if str(_SRC) not in sys.path:
 from kineticEQ import Engine, Config, BGK1D
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calculate_moments
 from kineticEQ.CNN.BGK1D1V.models import MomentCNN1D
+from kineticEQ.plotting.bgk1d.plot_state import plot_state
 
 
 def _load_ckpt_state(ckpt_path: str) -> dict:
@@ -443,6 +444,8 @@ def run_case_debug(
         "debug_steps": int(debug_steps),
         "debug_log": debug_log,
     }
+    plot_state(eng_warm.state, "warmstart_debug")
+    plot_state(eng_base.state, "baseline_debug")
     return out
 
 
