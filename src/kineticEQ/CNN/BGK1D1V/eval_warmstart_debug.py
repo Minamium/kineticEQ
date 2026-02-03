@@ -288,8 +288,8 @@ def run_case_debug(
 
     t0 = time.perf_counter()
     for s in range(n_steps):
-        # baseline current moments
-        n0_b, u0_b, T0_b = calculate_moments(eng_base.state, eng_base.state.f)
+        # 修正（closed-loop 評価）
+        n0_b, u0_b, T0_b = calculate_moments(eng_warm.state, eng_warm.state.f)
 
         # predict using baseline inputs (fair)
         n1p = n0_b.clone()
