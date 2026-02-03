@@ -115,6 +115,10 @@ def step(
             math.log10(cfg.model_cfg.params.tau_tilde)
         )
         ws.fz.copy_(state.f)
+
+        state.u = torch.clamp(state.u, min=1e-12)
+        state.T = torch.clamp(state.T, min=1e-12)
+
         ws.fz[1:-1, :] = maxwellian(state)[1:-1, :]
     else:
         init_fz = getattr(ws, "_init_fz", None)
