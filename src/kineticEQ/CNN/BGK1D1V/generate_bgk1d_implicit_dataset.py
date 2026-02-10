@@ -71,9 +71,6 @@ def main():
             log10_factor = (torch.rand((), generator=g_case).item() * 0.4) - 0.2
             dt = args.dt * (10.0 ** log10_factor)
 
-        # 安全柵（任意）
-        dt = float(max(min(dt, 2.0e-3), 1.0e-4))
-
         # 領域位置のsweep(幅最低0.1を保証)
         wmin = 0.10
         # 4領域なので最小幅の合計は 4*wmin、残りをランダム配分

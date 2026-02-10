@@ -211,10 +211,6 @@ def run_case_pair(
         },
     }
 
-    # ここは重いなら消してOK（必要なら残す）
-    plot_state(eng_warm.state, "warmstart_debug")
-    plot_state(eng_base.state, "baseline_debug")
-
     return out
 
 
