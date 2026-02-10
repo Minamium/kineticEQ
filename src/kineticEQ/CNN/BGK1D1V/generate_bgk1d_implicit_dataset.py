@@ -28,6 +28,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out_dir", type=str, default="mgpu_output")
     ap.add_argument("--cases", type=int, default=240)
+    ap.add_argument("--dt", type=float, default=5e-4)
     args = ap.parse_args()
 
     is_dist, rank, local_rank, world_size, device = setup_dist()
@@ -65,10 +66,10 @@ def main():
         # 70%: dt = 5e-4
         # 30%: dt = 5e-4 * 10^{U[-0.2, +0.2]}  ≈ 0.63x .. 1.58x
         if torch.rand((), generator=g_case).item() < 0.70:
-            dt = 5e-4
+            dt = args.dt
         else:
             log10_factor = (torch.rand((), generator=g_case).item() * 0.4) - 0.2
-            dt = 5e-4 * (10.0 ** log10_factor)
+            dt = args.dt * (10.0 ** log10_factor)
 
         # 安全柵（任意）
         dt = float(max(min(dt, 2.0e-3), 1.0e-4))
