@@ -1,7 +1,8 @@
 ---
 title: Whiteboard
-parent: Models
-nav_order: 21
+parent: BGK1D1V
+grand_parent: Models
+nav_order: 1
 ---
 
 ## Implicit scheme
