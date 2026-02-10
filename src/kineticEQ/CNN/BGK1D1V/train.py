@@ -246,6 +246,8 @@ def parse_args():
     ap.add_argument("--warm_eval_picard_iter", type=int, default=1000)
     ap.add_argument("--warm_eval_picard_tol", type=float, default=1e-3)
     ap.add_argument("--warm_eval_abs_tol", type=float, default=1e-13)
+    ap.add_argument("--warm_eval_nx", type=int, default=512)
+    ap.add_argument("--warm_eval_nv", type=int, default=256)
     ap.add_argument("--warm_eval_debug_steps", type=int, default=0, help="0 disables per-step debug_log collection")
     ap.add_argument("--warm_eval_n_floor", type=float, default=1e-12)
     ap.add_argument("--warm_eval_T_floor", type=float, default=1e-12)
@@ -551,8 +553,8 @@ def main():
                     tau=float(args.warm_eval_tau),
                     dt=float(args.warm_eval_dt),
                     T_total=float(args.warm_eval_T_total),
-                    nx=int(cfg_nx := 512),
-                    nv=int(cfg_nv := 256),
+                    nx=int(args.warm_eval_nx),
+                    nv=int(args.warm_eval_nv),
                     Lx=1.0,
                     v_max=10.0,
                     picard_iter=int(args.warm_eval_picard_iter),
@@ -565,8 +567,8 @@ def main():
                     tau=float(args.warm_eval_tau),
                     dt=float(args.warm_eval_dt),
                     T_total=float(args.warm_eval_T_total),
-                    nx=int(cfg_nx),
-                    nv=int(cfg_nv),
+                    nx=int(args.warm_eval_nx),
+                    nv=int(args.warm_eval_nv),
                     Lx=1.0,
                     v_max=10.0,
                     picard_iter=int(args.warm_eval_picard_iter),

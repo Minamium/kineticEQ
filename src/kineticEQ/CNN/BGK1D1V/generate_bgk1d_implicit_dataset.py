@@ -29,6 +29,8 @@ def main():
     ap.add_argument("--out_dir", type=str, default="mgpu_output")
     ap.add_argument("--cases", type=int, default=240)
     ap.add_argument("--dt", type=float, default=5e-4)
+    ap.add_argument("--nx", type=int, default=512)
+    ap.add_argument("--nv", type=int, default=256)
     ap.add_argument("--picard_tol", type=float, default=1e-8)
     ap.add_argument("--abs_tol", type=float, default=1e-13)
     args = ap.parse_args()
@@ -105,7 +107,7 @@ def main():
 
         # モデル設定
         model_cfg = BGK1D.ModelConfig(
-            grid=BGK1D.Grid1D1V(nx=512, nv=256, Lx=1.0, v_max=10.0),
+            grid=BGK1D.Grid1D1V(nx=args.nx, nv=args.nv, Lx=1.0, v_max=10.0),
             time=BGK1D.TimeConfig(dt=dt, T_total=0.05),
             params=BGK1D.BGK1D1VParams(tau_tilde=tau),
             scheme_params=BGK1D.implicit.Params(picard_iter=10_000, picard_tol=args.picard_tol, abs_tol=args.abs_tol),
