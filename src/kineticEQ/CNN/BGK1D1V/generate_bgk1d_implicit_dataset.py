@@ -29,6 +29,8 @@ def main():
     ap.add_argument("--out_dir", type=str, default="mgpu_output")
     ap.add_argument("--cases", type=int, default=240)
     ap.add_argument("--dt", type=float, default=5e-4)
+    ap.add_argument("--picard_tol", type=float, default=1e-8)
+    ap.add_argument("--abs_tol", type=float, default=1e-13)
     args = ap.parse_args()
 
     is_dist, rank, local_rank, world_size, device = setup_dist()
@@ -106,7 +108,7 @@ def main():
             grid=BGK1D.Grid1D1V(nx=512, nv=256, Lx=1.0, v_max=10.0),
             time=BGK1D.TimeConfig(dt=dt, T_total=0.05),
             params=BGK1D.BGK1D1VParams(tau_tilde=tau),
-            scheme_params=BGK1D.implicit.Params(picard_iter=10_000, picard_tol=1e-6, abs_tol=1e-13),
+            scheme_params=BGK1D.implicit.Params(picard_iter=10_000, picard_tol=args.picard_tol, abs_tol=args.abs_tol),
             initial=BGK1D.InitialCondition1D(initial_regions=(
                 {"x_range": (0.0, x0), "n": float(n_1), "u": float(u_1), "T": float(T_1)},
                 {"x_range": (x0,  x1), "n": float(n_2), "u": float(u_2), "T": float(T_2)},

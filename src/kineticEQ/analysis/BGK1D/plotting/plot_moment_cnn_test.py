@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 @dataclass
 class CaseRecord:
     path: Path
+    dt: float | None
     picard_tol: float
     tau_tilde: float | None
     n_steps: int
@@ -120,6 +121,7 @@ def _extract_record(path: Path, case_index: int = 0) -> CaseRecord:
     if not isinstance(gpu_name, str):
         gpu_name = None
 
+    dt = _as_float(meta.get("dt", None), default=None)
     tau_tilde = _as_float(case.get("tau_tilde", None), default=None)
 
     timing = detail.get("timing", {})
@@ -176,6 +178,7 @@ def _extract_record(path: Path, case_index: int = 0) -> CaseRecord:
 
     return CaseRecord(
         path=path,
+        dt=dt,
         picard_tol=picard_tol,
         tau_tilde=tau_tilde,
         n_steps=n_steps,
@@ -282,6 +285,20 @@ def plot_moment_cnn_test(
     unique_tols = sorted({float(r.picard_tol) for r in records})
     tol2c = _build_tol_color_map(unique_tols)
 
+    # build common title suffix from dt / tau_tilde
+    _dts = sorted({r.dt for r in records if r.dt is not None})
+    _taus = sorted({r.tau_tilde for r in records if r.tau_tilde is not None})
+    _title_parts: list[str] = []
+    if len(_dts) == 1:
+        _title_parts.append(f"dt={_dts[0]:.1e}")
+    elif _dts:
+        _title_parts.append(f"dt=[{', '.join(f'{v:.1e}' for v in _dts)}]")
+    if len(_taus) == 1:
+        _title_parts.append(f"tau={_taus[0]:.1e}")
+    elif _taus:
+        _title_parts.append(f"tau=[{', '.join(f'{v:.1e}' for v in _taus)}]")
+    _title_suffix = f"  ({', '.join(_title_parts)})" if _title_parts else ""
+
     # ---------- Plot 1 ----------
     fig1, ax1 = plt.subplots(figsize=plot_1_figsize)
     for rec in sorted(records, key=lambda r: r.picard_tol):
@@ -291,7 +308,7 @@ def plot_moment_cnn_test(
         if mode == "B":
             ax1.plot(x, rec.it_base, linestyle=_BASE_LS, color=c, label=f"tol={tol_s} base")
         ax1.plot(x, rec.it_warm, linestyle=_WARM_LS, color=c, label=f"tol={tol_s} warm")
-    ax1.set_title("Picard Iterations per Time Step")
+    ax1.set_title(f"Picard Iterations per Time Step{_title_suffix}")
     ax1.set_xlabel("Step")
     ax1.set_ylabel("Picard Iterations")
     ax1.legend()
@@ -318,7 +335,7 @@ def plot_moment_cnn_test(
             label=f"tol={tol_s} warm"
         )
 
-    ax2.set_title(f"Walltime per Step (GPU: {gpu_title})")
+    ax2.set_title(f"Walltime per Step (GPU: {gpu_title}){_title_suffix}")
     ax2.set_xlabel("Step")
     ax2.set_ylabel("Walltime [s]")
     ax2.grid(True, which="both", alpha=0.3)
@@ -386,7 +403,7 @@ def plot_moment_cnn_test(
         ax.set_xlabel("Cell Index")
         ax.legend()
 
-    fig3.suptitle("Final Moments and Differences", y=1.02)
+    fig3.suptitle(f"Final Moments and Differences{_title_suffix}", y=1.02)
 
     # ---------- Plot 4 (two panels: speedup & mean step time; both with L∞) ----------
     recs = sorted(records, key=lambda r: r.picard_tol)
@@ -417,7 +434,7 @@ def plot_moment_cnn_test(
     ax4a.set_xscale("log")
     ax4a.set_xlabel("Picard Tolerance")
     ax4a.set_ylabel("Iteration Reduction (sum iters base / warm)")
-    ax4a.set_title(f"Iteration Reduction vs Picard Tolerance (GPU: {gpu_title})")
+    ax4a.set_title(f"Iteration Reduction vs Picard Tol (GPU: {gpu_title}){_title_suffix}")
     ax4a.grid(True, which="both", alpha=0.3)
 
     ax4a_r.plot(tols, linf_n, marker="o", color=_OKABE_ITO[0], label="Final Difference L∞ (n)")
@@ -442,7 +459,7 @@ def plot_moment_cnn_test(
     ax4b.set_xscale("log")
     ax4b.set_xlabel("Picard Tolerance")
     ax4b.set_ylabel("Mean Step Time [s]")
-    ax4b.set_title(f"Mean Step Time vs Picard Tolerance (GPU: {gpu_title})")
+    ax4b.set_title(f"Mean Step Time vs Picard Tol (GPU: {gpu_title}){_title_suffix}")
     ax4b.grid(True, which="both", alpha=0.3)
 
     ax4b_r.plot(tols, linf_n, marker="o", color=_OKABE_ITO[0], label="Final Difference L∞ (n)")
@@ -465,7 +482,8 @@ def plot_moment_cnn_test(
     if save:
         for k, fig in figures.items():
             p = outdir_p / f"{k}.{fmt}"
-            fig.tight_layout()
+            if not fig.get_constrained_layout():
+                fig.tight_layout()
             fig.savefig(p, dpi=150)
             saved[k] = str(p)
 
