@@ -16,7 +16,7 @@ from .models import MomentCNN1D
 from .dataloader_npz import BGK1D1VNPZDeltaDataset
 
 # --- optional warmstart debug eval (epoch-end) ---
-from .eval_warmstart_debug import build_cfg, run_case_debug
+from .eval_warmstart_debug import build_cfg, run_case_pair
 
 
 # ---------------- utils ----------------
@@ -535,7 +535,7 @@ def main():
                 "amp": bool(args.amp),
             }) + "\n")
 
-        # ---------------- epoch-end warmstart debug (LATEST model; alpha-max best; save ckpt) ----------------
+        # ---------------- epoch-end warmstart debug (LATEST model via last.pt; save best_speed.pt) ----------------
         if bool(args.warm_eval):
             speed_ep_best = 0.0
             speed_ep_by_alpha = {}
@@ -544,7 +544,10 @@ def main():
                 model.eval()
                 device_eval = device
 
-                cfg = build_cfg(
+                # Use the checkpoint just saved above (latest model)
+                last_ckpt = save_dir / "last.pt"
+
+                cfg_base = build_cfg(
                     tau=float(args.warm_eval_tau),
                     dt=float(args.warm_eval_dt),
                     T_total=float(args.warm_eval_T_total),
@@ -555,35 +558,45 @@ def main():
                     picard_iter=int(args.warm_eval_picard_iter),
                     picard_tol=float(args.warm_eval_picard_tol),
                     abs_tol=float(args.warm_eval_abs_tol),
+                    moments_cnn_modelpath=None,           # baseline
                 )
 
-                n_steps = int(round(cfg.model_cfg.time.T_total / cfg.model_cfg.time.dt))
+                cfg_warm = build_cfg(
+                    tau=float(args.warm_eval_tau),
+                    dt=float(args.warm_eval_dt),
+                    T_total=float(args.warm_eval_T_total),
+                    nx=int(cfg_nx),
+                    nv=int(cfg_nv),
+                    Lx=1.0,
+                    v_max=10.0,
+                    picard_iter=int(args.warm_eval_picard_iter),
+                    picard_tol=float(args.warm_eval_picard_tol),
+                    abs_tol=float(args.warm_eval_abs_tol),
+                    moments_cnn_modelpath=str(last_ckpt),  # warmstart enabled
+                )
 
-                for a in (1.0, 0.9, 0.8):
-                    out = run_case_debug(
-                        cfg=cfg,
-                        model=model,
-                        n_steps=n_steps,
-                        device=device_eval,
-                        mix_alpha=float(a),
-                        debug_steps=int(args.warm_eval_debug_steps),
-                        n_floor=float(args.warm_eval_n_floor),
-                        T_floor=float(args.warm_eval_T_floor),
-                        delta_type=args.delta_type,
-                    )
-                    base_sum = int(out["picard"]["picard_iter_sum_base"])
-                    warm_sum = int(out["picard"]["picard_iter_sum_warm"])
-                    speed = (base_sum / max(warm_sum, 1))
+                n_steps = int(round(cfg_base.model_cfg.time.T_total / cfg_base.model_cfg.time.dt))
 
-                    speed_ep_by_alpha[f"{a:.2f}"] = float(speed)
-                    speed_ep_best = max(speed_ep_best, float(speed))
+                out = run_case_pair(
+                    cfg_base=cfg_base,
+                    cfg_warm=cfg_warm,
+                    n_steps=n_steps,
+                    device=device_eval,
+                )
 
-                    print(
-                        f"[warm-eval ep{ep:03d}] "
-                        f"tau={args.warm_eval_tau:.3e} alpha={a:.2f} "
-                        f"picard_sum base={base_sum} warm={warm_sum} (x{speed:.2f})",
-                        flush=True,
-                    )
+                base_sum = int(out["picard"]["picard_iter_sum_base"])
+                warm_sum = int(out["picard"]["picard_iter_sum_warm"])
+                speed = (base_sum / max(warm_sum, 1))
+
+                speed_ep_by_alpha["engine"] = float(speed)
+                speed_ep_best = float(speed)
+
+                print(
+                    f"[warm-eval ep{ep:03d}] "
+                    f"tau={args.warm_eval_tau:.3e} "
+                    f"picard_sum base={base_sum} warm={warm_sum} (x{speed:.2f})",
+                    flush=True,
+                )
 
             except Exception as e:
                 print(f"[warm-eval ep{ep:03d}] FAILED: {type(e).__name__}: {e}", flush=True)
