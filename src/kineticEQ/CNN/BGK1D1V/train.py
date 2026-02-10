@@ -225,8 +225,17 @@ def parse_args():
     ap.add_argument("--shock_ratio", type=float, default=0.8)
     ap.add_argument("--shock_q", type=float, default=0.90)  # 0.90 -> top10% shock
 
-    # gate bias init
+    # model architecture
+    ap.add_argument("--hidden", type=int, default=256)
+    ap.add_argument("--n_blocks", type=int, default=6)
+    ap.add_argument("--kernel", type=int, default=5)
+    ap.add_argument("--gn_groups", type=int, default=32)
+    ap.add_argument("--bottleneck", type=float, default=0.5)
+    ap.add_argument("--dilation_cycle", type=int, nargs="+", default=[1, 2])
+    ap.add_argument("--use_gate_head", type=int, default=1, help="0=off, 1=on")
     ap.add_argument("--gate_bias_init", type=float, default=-4.0)
+    ap.add_argument("--gate_scale", type=float, default=1.0)
+    ap.add_argument("--gate_per_channel", type=int, default=0, help="0=off, 1=on")
 
     # optimization knobs
     ap.add_argument("--grad_clip", type=float, default=1.0)
@@ -282,7 +291,20 @@ def main():
     save_dir.mkdir(parents=True, exist_ok=True)
     save_json(save_dir / "config.json", vars(args))
 
-    model = MomentCNN1D(in_ch=5, hidden=256, out_ch=3, kernel=5, n_blocks=6, gate_bias_init=args.gate_bias_init).to(device)
+    model = MomentCNN1D(
+        in_ch=5,
+        hidden=int(args.hidden),
+        out_ch=3,
+        kernel=int(args.kernel),
+        n_blocks=int(args.n_blocks),
+        gn_groups=int(args.gn_groups),
+        bottleneck=float(args.bottleneck),
+        dilation_cycle=tuple(args.dilation_cycle),
+        use_gate_head=bool(args.use_gate_head),
+        gate_bias_init=float(args.gate_bias_init),
+        gate_scale=float(args.gate_scale),
+        gate_per_channel=bool(args.gate_per_channel),
+    ).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr))
 
     scheduler = None
