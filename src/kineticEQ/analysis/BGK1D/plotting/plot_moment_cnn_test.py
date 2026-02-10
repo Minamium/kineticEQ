@@ -275,30 +275,10 @@ def plot_moment_cnn_test(
 
     records = [_extract_record(p, case_index=int(case_index)) for p in paths]
 
-        # ---------- color map (same tol -> same color; colorblind-safe) ----------
-    # Use Okabe–Ito palette (excluding pure black to avoid confusion with markers/axes)
-    _PALETTE = [
-        "#0072B2",  # blue
-        "#D55E00",  # vermillion
-        "#009E73",  # bluish green
-        "#CC79A7",  # reddish purple
-        "#E69F00",  # orange
-        "#56B4E9",  # sky blue
-        "#F0E442",  # yellow
-    ]
-
-    # records must be deterministic order; if not already, sort by picard_tol here
-    # (If you already sort elsewhere, you can remove the next line)
+    # deterministic order by picard_tol
     records = sorted(records, key=lambda r: float(r.picard_tol))
 
-    # Assign a color per unique tol
-    _tols = [float(r.picard_tol) for r in records]
-    _uniq_tols = sorted(set(_tols))
-    _tol2color = {t: _PALETTE[i % len(_PALETTE)] for i, t in enumerate(_uniq_tols)}
-    colors = [_tol2color[t] for t in _tols]
-
-
-    # tol -> color mapping (consistent across all plots)
+    # tol -> color mapping (consistent across all plots; colorblind-safe)
     unique_tols = sorted({float(r.picard_tol) for r in records})
     tol2c = _build_tol_color_map(unique_tols)
 
@@ -323,17 +303,19 @@ def plot_moment_cnn_test(
 
     fig2, ax2 = plt.subplots(figsize=plot_2_figsize)
 
-    for rec, c in zip(records, colors):
+    for rec in records:
         steps = np.arange(rec.n_steps, dtype=np.int64)
+        c = tol2c[float(rec.picard_tol)]
+        tol_s = _tol_label(rec.picard_tol)
         ax2.plot(
             steps, rec.t_base,
             linestyle=_BASE_LS, color=c, linewidth=1.5,
-            label=f"Base (picard_tol={rec.picard_tol:.1e})"
+            label=f"tol={tol_s} base"
         )
         ax2.plot(
             steps, rec.t_warm,
             linestyle=_WARM_LS, color=c, linewidth=1.5,
-            label=f"Warm (picard_tol={rec.picard_tol:.1e})"
+            label=f"tol={tol_s} warm"
         )
 
     ax2.set_title(f"Walltime per Step (GPU: {gpu_title})")
@@ -450,11 +432,11 @@ def plot_moment_cnn_test(
     # ---- right panel: mean step time (base/warm) + L∞ ----
     ax4b_r = ax4b.twinx()
     ax4b.plot(
-        tols, mean_t_base, marker="o", linestyle=_BASE_LS, color=_OKABE_ITO[7],
+        tols, mean_t_base, marker="o", linestyle=_BASE_LS, color="#000000",
         label="Mean Step Time (Base) [s]"
     )
     ax4b.plot(
-        tols, mean_t_warm, marker="o", linestyle=_WARM_LS, color=_OKABE_ITO[3],
+        tols, mean_t_warm, marker="s", linestyle=_WARM_LS, color="#000000",
         label="Mean Step Time (Warm) [s]"
     )
     ax4b.set_xscale("log")

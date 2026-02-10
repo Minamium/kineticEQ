@@ -174,7 +174,7 @@ def main():
             std_picard_residual=std_resid_hist,
         )
 
-        print(f"Rank {rank}: saved case {case_id} tau={tau:.3e} elapsed={time.time() - start_time:.3f}sec", flush=True)
+        print(f"Rank {rank}: saved case {case_id} tau={tau:.3e} dt={dt:.3e} elapsed={time.time() - start_time:.3f}sec", flush=True)
 
     # 同期
     if is_dist:
