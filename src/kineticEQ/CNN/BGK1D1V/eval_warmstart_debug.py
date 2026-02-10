@@ -49,6 +49,7 @@ def build_cfg(
         picard_iter=int(picard_iter),
         picard_tol=float(picard_tol),
         abs_tol=float(abs_tol),
+        moments_cnn_modelpath=(str(moments_cnn_modelpath) if moments_cnn_modelpath else None),
     )
 
     # Engine側 warmstart フック（Noneならbaseline扱い）
