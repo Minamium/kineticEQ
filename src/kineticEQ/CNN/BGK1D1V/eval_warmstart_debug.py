@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from dataclasses import fields, replace
 
 # --- make repo importable when executed as a script ---
 _THIS = Path(__file__).resolve()
@@ -49,13 +50,15 @@ def build_cfg(
         picard_iter=int(picard_iter),
         picard_tol=float(picard_tol),
         abs_tol=float(abs_tol),
-        moments_cnn_modelpath=(str(moments_cnn_modelpath) if moments_cnn_modelpath else None),
     )
 
-    # Engine側 warmstart フック（Noneならbaseline扱い）
+    # frozen + optional field 対応：存在する時だけ replace で埋める
     if moments_cnn_modelpath is not None and str(moments_cnn_modelpath) != "":
-        # Params側にフィールドが無い場合はここで落ちるので、すぐ気付ける
-        scheme_params.moments_cnn_modelpath = str(moments_cnn_modelpath)
+        fnames = {f.name for f in fields(scheme_params)}
+        if "moments_cnn_modelpath" in fnames:
+            scheme_params = replace(scheme_params, moments_cnn_modelpath=str(moments_cnn_modelpath))
+        else:
+            raise AttributeError("BGK1D.implicit.Params has no field 'moments_cnn_modelpath'")
 
     model_cfg = BGK1D.ModelConfig(
         grid=BGK1D.Grid1D1V(nx=int(nx), nv=int(nv), Lx=float(Lx), v_max=float(v_max)),
