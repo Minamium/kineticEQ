@@ -571,8 +571,8 @@ def main():
                         T_floor=float(args.warm_eval_T_floor),
                         delta_type=args.delta_type,
                     )
-                    base_sum = int(out["picard_iter_sum_base"])
-                    warm_sum = int(out["picard_iter_sum_warm"])
+                    base_sum = int(out["picard"]["picard_iter_sum_base"])
+                    warm_sum = int(out["picard"]["picard_iter_sum_warm"])
                     speed = (base_sum / max(warm_sum, 1))
 
                     speed_ep_by_alpha[f"{a:.2f}"] = float(speed)
