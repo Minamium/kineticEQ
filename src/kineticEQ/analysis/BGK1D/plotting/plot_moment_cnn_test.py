@@ -247,6 +247,12 @@ def plot_moment_cnn_test(
     plot_3_figsize: tuple[float, float] = (12, 6),
     plot_4_figsize: tuple[float, float] = (12, 6),
     mode: str = "B",  # "B" (base+warm), reserved for future: "warm_only"
+    walltime_skip_first: int = 0,
+    fontsize: float | None = None,
+    plot_1_fontsize: float | None = None,
+    plot_2_fontsize: float | None = None,
+    plot_3_fontsize: float | None = None,
+    plot_4_fontsize: float | None = None,
 ) -> dict:
     """
     Plots (English labels/titles/legend):
@@ -308,10 +314,12 @@ def plot_moment_cnn_test(
         if mode == "B":
             ax1.plot(x, rec.it_base, linestyle=_BASE_LS, color=c, label=f"tol={tol_s} base")
         ax1.plot(x, rec.it_warm, linestyle=_WARM_LS, color=c, label=f"tol={tol_s} warm")
-    ax1.set_title(f"Picard Iterations per Time Step{_title_suffix}")
-    ax1.set_xlabel("Step")
-    ax1.set_ylabel("Picard Iterations")
-    ax1.legend()
+    _fs1 = plot_1_fontsize or fontsize
+    ax1.set_title(f"Picard Iterations per Time Step{_title_suffix}", fontsize=_fs1)
+    ax1.set_xlabel("Step", fontsize=_fs1)
+    ax1.set_ylabel("Picard Iterations", fontsize=_fs1)
+    ax1.legend(fontsize=_fs1)
+    ax1.tick_params(labelsize=_fs1)
 
     # ---------- Plot 2 (walltime per step) ----------
     # GPU name in title (if mixed -> "mixed")
@@ -320,24 +328,27 @@ def plot_moment_cnn_test(
 
     fig2, ax2 = plt.subplots(figsize=plot_2_figsize)
 
+    _ws = max(int(walltime_skip_first), 0)
     for rec in records:
-        steps = np.arange(rec.n_steps, dtype=np.int64)
+        steps = np.arange(rec.n_steps, dtype=np.int64)[_ws:]
         c = tol2c[float(rec.picard_tol)]
         tol_s = _tol_label(rec.picard_tol)
         ax2.plot(
-            steps, rec.t_base,
+            steps, rec.t_base[_ws:],
             linestyle=_BASE_LS, color=c, linewidth=1.5,
             label=f"tol={tol_s} base"
         )
         ax2.plot(
-            steps, rec.t_warm,
+            steps, rec.t_warm[_ws:],
             linestyle=_WARM_LS, color=c, linewidth=1.5,
             label=f"tol={tol_s} warm"
         )
 
-    ax2.set_title(f"Walltime per Step (GPU: {gpu_title}){_title_suffix}")
-    ax2.set_xlabel("Step")
-    ax2.set_ylabel("Walltime [s]")
+    _fs2 = plot_2_fontsize or fontsize
+    ax2.set_title(f"Walltime per Step (GPU: {gpu_title}){_title_suffix}", fontsize=_fs2)
+    ax2.set_xlabel("Step", fontsize=_fs2)
+    ax2.set_ylabel("Walltime [s]", fontsize=_fs2)
+    ax2.tick_params(labelsize=_fs2)
     ax2.grid(True, which="both", alpha=0.3)
 
     # dedup legend
@@ -345,7 +356,7 @@ def plot_moment_cnn_test(
     uniq = {}
     for h, l in zip(handles, labels):
         uniq[l] = h
-    ax2.legend(list(uniq.values()), list(uniq.keys()), loc="best")
+    ax2.legend(list(uniq.values()), list(uniq.keys()), loc="best", fontsize=_fs2)
     ax2.grid(False)
 
     # ---------- Plot 3 (final moments + deltas) ----------
@@ -375,9 +386,13 @@ def plot_moment_cnn_test(
                 ax.plot(x, rec.T_warm, linestyle=_WARM_LS, color=c, label=f"tol={tol_s} warm")
                 ax.set_ylabel("T")
 
-        ax.set_title(f"Final Moment {m}(x)")
-        ax.set_xlabel("Cell Index")
-        ax.legend()
+    _fs3 = plot_3_fontsize or fontsize
+    for j, m in enumerate(moments):
+        ax = axes[0][j]
+        ax.set_title(f"Final Moment {m}(x)", fontsize=_fs3)
+        ax.set_xlabel("Cell Index", fontsize=_fs3)
+        ax.legend(fontsize=_fs3)
+        ax.tick_params(labelsize=_fs3)
 
     for j, m in enumerate(moments):
         ax = axes[1][j]
@@ -399,11 +414,12 @@ def plot_moment_cnn_test(
                 ax.plot(x, d, linestyle=_WARM_LS, color=c, label=f"tol={tol_s} Δ")
                 ax.set_ylabel("ΔT")
 
-        ax.set_title(f"Final Difference Δ{m}(x) = warm - base")
-        ax.set_xlabel("Cell Index")
-        ax.legend()
+        ax.set_title(f"Final Difference Δ{m}(x) = warm - base", fontsize=_fs3)
+        ax.set_xlabel("Cell Index", fontsize=_fs3)
+        ax.legend(fontsize=_fs3)
+        ax.tick_params(labelsize=_fs3)
 
-    fig3.suptitle(f"Final Moments and Differences{_title_suffix}", y=1.02)
+    fig3.suptitle(f"Final Moments and Differences{_title_suffix}", y=1.02, fontsize=_fs3)
 
     # ---------- Plot 4 (two panels: speedup & mean step time; both with L∞) ----------
     recs = sorted(records, key=lambda r: r.picard_tol)
@@ -432,19 +448,22 @@ def plot_moment_cnn_test(
         label="Iteration Reduction (Base / Warm)"
     )
     ax4a.set_xscale("log")
-    ax4a.set_xlabel("Picard Tolerance")
-    ax4a.set_ylabel("Iteration Reduction (sum iters base / warm)")
-    ax4a.set_title(f"Iteration Reduction vs Picard Tol (GPU: {gpu_title}){_title_suffix}")
+    _fs4 = plot_4_fontsize or fontsize
+    ax4a.set_xlabel("Picard Tolerance", fontsize=_fs4)
+    ax4a.set_ylabel("Iteration Reduction (sum iters base / warm)", fontsize=_fs4)
+    ax4a.set_title(f"Iteration Reduction vs Picard Tol (GPU: {gpu_title}){_title_suffix}", fontsize=_fs4)
+    ax4a.tick_params(labelsize=_fs4)
     ax4a.grid(True, which="both", alpha=0.3)
 
     ax4a_r.plot(tols, linf_n, marker="o", color=_OKABE_ITO[0], label="Final Difference L∞ (n)")
     ax4a_r.plot(tols, linf_u, marker="o", color=_OKABE_ITO[1], label="Final Difference L∞ (u)")
     ax4a_r.plot(tols, linf_T, marker="o", color=_OKABE_ITO[2], label="Final Difference L∞ (T)")
-    ax4a_r.set_ylabel("Final Difference (L∞)")
+    ax4a_r.set_ylabel("Final Difference (L∞)", fontsize=_fs4)
+    ax4a_r.tick_params(labelsize=_fs4)
 
     h1, l1 = ax4a.get_legend_handles_labels()
     h2, l2 = ax4a_r.get_legend_handles_labels()
-    ax4a.legend(h1 + h2, l1 + l2, loc="best")
+    ax4a.legend(h1 + h2, l1 + l2, loc="best", fontsize=_fs4)
 
     # ---- right panel: mean step time (base/warm) + L∞ ----
     ax4b_r = ax4b.twinx()
@@ -457,19 +476,21 @@ def plot_moment_cnn_test(
         label="Mean Step Time (Warm) [s]"
     )
     ax4b.set_xscale("log")
-    ax4b.set_xlabel("Picard Tolerance")
-    ax4b.set_ylabel("Mean Step Time [s]")
-    ax4b.set_title(f"Mean Step Time vs Picard Tol (GPU: {gpu_title}){_title_suffix}")
+    ax4b.set_xlabel("Picard Tolerance", fontsize=_fs4)
+    ax4b.set_ylabel("Mean Step Time [s]", fontsize=_fs4)
+    ax4b.set_title(f"Mean Step Time vs Picard Tol (GPU: {gpu_title}){_title_suffix}", fontsize=_fs4)
+    ax4b.tick_params(labelsize=_fs4)
     ax4b.grid(True, which="both", alpha=0.3)
 
     ax4b_r.plot(tols, linf_n, marker="o", color=_OKABE_ITO[0], label="Final Difference L∞ (n)")
     ax4b_r.plot(tols, linf_u, marker="o", color=_OKABE_ITO[1], label="Final Difference L∞ (u)")
     ax4b_r.plot(tols, linf_T, marker="o", color=_OKABE_ITO[2], label="Final Difference L∞ (T)")
-    ax4b_r.set_ylabel("Final Difference (L∞)")
+    ax4b_r.set_ylabel("Final Difference (L∞)", fontsize=_fs4)
+    ax4b_r.tick_params(labelsize=_fs4)
 
     h1, l1 = ax4b.get_legend_handles_labels()
     h2, l2 = ax4b_r.get_legend_handles_labels()
-    ax4b.legend(h1 + h2, l1 + l2, loc="best")
+    ax4b.legend(h1 + h2, l1 + l2, loc="best", fontsize=_fs4)
 
     figures = {
         "plot_1_picard_iters": fig1,
