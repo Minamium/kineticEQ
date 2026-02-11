@@ -1,0 +1,1 @@
+# kineticEQ/CNN/BGK1D1V/multi_train.py
