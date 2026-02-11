@@ -3,24 +3,23 @@
 
   "base_args": {
     "epochs": 20,
-    "batch": 256,
-    "lr": 0.0002,
-    "workers": 2,
+    "batch": 512,
+    "lr": 1e-3,
+    "workers": 8,
     "prefetch_factor": 2,
     "amp": true,
     "seed": 42,
-
+    
+    "loss_kind": "softmax",
     "delta_type": "dnu",
-
-    "loss_kind": "smoothl1",
     "loss_softmax_beta": 20.0,
     "loss_eps": 1e-6,
     "nb": 10,
     "n_floor": 1e-8,
     "T_floor": 1e-8,
 
-    "shock_ratio": 0.8,
-    "shock_q": 0.90,
+    "shock_ratio": 0.5,
+    "shock_q": 0.65,
 
     "hidden": 256,
     "n_blocks": 6,
@@ -46,15 +45,16 @@
     "warm_eval_dt": 5e-5,
     "warm_eval_T_total": 0.05,
     "warm_eval_picard_iter": 1000,
-    "warm_eval_picard_tol": 1e-3,
+    "warm_eval_picard_tol": 1e-5,
     "warm_eval_abs_tol": 1e-13,
     "warm_eval_nx": 512,
     "warm_eval_nv": 256
   },
 
   "sweep": {
-    "shock_ratio": [0.3, 0.5, 0.8, 1.0],
-    "shock_q": [0.6, 0.9]
+    "loss_kind": ["smoothl1","softmax"],
+    "hidden": [128,256,512,1024],
+    "n_blocks": [6,8,10]
   },
 
   "save_root": "sweep_runs/default"
