@@ -101,8 +101,11 @@ def run_case_pair(
     n_steps: int,
     device: torch.device,
 ) -> dict:
+    print(f"[log] creating eng_base (JIT compile may take minutes)...", flush=True)
     eng_base = Engine(cfg_base)
+    print(f"[log] eng_base created", flush=True)
     eng_warm = Engine(cfg_warm)
+    print(f"[log] eng_warm created", flush=True)
 
     # stepper が benchlog を持つ前提（無い場合も壊れないようにする）
     # warmstart が実際に有効かの sanity:
@@ -125,6 +128,8 @@ def run_case_pair(
     t0_all = _now_sync(device)
 
     for s in range(n_steps):
+        if s % 100 == 0:
+            print(f"[log] rollout step {s}/{n_steps}", flush=True)
         # baseline step timing
         t0 = _now_sync(device)
         eng_base.stepper(s)
@@ -237,12 +242,16 @@ def run_case_baseline_input(
 
     Output schema is identical to run_case_pair (warm = tf).
     """
+    print(f"[log] creating eng_base (JIT compile may take minutes)...", flush=True)
     eng_base = Engine(cfg_base)
+    print(f"[log] eng_base created", flush=True)
     eng_tf   = Engine(cfg_base)   # CNN disabled inside stepper
+    print(f"[log] eng_tf created", flush=True)
 
     # load model on eval side only
     model_tf, model_meta_tf = load_moments_cnn_model(ckpt_path, device)
     dtp = model_meta_tf.get("delta_type", "dnu")
+    print(f"[log] model loaded, delta_type={dtp}", flush=True)
 
     dt_val  = float(cfg_base.model_cfg.time.dt)
     tau_val = float(cfg_base.model_cfg.params.tau_tilde)
@@ -261,6 +270,8 @@ def run_case_baseline_input(
     t0_all = _now_sync(device)
 
     for s in range(n_steps):
+        if s % 100 == 0:
+            print(f"[log] tf step {s}/{n_steps}", flush=True)
         # ============================================================
         # (A) true moments from BASE at time t=s  (BEFORE stepping base)
         # ============================================================
@@ -415,9 +426,9 @@ def parse_args():
 
 def main():
     args = parse_args()
-    print(f"[log] args parsed: eval_type={args.eval_type}", flush=True)
+    print(f"args parsed: eval_type={args.eval_type}", flush=True)
     device = torch.device(args.device)
-    print(f"[log] device={device}", flush=True)
+    print(f"device={device}", flush=True)
 
     gpu_name = None
     if device.type == "cuda" and torch.cuda.is_available():
@@ -448,6 +459,7 @@ def main():
     eval_type = str(args.eval_type)
 
     for tau in args.tau:
+        print(f"[log] tau={tau:.3e}, eval_type={eval_type}, building cfg...", flush=True)
         cfg_base = build_cfg(
             tau=float(tau),
             dt=float(args.dt),
