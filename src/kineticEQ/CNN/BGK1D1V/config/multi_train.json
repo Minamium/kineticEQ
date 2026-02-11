@@ -3,9 +3,9 @@
 
   "base_args": {
     "epochs": 20,
-    "batch": 512,
+    "batch": 1024,
     "lr": 1e-3,
-    "workers": 8,
+    "workers": 4,
     "prefetch_factor": 2,
     "amp": true,
     "seed": 42,
