@@ -415,7 +415,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+    print(f"[log] args parsed: eval_type={args.eval_type}", flush=True)
     device = torch.device(args.device)
+    print(f"[log] device={device}", flush=True)
 
     gpu_name = None
     if device.type == "cuda" and torch.cuda.is_available():
