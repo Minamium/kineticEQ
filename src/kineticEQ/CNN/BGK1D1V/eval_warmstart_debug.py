@@ -227,12 +227,15 @@ def run_case_baseline_input(
     device: torch.device,
 ) -> dict:
     """
-    Teacher-forcing evaluation:
-      - eng_base: baseline (no CNN)
-      - eng_tf:   baseline config (no CNN in stepper), but each step receives
-                  fz built from CNN prediction using eng_base's TRUE moments.
-    This isolates the CNN's single-step prediction quality from rollout error
-    accumulation.  Output schema is identical to run_case_pair (warm = tf).
+    Teacher-forcing evaluation (true 1-step TF via state sync):
+      - eng_base: baseline (no CNN), provides TRUE state f_t
+      - eng_tf:   baseline config (no CNN in stepper), but each step:
+          (1) sync eng_tf.state to eng_base.state (so both start from same f_t)
+          (2) build fz from CNN prediction using eng_base's TRUE moments
+          (3) inject fz and run one step
+    This isolates the CNN's single-step quality from rollout accumulation.
+
+    Output schema is identical to run_case_pair (warm = tf).
     """
     eng_base = Engine(cfg_base)
     eng_tf   = Engine(cfg_base)   # CNN disabled inside stepper
@@ -258,12 +261,22 @@ def run_case_baseline_input(
     t0_all = _now_sync(device)
 
     for s in range(n_steps):
-        # ------------------------------------------------------------
-        # teacher forcing: CNN prediction from base's TRUE moments at time t=s
-        # (IMPORTANT: compute moments BEFORE stepping eng_base)
-        # ------------------------------------------------------------
+        # ============================================================
+        # (A) true moments from BASE at time t=s  (BEFORE stepping base)
+        # ============================================================
         n0, u0, T0 = calculate_moments(eng_base.state, eng_base.state.f)
 
+        # ============================================================
+        # (B) sync TF engine state to BASE state so TF starts from same f_t
+        # ============================================================
+        eng_tf.state.f.copy_(eng_base.state.f)
+        # safest: also sync f_tmp if exists (implementation-dependent)
+        if hasattr(eng_tf.state, "f_tmp") and hasattr(eng_base.state, "f_tmp"):
+            eng_tf.state.f_tmp.copy_(eng_base.state.f_tmp)
+
+        # ============================================================
+        # (C) CNN prediction -> build Maxwellian fz (on synced eng_tf.state)
+        # ============================================================
         n1p = n0.clone()
         u1p = u0.clone()
         T1p = T0.clone()
@@ -278,10 +291,11 @@ def run_case_baseline_input(
         fz = _build_fz_from_moments(eng_tf.state, n1p, u1p, T1p)
 
         # inject fz for THIS step (t=s -> s+1)
-        # NOTE: this assumes stepper reads ws._init_fz at the beginning of the step
         eng_tf.stepper.ws._init_fz = fz
 
-        # ---------------- baseline step ----------------
+        # ============================================================
+        # (D) baseline step (advance base to t=s+1)
+        # ============================================================
         t0 = _now_sync(device)
         eng_base.stepper(s)
         t1 = _now_sync(device)
@@ -291,7 +305,9 @@ def run_case_baseline_input(
         it_base[s]    = int(bench_b.get("picard_iter", -1))
         resid_base[s] = float(bench_b.get("std_picard_residual", np.nan))
 
-        # ---------------- teacher-forcing step ----------------
+        # ============================================================
+        # (E) teacher-forcing step (solve from same f_t with CNN-init fz)
+        # ============================================================
         t0 = _now_sync(device)
         eng_tf.stepper(s)
         t1 = _now_sync(device)
@@ -301,7 +317,9 @@ def run_case_baseline_input(
         it_warm[s]    = int(bench_w.get("picard_iter", -1))
         resid_warm[s] = float(bench_w.get("std_picard_residual", np.nan))
 
-        # ---------------- inference time estimate ----------------
+        # ============================================================
+        # (F) inference time estimate
+        # ============================================================
         ib = int(it_base[s])
         iw = int(it_warm[s])
         if ib > 0 and iw >= 0:
@@ -314,7 +332,7 @@ def run_case_baseline_input(
     t1_all = _now_sync(device)
     wall_all = float(t1_all - t0_all)
 
-    # final moments
+    # final moments (NOTE: eng_tf is NOT a physical rollout; only last-step state is meaningful)
     nb, ub, Tb = calculate_moments(eng_base.state, eng_base.state.f)
     nw, uw, Tw = calculate_moments(eng_tf.state, eng_tf.state.f)
 
