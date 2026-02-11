@@ -1,0 +1,62 @@
+{
+  "_comment": "Default sweep config for multi_train.py. Edit base_args and sweep as needed.",
+
+  "base_args": {
+    "manifest": "EDIT_THIS_PATH/manifest.json",
+    "epochs": 20,
+    "batch": 256,
+    "lr": 0.0002,
+    "workers": 2,
+    "prefetch_factor": 2,
+    "amp": true,
+    "seed": 42,
+
+    "delta_type": "dnu",
+
+    "loss_kind": "smoothl1",
+    "loss_softmax_beta": 20.0,
+    "loss_eps": 1e-6,
+    "nb": 10,
+    "n_floor": 1e-8,
+    "T_floor": 1e-8,
+
+    "shock_ratio": 0.8,
+    "shock_q": 0.90,
+
+    "hidden": 256,
+    "n_blocks": 6,
+    "kernel": 5,
+    "gn_groups": 32,
+    "bottleneck": 0.5,
+    "dilation_cycle": [1, 2],
+    "use_gate_head": 1,
+    "gate_bias_init": -4.0,
+    "gate_scale": 1.0,
+    "gate_per_channel": 0,
+
+    "grad_clip": 1.0,
+    "log_interval": 50,
+
+    "sched_plateau": true,
+    "sched_patience": 3,
+    "sched_factor": 0.5,
+    "sched_min_lr": 1e-6,
+
+    "warm_eval": true,
+    "warm_eval_tau": 5e-7,
+    "warm_eval_dt": 5e-5,
+    "warm_eval_T_total": 0.05,
+    "warm_eval_picard_iter": 1000,
+    "warm_eval_picard_tol": 1e-3,
+    "warm_eval_abs_tol": 1e-13,
+    "warm_eval_nx": 512,
+    "warm_eval_nv": 256
+  },
+
+  "sweep": {
+    "shock_ratio": [0.3, 0.5, 0.8, 1.0],
+    "shock_q": [0.6, 0.9]
+  },
+
+  "save_root": "sweep_runs/default"
+}
