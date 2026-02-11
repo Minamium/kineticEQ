@@ -397,7 +397,7 @@ def parse_args():
     )
     ap.add_argument(
         "--traindata", type=str, default=None,
-        help="Path to training data directory (manifest.json is auto-detected inside)",
+        help="Path to manifest.json for training data",
     )
     return ap.parse_args()
 
@@ -413,18 +413,14 @@ def main():
     config = load_config(config_path)
     print(f"Config: {config_path}")
 
-    # --traindata: resolve manifest.json and inject into base_args
+    # --traindata: manifest.json path to inject into base_args
     if args.traindata:
-        td = Path(args.traindata).resolve()
-        manifest_path = td / "manifest.json"
+        manifest_path = Path(args.traindata).resolve()
         if not manifest_path.exists():
-            print(f"[error] manifest.json not found in {td}", file=sys.stderr)
+            print(f"[error] {manifest_path} not found", file=sys.stderr)
             sys.exit(1)
         config.setdefault("base_args", {})["manifest"] = str(manifest_path)
         print(f"Training data: {manifest_path}")
-    elif config.get("base_args", {}).get("manifest", "").startswith("EDIT_THIS"):
-        print("[error] --traindata not specified and config manifest is placeholder", file=sys.stderr)
-        sys.exit(1)
 
     save_root = args.save_root or config.get("save_root", "sweep_runs/default")
 
