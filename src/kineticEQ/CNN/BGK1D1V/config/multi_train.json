@@ -2,7 +2,6 @@
   "_comment": "Default sweep config for multi_train.py. Edit base_args and sweep as needed.",
 
   "base_args": {
-    "manifest": "EDIT_THIS_PATH/manifest.json",
     "epochs": 20,
     "batch": 256,
     "lr": 0.0002,

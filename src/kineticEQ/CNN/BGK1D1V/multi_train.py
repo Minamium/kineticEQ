@@ -395,6 +395,10 @@ def parse_args():
         "--poll_interval", type=float, default=5.0,
         help="Seconds between polling running processes (default: 5)",
     )
+    ap.add_argument(
+        "--traindata", type=str, default=None,
+        help="Path to training data directory (manifest.json is auto-detected inside)",
+    )
     return ap.parse_args()
 
 
@@ -408,6 +412,19 @@ def main():
 
     config = load_config(config_path)
     print(f"Config: {config_path}")
+
+    # --traindata: resolve manifest.json and inject into base_args
+    if args.traindata:
+        td = Path(args.traindata).resolve()
+        manifest_path = td / "manifest.json"
+        if not manifest_path.exists():
+            print(f"[error] manifest.json not found in {td}", file=sys.stderr)
+            sys.exit(1)
+        config.setdefault("base_args", {})["manifest"] = str(manifest_path)
+        print(f"Training data: {manifest_path}")
+    elif config.get("base_args", {}).get("manifest", "").startswith("EDIT_THIS"):
+        print("[error] --traindata not specified and config manifest is placeholder", file=sys.stderr)
+        sys.exit(1)
 
     save_root = args.save_root or config.get("save_root", "sweep_runs/default")
 
