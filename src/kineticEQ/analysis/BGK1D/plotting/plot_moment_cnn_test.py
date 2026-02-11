@@ -253,6 +253,10 @@ def plot_moment_cnn_test(
     plot_2_fontsize: float | None = None,
     plot_3_fontsize: float | None = None,
     plot_4_fontsize: float | None = None,
+    plot_1_filename: str = "plot_1_picard_iters",
+    plot_2_filename: str = "plot_2_walltime",
+    plot_3_filename: str = "plot_3_final_moments",
+    plot_4_filename: str = "plot_4_speedup_linf",
 ) -> dict:
     """
     Plots (English labels/titles/legend):
@@ -493,10 +497,10 @@ def plot_moment_cnn_test(
     ax4b.legend(h1 + h2, l1 + l2, loc="best", fontsize=_fs4)
 
     figures = {
-        "plot_1_picard_iters": fig1,
-        "plot_2_walltime": fig2,
-        "plot_3_final_moments": fig3,
-        "plot_4_speedup_linf": fig4,
+        plot_1_filename: fig1,
+        plot_2_filename: fig2,
+        plot_3_filename: fig3,
+        plot_4_filename: fig4,
     }
 
     saved: dict[str, str] = {}
@@ -538,6 +542,11 @@ def _parse_args_cli() -> argparse.Namespace:
     p.add_argument("--plot_2_figsize", type=float, nargs=2, default=(12, 6))
     p.add_argument("--plot_3_figsize", type=float, nargs=2, default=(12, 6))
     p.add_argument("--plot_4_figsize", type=float, nargs=2, default=(12, 6))
+
+    p.add_argument("--plot_1_filename", type=str, default="plot_1_picard_iters")
+    p.add_argument("--plot_2_filename", type=str, default="plot_2_walltime")
+    p.add_argument("--plot_3_filename", type=str, default="plot_3_final_moments")
+    p.add_argument("--plot_4_filename", type=str, default="plot_4_speedup_linf")
     return p.parse_args()
 
 
@@ -555,6 +564,10 @@ def main() -> None:
         plot_3_figsize=(float(args.plot_3_figsize[0]), float(args.plot_3_figsize[1])),
         plot_4_figsize=(float(args.plot_4_figsize[0]), float(args.plot_4_figsize[1])),
         mode=str(args.mode),
+        plot_1_filename=str(args.plot_1_filename),
+        plot_2_filename=str(args.plot_2_filename),
+        plot_3_filename=str(args.plot_3_filename),
+        plot_4_filename=str(args.plot_4_filename),
     )
 
 

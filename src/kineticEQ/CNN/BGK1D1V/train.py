@@ -212,7 +212,7 @@ def parse_args():
     ap.add_argument("--seed", type=int, default=0)
 
     # learning target
-    ap.add_argument("--delta_type", type=str, default="dw", choices=["dnu", "dw"])
+    ap.add_argument("--delta_type", type=str, default="dnu", choices=["dnu", "dw"])
 
     # loss knobs
     ap.add_argument("--loss_kind", type=str, default="smoothl1", choices=["smoothl1", "mse", "l1"])
