@@ -416,6 +416,11 @@ def main():
                 "val_loss": val_loss,
                 "val_base_loss": float(val_base_loss),
                 "val_shock_loss": float(val_shock_loss),
+                "train_shock_loss_raw": float(train_shock_loss_raw),
+                "train_shock_loss": float(train_shock_loss),          
+                "val_shock_loss_raw": float(val_shock_loss_raw),
+                "val_shock_loss": float(val_shock_loss),
+
                 "best_val": best_val,
                 "lr": opt.param_groups[0]["lr"],
                 "train_time_sec": train_time,
