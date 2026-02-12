@@ -30,7 +30,7 @@ def save_json(path: Path, obj):
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False))
 
 
-def make_loader(manifest: str, split: str, batch: int, workers: int, pin: bool, prefetch_factor: int, target: str):
+def make_loader(manifest: str, split: str, batch: int, workers: int, pin: bool, prefetch_factor: int, target: str, shuffle: bool):
     ds = BGK1D1VNPZDeltaDataset(
         manifest_path=manifest,
         split=split,
@@ -41,8 +41,7 @@ def make_loader(manifest: str, split: str, batch: int, workers: int, pin: bool, 
     dl = DataLoader(
         ds,
         batch_size=batch,
-        #shuffle=(split == "train"),
-        shuffle=False,
+        shuffle=shuffle,
         num_workers=workers,
         pin_memory=pin,
         persistent_workers=(workers > 0),
@@ -68,6 +67,9 @@ def parse_args():
 
     # learning target
     ap.add_argument("--delta_type", type=str, default="dnu", choices=["dnu", "dw"])
+
+    # shuffle
+    ap.add_argument("--no_shuffle", action="store_true")
 
     # loss knobs
     ap.add_argument("--loss_kind", type=str, default="smoothl1", choices=["smoothl1", "mse", "l1","softmax"])
@@ -173,8 +175,10 @@ def main():
             min_lr=float(args.sched_min_lr),
         )
 
-    train_ds, train_dl = make_loader(args.manifest, "train", args.batch, args.workers, pin=pin, prefetch_factor=args.prefetch_factor, target=args.delta_type)
-    val_ds,   val_dl   = make_loader(args.manifest, "val",   args.batch, args.workers, pin=pin, prefetch_factor=args.prefetch_factor, target=args.delta_type)
+    train_ds, train_dl = make_loader(args.manifest, "train", args.batch, args.workers, pin=pin, prefetch_factor=args.prefetch_factor, 
+                                     target=args.delta_type, shuffle = (not args.no_shuffle))
+    val_ds,   val_dl   = make_loader(args.manifest, "val",   args.batch, args.workers, pin=pin, prefetch_factor=args.prefetch_factor, 
+                                     target=args.delta_type, shuffle=False)
 
     best_val = float("inf")
     log_path = save_dir / "log.jsonl"
