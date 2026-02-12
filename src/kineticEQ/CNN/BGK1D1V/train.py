@@ -72,14 +72,18 @@ def parse_args():
     ap.add_argument("--no_shuffle", action="store_true")
 
     # loss knobs
+    # base loss knobs
     ap.add_argument("--loss_kind", type=str, default="smoothl1", choices=["smoothl1", "mse", "l1","softmax"])
     ap.add_argument("--loss_softmax_beta", type=float, default=20.0)
-    ap.add_argument("--loss_eps", type=float, default=1e-6)
+    ap.add_argument("--loss_eps", type=float, default=1e-12)
     ap.add_argument("--nb", type=int, default=10)
     ap.add_argument("--n_floor", type=float, default=1e-8)
     ap.add_argument("--T_floor", type=float, default=1e-8)
 
     # shock-mask loss knobs
+    ap.add_argument("--shock_loss_kind", type=str, default="softmax", choices=["mse","softmax"])
+    ap.add_argument("--shock_loss_softmax_beta", type=float, default=20.0)
+    ap.add_argument("--shock_loss_eps", type=float, default=1e-12)
     ap.add_argument("--shock_ratio", type=float, default=0.8)
     ap.add_argument("--shock_q", type=float, default=0.90)  # 0.90 -> top10% shock
 
@@ -191,7 +195,8 @@ def main():
         tr_loss_sum = 0.0
         tr_n = 0
         tr_base_loss_sum = 0.0
-        tr_shock_loss_sum = 0.0
+        tr_shock_wsum = 0.0          # sum(shock_loss * shock_count)
+        tr_shock_wden = 0.0  
 
         # channel-wise stats on residuals
         tr_rn_abs_sum = 0.0
@@ -230,6 +235,9 @@ def main():
                     kind=str(args.loss_kind),
                     shock_ratio=float(args.shock_ratio),
                     softmax_beta=float(args.loss_softmax_beta),
+                    shock_loss_kind=str(args.shock_loss_kind),
+                    shock_loss_softmax_beta=float(args.shock_loss_softmax_beta),
+                    shock_loss_eps=float(args.shock_loss_eps),
                 )
 
             scaler.scale(loss).backward()
@@ -240,9 +248,16 @@ def main():
             scaler.update()
 
             bs = x.size(0)
+            
+            # total/base
             tr_loss_sum += float(loss.item()) * bs
             tr_base_loss_sum += float(base_loss.item()) * bs
-            tr_shock_loss_sum += float(shock_loss.item()) * bs
+
+            # shock
+            shock_count = float(shock_mask.sum().item()) * 3.0
+            tr_shock_wsum += float(shock_loss.item()) * shock_count
+            tr_shock_wden += shock_count
+
             tr_n += bs
 
             B = rn.shape[0]
@@ -266,7 +281,7 @@ def main():
                 rT_mae = tr_rT_abs_sum / max(tr_count, 1.0)
                 pbar.set_postfix({
                     "loss": f"{(tr_loss_sum/max(tr_n,1)):.3e}",
-                    "shock": f"{float(tr_shock_loss_sum/max(tr_n,1)) * float(args.shock_ratio):.3e}",
+                    "shock": f"{( (tr_shock_wsum / max(tr_shock_wden,1.0)) * float(args.shock_ratio) ):.3e}",
                     "base": f"{float(tr_base_loss_sum/max(tr_n,1)):.3e}",
                     "lr": f"{lr:.1e}",
                     "|rn|": f"{rn_mae:.2e}",
@@ -278,6 +293,8 @@ def main():
                 })
 
         train_loss = tr_loss_sum / max(tr_n, 1)
+        train_shock_loss_raw = tr_shock_wsum / max(tr_shock_wden, 1.0)
+        train_shock_loss = train_shock_loss_raw * float(args.shock_ratio)
         train_time = time.time() - t0
         tr_rn_mae = tr_rn_abs_sum / max(tr_count, 1.0)
         tr_ru_mae = tr_ru_abs_sum / max(tr_count, 1.0)
@@ -288,7 +305,8 @@ def main():
         va_loss_sum = 0.0
         va_n = 0
         va_base_loss_sum = 0.0
-        va_shock_loss_sum = 0.0
+        va_shock_wsum = 0.0
+        va_shock_wden = 0.0
 
         va_rn_abs_sum = 0.0
         va_ru_abs_sum = 0.0
@@ -322,12 +340,19 @@ def main():
                         kind=str(args.loss_kind),
                         shock_ratio=float(args.shock_ratio),
                         softmax_beta=float(args.loss_softmax_beta),
+                        shock_loss_kind=str(args.shock_loss_kind),
+                        shock_loss_softmax_beta=float(args.shock_loss_softmax_beta),
+                        shock_loss_eps=float(args.shock_loss_eps),
                     )
 
                 bs = x.size(0)
                 va_loss_sum += float(loss.item()) * bs
                 va_base_loss_sum += float(val_base_loss.item()) * bs
-                va_shock_loss_sum += float(val_shock_loss.item()) * bs
+
+                shock_count = float(shock_mask.sum().item()) * 3.0
+                va_shock_wsum += float(val_shock_loss.item()) * shock_count
+                va_shock_wden += shock_count
+
                 va_n += bs
 
                 B = rn.shape[0]
@@ -346,7 +371,8 @@ def main():
 
         val_loss = va_loss_sum / max(va_n, 1)
         val_base_loss = va_base_loss_sum / max(va_n, 1)
-        val_shock_loss = (va_shock_loss_sum / max(va_n, 1)) * float(args.shock_ratio)
+        val_shock_loss_raw = va_shock_wsum / max(va_shock_wden, 1.0)
+        val_shock_loss = val_shock_loss_raw * float(args.shock_ratio)
         va_rn_mae = va_rn_abs_sum / max(va_count, 1.0)
         va_ru_mae = va_ru_abs_sum / max(va_count, 1.0)
         va_rT_mae = va_rT_abs_sum / max(va_count, 1.0)

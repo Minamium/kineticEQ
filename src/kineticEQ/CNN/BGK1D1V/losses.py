@@ -127,42 +127,84 @@ def std_w_loss_from_residuals_shock(
     *,
     kind: str = "smoothl1",
     shock_ratio: float = 0.8,
-    # --- for softmax-max approx ---
+
+    # base softmax
     softmax_beta: float = 20.0,
     softmax_eps: float = 1e-12,
-    softmax_use_abs: bool = True,   # True推奨（max|r| を狙う）
+    softmax_use_abs: bool = True,
+
+    # ---- NEW: shock loss knobs (backward compatible defaults) ----
+    shock_loss_kind: str = "mse",                  # "mse" | "softmax"
+    shock_loss_softmax_beta: float = 20.0,
+    shock_loss_eps: float = 1e-12,
+    shock_loss_use_abs: bool = True,
 ):
     """
-    base: 全点 SmoothL1 / MSE / L1 / softmax-max
-    + shock: shock_mask==1 の点のみ MSE を追加
-    rn,ru,rT は境界マスク済み（マスク部は0）を想定。
-    shock_mask: (B,1,nx) 0/1（境界0）
+    returns: (total, base, shock)
+      base : normalized by base_denom (valid_count * B * 3)
+      shock: normalized by shock_denom (number of shock elements across B*3*nx)
     """
     r = torch.cat([rn, ru, rT], dim=1)  # (B,3,nx)
     B, C, nx = r.shape
 
+    # ---- base (sum) ----
     if kind == "smoothl1":
-        base = F.smooth_l1_loss(r, torch.zeros_like(r), reduction="sum")
+        base_sum = F.smooth_l1_loss(r, torch.zeros_like(r), reduction="sum")
     elif kind == "mse":
-        base = (r * r).sum()
+        base_sum = (r * r).sum()
     elif kind == "l1":
-        base = r.abs().sum()
+        base_sum = r.abs().sum()
     elif kind == "softmax":
-        # smooth max approx via log-sum-exp over all elements (B,C,nx)
         a = r.abs() if bool(softmax_use_abs) else r
-        v = a.reshape(B, -1)  # (B, N)
-        m = torch.amax(v, dim=1, keepdim=True)  # (B,1)
+        v = a.reshape(B, -1)
+        m = torch.amax(v, dim=1, keepdim=True)
         z = float(softmax_beta) * (v - m)
-        lse = m + (torch.log(torch.sum(torch.exp(z), dim=1, keepdim=True) + float(softmax_eps))
-                   / float(softmax_beta))  # (B,1)
-        base = lse.sum()  # batch sum（他のkindの "sum" に合わせる）
+        lse = m + (
+            torch.log(torch.sum(torch.exp(z), dim=1, keepdim=True) + float(softmax_eps))
+            / float(softmax_beta)
+        )
+        base_sum = lse.sum()
     else:
         raise ValueError(f"unknown kind={kind}")
 
-    sm = shock_mask.float().expand(B, 3, nx)
-    shock_mse_sum = ((r * sm) ** 2).sum()
+    # ---- shock mask ----
+    sm = shock_mask.float().expand(B, 3, nx)  # (B,3,nx)
+    shock_count = sm.sum()  # total masked elements over (B,3,nx)
 
-    e = base + float(shock_ratio) * shock_mse_sum
+    # ---- shock (sum) ----
+    if shock_loss_kind == "mse":
+        shock_sum = ((r * sm) ** 2).sum()
 
-    denom = (valid_count * B * 3.0).clamp_min(1.0)
-    return (e / denom), (base / denom), (shock_mse_sum / denom)
+    elif shock_loss_kind == "softmax":
+        # smooth-max over masked elements only (per-sample), then sum over batch
+        a = r.abs() if bool(shock_loss_use_abs) else r
+
+        # masked-out -> -inf so logsumexp ignores them
+        neg_inf = torch.finfo(a.dtype).min
+        a_masked = a.masked_fill(sm <= 0.0, neg_inf)     # (B,3,nx)
+        v = a_masked.reshape(B, -1)                      # (B,N)
+
+        # if a sample has no shock points => return 0 for that sample
+        has = (sm.reshape(B, -1).sum(dim=1, keepdim=True) > 0.0)  # (B,1)
+
+        m = torch.amax(v, dim=1, keepdim=True)  # (B,1)  (if all -inf -> -inf)
+        z = float(shock_loss_softmax_beta) * (v - m)
+        lse = m + (
+            torch.log(torch.sum(torch.exp(z), dim=1, keepdim=True) + float(shock_loss_eps))
+            / float(shock_loss_softmax_beta)
+        )  # (B,1)
+
+        lse = torch.where(has, lse, torch.zeros_like(lse))
+        shock_sum = lse.sum()
+    else:
+        raise ValueError(f"unknown shock_loss_kind={shock_loss_kind}")
+
+    # ---- denoms ----
+    base_denom = (valid_count * B * 3.0).clamp_min(1.0)
+    shock_denom = shock_count.clamp_min(1.0)
+
+    base = base_sum / base_denom
+    shock = shock_sum / shock_denom
+
+    total = base + float(shock_ratio) * shock
+    return total, base, shock
