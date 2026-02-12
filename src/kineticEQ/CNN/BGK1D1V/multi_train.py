@@ -31,7 +31,7 @@ from typing import Any, IO
 # ---------------------------------------------------------------------------
 # train.py の store_true / nargs="+" 引数 (CLI変換で特殊扱いが必要)
 # ---------------------------------------------------------------------------
-_STORE_TRUE_FLAGS = frozenset({"amp", "sched_plateau", "warm_eval"})
+_STORE_TRUE_FLAGS = frozenset({"amp", "sched_plateau", "warm_eval", "no_shuffle"})
 _LIST_ARGS = frozenset({"dilation_cycle"})
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
