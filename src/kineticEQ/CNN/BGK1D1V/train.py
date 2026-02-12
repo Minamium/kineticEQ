@@ -515,6 +515,16 @@ def main():
                     flush=True,
                 )
 
+                with log_path.open("a") as f:
+                    f.write(json.dumps({
+                        "epoch": ep,
+                        "warm_eval": True,
+                        "picard_sum_base": base_sum,
+                        "picard_sum_warm": warm_sum,
+                        "speed": float(speed),
+                        "best_speed": float(max(speed_ep_best, best_speed)),
+                    }) + "\n")
+
             except Exception as e:
                 print(f"[warm-eval ep{ep:03d}] FAILED: {type(e).__name__}: {e}", flush=True)
 
