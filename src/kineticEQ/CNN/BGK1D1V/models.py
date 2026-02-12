@@ -20,10 +20,10 @@ class MomentCNN1D(nn.Module):
     def __init__(
         self,
         in_ch: int = 5,
-        hidden: int = 128,
+        hidden: int = 256,
         out_ch: int = 3,
         kernel: int = 5,
-        n_blocks: int = 2,
+        n_blocks: int = 6,
         gn_groups: int = 32,
         bottleneck: float = 0.5,
         dilation_cycle: tuple[int, ...] = (1, 2),
