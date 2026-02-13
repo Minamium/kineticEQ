@@ -40,6 +40,7 @@ class CaseRecord:
 
     mean_step_time_base: float
     mean_step_time_warm: float
+    mean_infer_time_est: float
 
 # ------------------------ color (colorblind-safe) ------------------------
 # Okabe–Ito palette (colorblind-safe), in hex.
@@ -150,6 +151,14 @@ def _extract_record(path: Path, case_index: int = 0) -> CaseRecord:
     mean_step_time_base = float(np.sum(t_base) / max(n_steps, 1))
     mean_step_time_warm = float(np.sum(t_warm) / max(n_steps, 1))
 
+    # mean inference time estimate per step
+    t_inf_est = np.asarray(timing.get("infer_time_est_step_sec", []), dtype=np.float64)
+    if t_inf_est.size > 0:
+        valid = t_inf_est[~np.isnan(t_inf_est)]
+        mean_infer_time_est = float(np.mean(valid)) if valid.size > 0 else float("nan")
+    else:
+        mean_infer_time_est = float("nan")
+
     sum_base = int(pic.get("picard_iter_sum_base", int(np.sum(it_base[it_base > 0]))))
     sum_warm = int(pic.get("picard_iter_sum_warm", int(np.sum(it_warm[it_warm > 0]))))
     speedup = float(sum_base) / float(max(sum_warm, 1))
@@ -199,6 +208,7 @@ def _extract_record(path: Path, case_index: int = 0) -> CaseRecord:
         linf_T=linf_T,
         mean_step_time_base=mean_step_time_base,
         mean_step_time_warm=mean_step_time_warm,
+        mean_infer_time_est=mean_infer_time_est,
     )
 
 
@@ -488,14 +498,19 @@ def plot_moment_cnn_test(
 
     fig4, ax4 = plt.subplots(figsize=plot_4_figsize)
     ax4_r = ax4.twinx()
+    speed_wall = mean_t_base / np.where(mean_t_warm > 0, mean_t_warm, np.nan)
     ax4.plot(
         tols, speed, marker="o", color="#000000",
         label="Iteration Reduction (Base / Warm)"
     )
+    ax4.plot(
+        tols, speed_wall, marker="s", linestyle="--", color="#555555",
+        label="Walltime Acceleration (Base / Warm)"
+    )
     ax4.set_xscale("log")
     ax4.set_xlabel("Picard Tolerance", fontsize=_fs4)
-    ax4.set_ylabel("Iteration Reduction (sum iters base / warm)", fontsize=_fs4)
-    ax4.set_title(f"Iteration Reduction vs Picard Tol (GPU: {gpu_title}){_ref_title4}{_title_suffix}", fontsize=_fs4)
+    ax4.set_ylabel("Speedup Ratio (Base / Warm)", fontsize=_fs4)
+    ax4.set_title(f"Speedup vs Picard Tol (GPU: {gpu_title}){_ref_title4}{_title_suffix}", fontsize=_fs4)
     ax4.tick_params(labelsize=_fs4)
     ax4.grid(True, which="both", alpha=0.3)
 
@@ -523,6 +538,7 @@ def plot_moment_cnn_test(
     _fs5 = plot_5_fontsize or fontsize
     fig5, ax5 = plt.subplots(figsize=plot_5_figsize)
     ax5_r = ax5.twinx()
+    mean_t_inf = np.asarray([r.mean_infer_time_est for r in recs], dtype=np.float64)
     ax5.plot(
         tols, mean_t_base, marker="o", linestyle=_BASE_LS, color="#000000",
         label="Mean Step Time (Base) [s]"
@@ -530,6 +546,10 @@ def plot_moment_cnn_test(
     ax5.plot(
         tols, mean_t_warm, marker="s", linestyle=_WARM_LS, color="#000000",
         label="Mean Step Time (Warm) [s]"
+    )
+    ax5.plot(
+        tols, mean_t_inf, marker="D", linestyle=":", color="#555555",
+        label="Mean Infer Time Est. [s]"
     )
     ax5.set_xscale("log")
     ax5.set_xlabel("Picard Tolerance", fontsize=_fs5)
