@@ -5,8 +5,8 @@
     "epochs": 20,
     "batch": 512,
     "lr": 5e-4,
-    "workers": 4,
-    "prefetch_factor": 2,
+    "workers": 9,
+    "prefetch_factor": 8,
     "amp": true,
     "seed": 42,
     
