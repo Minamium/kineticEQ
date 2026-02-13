@@ -246,17 +246,22 @@ def plot_moment_cnn_test(
     plot_2_figsize: tuple[float, float] = (12, 6),
     plot_3_figsize: tuple[float, float] = (12, 6),
     plot_4_figsize: tuple[float, float] = (12, 6),
+    plot_5_figsize: tuple[float, float] = (12, 6),
     mode: str = "B",  # "B" (base+warm), reserved for future: "warm_only"
     walltime_skip_first: int = 0,
+    ref_strictest: bool = False,
+    linf_log_scale: bool = False,
     fontsize: float | None = None,
     plot_1_fontsize: float | None = None,
     plot_2_fontsize: float | None = None,
     plot_3_fontsize: float | None = None,
     plot_4_fontsize: float | None = None,
+    plot_5_fontsize: float | None = None,
     plot_1_filename: str = "plot_1_picard_iters",
     plot_2_filename: str = "plot_2_walltime",
     plot_3_filename: str = "plot_3_final_moments",
     plot_4_filename: str = "plot_4_speedup_linf",
+    plot_5_filename: str = "plot_5_steptime_linf",
 ) -> dict:
     """
     Plots (English labels/titles/legend):
@@ -291,6 +296,10 @@ def plot_moment_cnn_test(
     # deterministic order by picard_tol
     records = sorted(records, key=lambda r: float(r.picard_tol))
 
+    # reference record for ref_strictest mode (smallest tol = strictest)
+    ref_rec: CaseRecord | None = records[0] if ref_strictest and records else None
+    _ref_tol_s = _tol_label(ref_rec.picard_tol) if ref_rec is not None else ""
+
     # tol -> color mapping (consistent across all plots; colorblind-safe)
     unique_tols = sorted({float(r.picard_tol) for r in records})
     tol2c = _build_tol_color_map(unique_tols)
@@ -322,7 +331,7 @@ def plot_moment_cnn_test(
     ax1.set_title(f"Picard Iterations per Time Step{_title_suffix}", fontsize=_fs1)
     ax1.set_xlabel("Step", fontsize=_fs1)
     ax1.set_ylabel("Picard Iterations", fontsize=_fs1)
-    ax1.legend(fontsize=_fs1)
+    ax1.legend(fontsize=_fs1, bbox_to_anchor=(1.02, 1), loc="upper left")
     ax1.tick_params(labelsize=_fs1)
 
     # ---------- Plot 2 (walltime per step) ----------
@@ -360,7 +369,8 @@ def plot_moment_cnn_test(
     uniq = {}
     for h, l in zip(handles, labels):
         uniq[l] = h
-    ax2.legend(list(uniq.values()), list(uniq.keys()), loc="best", fontsize=_fs2)
+    ax2.legend(list(uniq.values()), list(uniq.keys()),
+              bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=_fs2)
     ax2.grid(False)
 
     # ---------- Plot 3 (final moments + deltas) ----------
@@ -395,44 +405,76 @@ def plot_moment_cnn_test(
         ax = axes[0][j]
         ax.set_title(f"Final Moment {m}(x)", fontsize=_fs3)
         ax.set_xlabel("Cell Index", fontsize=_fs3)
-        ax.legend(fontsize=_fs3)
         ax.tick_params(labelsize=_fs3)
+    axes[0][-1].legend(fontsize=_fs3, bbox_to_anchor=(1.02, 1), loc="upper left")
 
     for j, m in enumerate(moments):
         ax = axes[1][j]
         for rec in sorted(records, key=lambda r: r.picard_tol):
-            x = np.arange(rec.n_base.size, dtype=np.int64)
             c = tol2c[float(rec.picard_tol)]
             tol_s = _tol_label(rec.picard_tol)
 
-            if m == "n":
-                d = rec.n_warm - rec.n_base
-                ax.plot(x, d, linestyle=_WARM_LS, color=c, label=f"tol={tol_s} Δ")
-                ax.set_ylabel("Δn")
-            elif m == "u":
-                d = rec.u_warm - rec.u_base
-                ax.plot(x, d, linestyle=_WARM_LS, color=c, label=f"tol={tol_s} Δ")
-                ax.set_ylabel("Δu")
+            warm_m = {"n": rec.n_warm, "u": rec.u_warm, "T": rec.T_warm}[m]
+            base_m = {"n": rec.n_base, "u": rec.u_base, "T": rec.T_base}[m]
+
+            if ref_rec is not None:
+                ref_m = {"n": ref_rec.n_base, "u": ref_rec.u_base,
+                         "T": ref_rec.T_base}[m]
+                nx_min = min(warm_m.size, ref_m.size)
+                x = np.arange(nx_min, dtype=np.int64)
+                ax.plot(x, warm_m[:nx_min] - ref_m[:nx_min],
+                        linestyle=_WARM_LS, color=c,
+                        label=f"tol={tol_s} warm-ref")
+                if mode == "B" and rec is not ref_rec:
+                    ax.plot(x, base_m[:nx_min] - ref_m[:nx_min],
+                            linestyle=_BASE_LS, color=c,
+                            label=f"tol={tol_s} base-ref")
             else:
-                d = rec.T_warm - rec.T_base
-                ax.plot(x, d, linestyle=_WARM_LS, color=c, label=f"tol={tol_s} Δ")
-                ax.set_ylabel("ΔT")
+                x = np.arange(base_m.size, dtype=np.int64)
+                ax.plot(x, warm_m - base_m, linestyle=_WARM_LS, color=c,
+                        label=f"tol={tol_s} \u0394")
+            ax.set_ylabel(f"\u0394{m}")
 
-        ax.set_title(f"Final Difference Δ{m}(x) = warm - base", fontsize=_fs3)
+        if ref_rec is not None:
+            ax.set_title(f"\u0394{m}(x) vs ref (tol={_ref_tol_s})", fontsize=_fs3)
+        else:
+            ax.set_title(f"Final Difference \u0394{m}(x) = warm - base", fontsize=_fs3)
         ax.set_xlabel("Cell Index", fontsize=_fs3)
-        ax.legend(fontsize=_fs3)
         ax.tick_params(labelsize=_fs3)
+    axes[1][-1].legend(fontsize=_fs3, bbox_to_anchor=(1.02, 1), loc="upper left")
 
-    fig3.suptitle(f"Final Moments and Differences{_title_suffix}", y=1.02, fontsize=_fs3)
+    _ref_tag = f" [ref tol={_ref_tol_s}]" if ref_rec is not None else ""
+    fig3.suptitle(f"Final Moments and Differences{_ref_tag}{_title_suffix}", y=1.02, fontsize=_fs3)
 
-    # ---------- Plot 4 (two panels: speedup & mean step time; both with L∞) ----------
+    # ---------- Plot 4 (iteration reduction + L\u221e) ----------
     recs = sorted(records, key=lambda r: r.picard_tol)
     tols = np.asarray([r.picard_tol for r in recs], dtype=np.float64)
 
     speed = np.asarray([r.speedup_iter_sum for r in recs], dtype=np.float64)
-    linf_n = np.asarray([r.linf_n for r in recs], dtype=np.float64)
-    linf_u = np.asarray([r.linf_u for r in recs], dtype=np.float64)
-    linf_T = np.asarray([r.linf_T for r in recs], dtype=np.float64)
+    if ref_rec is not None:
+        def _linf_ref(attr: str, ref_attr: str) -> np.ndarray:
+            ref_a = getattr(ref_rec, ref_attr)
+            vals = []
+            for r in recs:
+                a = getattr(r, attr)
+                nx = min(a.size, ref_a.size)
+                vals.append(float(np.max(np.abs(a[:nx] - ref_a[:nx]))))
+            return np.asarray(vals, dtype=np.float64)
+        linf_n = _linf_ref("n_warm", "n_base")
+        linf_u = _linf_ref("u_warm", "u_base")
+        linf_T = _linf_ref("T_warm", "T_base")
+        _ref_mask = np.array([r is not ref_rec for r in recs])
+        linf_n_base = _linf_ref("n_base", "n_base")
+        linf_u_base = _linf_ref("u_base", "u_base")
+        linf_T_base = _linf_ref("T_base", "T_base")
+        tols_base = tols[_ref_mask]
+        linf_n_base = linf_n_base[_ref_mask]
+        linf_u_base = linf_u_base[_ref_mask]
+        linf_T_base = linf_T_base[_ref_mask]
+    else:
+        linf_n = np.asarray([r.linf_n for r in recs], dtype=np.float64)
+        linf_u = np.asarray([r.linf_u for r in recs], dtype=np.float64)
+        linf_T = np.asarray([r.linf_T for r in recs], dtype=np.float64)
 
     mean_t_base = np.asarray([r.mean_step_time_base for r in recs], dtype=np.float64)
     mean_t_warm = np.asarray([r.mean_step_time_warm for r in recs], dtype=np.float64)
@@ -441,66 +483,87 @@ def plot_moment_cnn_test(
     gpu_names = sorted({r.gpu_name for r in recs if r.gpu_name})
     gpu_title = gpu_names[0] if len(gpu_names) == 1 else ("mixed" if len(gpu_names) > 1 else "unknown")
 
-    fig4, (ax4a, ax4b) = plt.subplots(
-        nrows=1, ncols=2, figsize=plot_4_figsize, constrained_layout=True
-    )
+    _fs4 = plot_4_fontsize or fontsize
+    _ref_title4 = f" [ref tol={_ref_tol_s}]" if ref_rec is not None else ""
 
-    # ---- left panel: speedup + L∞ ----
-    ax4a_r = ax4a.twinx()
-    ax4a.plot(
+    fig4, ax4 = plt.subplots(figsize=plot_4_figsize)
+    ax4_r = ax4.twinx()
+    ax4.plot(
         tols, speed, marker="o", color="#000000",
         label="Iteration Reduction (Base / Warm)"
     )
-    ax4a.set_xscale("log")
-    _fs4 = plot_4_fontsize or fontsize
-    ax4a.set_xlabel("Picard Tolerance", fontsize=_fs4)
-    ax4a.set_ylabel("Iteration Reduction (sum iters base / warm)", fontsize=_fs4)
-    ax4a.set_title(f"Iteration Reduction vs Picard Tol (GPU: {gpu_title}){_title_suffix}", fontsize=_fs4)
-    ax4a.tick_params(labelsize=_fs4)
-    ax4a.grid(True, which="both", alpha=0.3)
+    ax4.set_xscale("log")
+    ax4.set_xlabel("Picard Tolerance", fontsize=_fs4)
+    ax4.set_ylabel("Iteration Reduction (sum iters base / warm)", fontsize=_fs4)
+    ax4.set_title(f"Iteration Reduction vs Picard Tol (GPU: {gpu_title}){_ref_title4}{_title_suffix}", fontsize=_fs4)
+    ax4.tick_params(labelsize=_fs4)
+    ax4.grid(True, which="both", alpha=0.3)
 
-    ax4a_r.plot(tols, linf_n, marker="o", color=_OKABE_ITO[0], label="Final Difference L∞ (n)")
-    ax4a_r.plot(tols, linf_u, marker="o", color=_OKABE_ITO[1], label="Final Difference L∞ (u)")
-    ax4a_r.plot(tols, linf_T, marker="o", color=_OKABE_ITO[2], label="Final Difference L∞ (T)")
-    ax4a_r.set_ylabel("Final Difference (L∞)", fontsize=_fs4)
-    ax4a_r.tick_params(labelsize=_fs4)
+    if ref_rec is not None:
+        ax4_r.plot(tols, linf_n, marker="o", color=_OKABE_ITO[0], label="L\u221e warm (n) vs ref")
+        ax4_r.plot(tols, linf_u, marker="o", color=_OKABE_ITO[1], label="L\u221e warm (u) vs ref")
+        ax4_r.plot(tols, linf_T, marker="o", color=_OKABE_ITO[2], label="L\u221e warm (T) vs ref")
+        ax4_r.plot(tols_base, linf_n_base, marker="x", linestyle=_BASE_LS, color=_OKABE_ITO[0], label="L\u221e base (n) vs ref")
+        ax4_r.plot(tols_base, linf_u_base, marker="x", linestyle=_BASE_LS, color=_OKABE_ITO[1], label="L\u221e base (u) vs ref")
+        ax4_r.plot(tols_base, linf_T_base, marker="x", linestyle=_BASE_LS, color=_OKABE_ITO[2], label="L\u221e base (T) vs ref")
+    else:
+        ax4_r.plot(tols, linf_n, marker="o", color=_OKABE_ITO[0], label="Final Difference L\u221e (n)")
+        ax4_r.plot(tols, linf_u, marker="o", color=_OKABE_ITO[1], label="Final Difference L\u221e (u)")
+        ax4_r.plot(tols, linf_T, marker="o", color=_OKABE_ITO[2], label="Final Difference L\u221e (T)")
+    ax4_r.set_ylabel("Final Difference (L\u221e)", fontsize=_fs4)
+    if linf_log_scale:
+        ax4_r.set_yscale("log")
+    ax4_r.tick_params(labelsize=_fs4)
 
-    h1, l1 = ax4a.get_legend_handles_labels()
-    h2, l2 = ax4a_r.get_legend_handles_labels()
-    ax4a.legend(h1 + h2, l1 + l2, loc="best", fontsize=_fs4)
+    h1, l1 = ax4.get_legend_handles_labels()
+    h2, l2 = ax4_r.get_legend_handles_labels()
+    ax4.legend(h1 + h2, l1 + l2, bbox_to_anchor=(1.15, 1), loc="upper left", fontsize=_fs4)
 
-    # ---- right panel: mean step time (base/warm) + L∞ ----
-    ax4b_r = ax4b.twinx()
-    ax4b.plot(
+    # ---------- Plot 5 (mean step time + L∞) ----------
+    _fs5 = plot_5_fontsize or fontsize
+    fig5, ax5 = plt.subplots(figsize=plot_5_figsize)
+    ax5_r = ax5.twinx()
+    ax5.plot(
         tols, mean_t_base, marker="o", linestyle=_BASE_LS, color="#000000",
         label="Mean Step Time (Base) [s]"
     )
-    ax4b.plot(
+    ax5.plot(
         tols, mean_t_warm, marker="s", linestyle=_WARM_LS, color="#000000",
         label="Mean Step Time (Warm) [s]"
     )
-    ax4b.set_xscale("log")
-    ax4b.set_xlabel("Picard Tolerance", fontsize=_fs4)
-    ax4b.set_ylabel("Mean Step Time [s]", fontsize=_fs4)
-    ax4b.set_title(f"Mean Step Time vs Picard Tol (GPU: {gpu_title}){_title_suffix}", fontsize=_fs4)
-    ax4b.tick_params(labelsize=_fs4)
-    ax4b.grid(True, which="both", alpha=0.3)
+    ax5.set_xscale("log")
+    ax5.set_xlabel("Picard Tolerance", fontsize=_fs5)
+    ax5.set_ylabel("Mean Step Time [s]", fontsize=_fs5)
+    ax5.set_title(f"Mean Step Time vs Picard Tol (GPU: {gpu_title}){_ref_title4}{_title_suffix}", fontsize=_fs5)
+    ax5.tick_params(labelsize=_fs5)
+    ax5.grid(True, which="both", alpha=0.3)
 
-    ax4b_r.plot(tols, linf_n, marker="o", color=_OKABE_ITO[0], label="Final Difference L∞ (n)")
-    ax4b_r.plot(tols, linf_u, marker="o", color=_OKABE_ITO[1], label="Final Difference L∞ (u)")
-    ax4b_r.plot(tols, linf_T, marker="o", color=_OKABE_ITO[2], label="Final Difference L∞ (T)")
-    ax4b_r.set_ylabel("Final Difference (L∞)", fontsize=_fs4)
-    ax4b_r.tick_params(labelsize=_fs4)
+    if ref_rec is not None:
+        ax5_r.plot(tols, linf_n, marker="o", color=_OKABE_ITO[0], label="L\u221e warm (n) vs ref")
+        ax5_r.plot(tols, linf_u, marker="o", color=_OKABE_ITO[1], label="L\u221e warm (u) vs ref")
+        ax5_r.plot(tols, linf_T, marker="o", color=_OKABE_ITO[2], label="L\u221e warm (T) vs ref")
+        ax5_r.plot(tols_base, linf_n_base, marker="x", linestyle=_BASE_LS, color=_OKABE_ITO[0], label="L\u221e base (n) vs ref")
+        ax5_r.plot(tols_base, linf_u_base, marker="x", linestyle=_BASE_LS, color=_OKABE_ITO[1], label="L\u221e base (u) vs ref")
+        ax5_r.plot(tols_base, linf_T_base, marker="x", linestyle=_BASE_LS, color=_OKABE_ITO[2], label="L\u221e base (T) vs ref")
+    else:
+        ax5_r.plot(tols, linf_n, marker="o", color=_OKABE_ITO[0], label="Final Difference L\u221e (n)")
+        ax5_r.plot(tols, linf_u, marker="o", color=_OKABE_ITO[1], label="Final Difference L\u221e (u)")
+        ax5_r.plot(tols, linf_T, marker="o", color=_OKABE_ITO[2], label="Final Difference L\u221e (T)")
+    ax5_r.set_ylabel("Final Difference (L\u221e)", fontsize=_fs5)
+    if linf_log_scale:
+        ax5_r.set_yscale("log")
+    ax5_r.tick_params(labelsize=_fs5)
 
-    h1, l1 = ax4b.get_legend_handles_labels()
-    h2, l2 = ax4b_r.get_legend_handles_labels()
-    ax4b.legend(h1 + h2, l1 + l2, loc="best", fontsize=_fs4)
+    h1, l1 = ax5.get_legend_handles_labels()
+    h2, l2 = ax5_r.get_legend_handles_labels()
+    ax5.legend(h1 + h2, l1 + l2, bbox_to_anchor=(1.15, 1), loc="upper left", fontsize=_fs5)
 
     figures = {
         plot_1_filename: fig1,
         plot_2_filename: fig2,
         plot_3_filename: fig3,
         plot_4_filename: fig4,
+        plot_5_filename: fig5,
     }
 
     saved: dict[str, str] = {}
@@ -509,7 +572,7 @@ def plot_moment_cnn_test(
             p = outdir_p / f"{k}.{fmt}"
             if not fig.get_constrained_layout():
                 fig.tight_layout()
-            fig.savefig(p, dpi=150)
+            fig.savefig(p, dpi=150, bbox_inches="tight")
             saved[k] = str(p)
 
     if show:
@@ -537,16 +600,20 @@ def _parse_args_cli() -> argparse.Namespace:
     p.add_argument("--show", action="store_true")
     p.add_argument("--case_index", type=int, default=0)
     p.add_argument("--mode", type=str, default="B", choices=["B", "warm_only"])
+    p.add_argument("--ref_strictest", action="store_true")
+    p.add_argument("--linf_log_scale", action="store_true")
 
     p.add_argument("--plot_1_figsize", type=float, nargs=2, default=(12, 6))
     p.add_argument("--plot_2_figsize", type=float, nargs=2, default=(12, 6))
     p.add_argument("--plot_3_figsize", type=float, nargs=2, default=(12, 6))
     p.add_argument("--plot_4_figsize", type=float, nargs=2, default=(12, 6))
+    p.add_argument("--plot_5_figsize", type=float, nargs=2, default=(12, 6))
 
     p.add_argument("--plot_1_filename", type=str, default="plot_1_picard_iters")
     p.add_argument("--plot_2_filename", type=str, default="plot_2_walltime")
     p.add_argument("--plot_3_filename", type=str, default="plot_3_final_moments")
     p.add_argument("--plot_4_filename", type=str, default="plot_4_speedup_linf")
+    p.add_argument("--plot_5_filename", type=str, default="plot_5_steptime_linf")
     return p.parse_args()
 
 
@@ -563,11 +630,15 @@ def main() -> None:
         plot_2_figsize=(float(args.plot_2_figsize[0]), float(args.plot_2_figsize[1])),
         plot_3_figsize=(float(args.plot_3_figsize[0]), float(args.plot_3_figsize[1])),
         plot_4_figsize=(float(args.plot_4_figsize[0]), float(args.plot_4_figsize[1])),
+        plot_5_figsize=(float(args.plot_5_figsize[0]), float(args.plot_5_figsize[1])),
         mode=str(args.mode),
+        ref_strictest=bool(args.ref_strictest),
+        linf_log_scale=bool(args.linf_log_scale),
         plot_1_filename=str(args.plot_1_filename),
         plot_2_filename=str(args.plot_2_filename),
         plot_3_filename=str(args.plot_3_filename),
         plot_4_filename=str(args.plot_4_filename),
+        plot_5_filename=str(args.plot_5_filename),
     )
 
 
