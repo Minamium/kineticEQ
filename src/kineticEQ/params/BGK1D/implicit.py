@@ -11,6 +11,8 @@ class Params:
     aa_enable: bool = False
     aa_m: int = 6
     aa_beta: float = 1.0
+    aa_stride: int = 1
+    aa_start_iter: int = 2
     aa_reg: float = 1e-10
     aa_alpha_max: float = 50.0
     

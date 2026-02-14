@@ -88,19 +88,18 @@ def step(
     aa_m = max(int(getattr(cfg.model_cfg.scheme_params, "aa_m", 0)), 0)
     aa_beta = float(getattr(cfg.model_cfg.scheme_params, "aa_beta", 1.0))
     aa_beta = min(max(aa_beta, 0.0), 1.0)
+    aa_stride = max(int(getattr(cfg.model_cfg.scheme_params, "aa_stride", 1)), 1)
+    aa_start_iter = max(int(getattr(cfg.model_cfg.scheme_params, "aa_start_iter", 2)), 1)
     aa_reg = float(getattr(cfg.model_cfg.scheme_params, "aa_reg", 1e-10))
-    aa_reg = max(aa_reg, 0.0)
-    aa_alpha_max = float(getattr(cfg.model_cfg.scheme_params, "aa_alpha_max", 50.0))
-    aa_alpha_max = max(aa_alpha_max, 1.0)
+    aa_reg = max(aa_reg, 1e-14)
 
     n_inner = max(int(ws.B.shape[1]), 0)
     aa_cols = max(min(aa_m + 1, int(ws.aa_G.shape[1])), 1)
     aa_enable = aa_enable_cfg and (n_inner > 0) and (aa_m >= 1)
     aa_hist_len = 0
-    aa_hist_ptr = 0
     aa_applied = 0
     aa_restarted = 0
-    w_residual_val = float("inf")
+    w_residual_val = float("nan")
     u_max = 0.95 * float(torch.max(torch.abs(state.v)).item()) if n_inner > 0 else 0.0
 
     # 初期候補 fz（外部フックがあればそれを優先）
@@ -229,15 +228,25 @@ def step(
 
                 ws.aa_wtmp.copy_(ws.aa_wnew)
                 ws.aa_wtmp.sub_(ws.aa_wk)
-                w_residual_val = float(torch.max(torch.abs(ws.aa_wtmp)).item())
 
-                ws.aa_G[:, aa_hist_ptr].copy_(ws.aa_wnew)
-                ws.aa_R[:, aa_hist_ptr].copy_(ws.aa_wtmp)
-                aa_hist_ptr = (aa_hist_ptr + 1) % aa_cols
-                aa_hist_len = min(aa_hist_len + 1, aa_cols)
+                if aa_hist_len < aa_cols:
+                    hist_idx = aa_hist_len
+                    aa_hist_len += 1
+                else:
+                    ws.aa_G[:, :-1].copy_(ws.aa_G[:, 1:])
+                    ws.aa_R[:, :-1].copy_(ws.aa_R[:, 1:])
+                    hist_idx = aa_cols - 1
 
-                aa_ok = False
-                if aa_hist_len >= 2:
+                ws.aa_G[:, hist_idx].copy_(ws.aa_wnew)
+                ws.aa_R[:, hist_idx].copy_(ws.aa_wtmp)
+
+                aa_should_apply = (
+                    aa_hist_len >= 2
+                    and (z + 1) >= aa_start_iter
+                    and ((z + 1 - aa_start_iter) % aa_stride == 0)
+                )
+
+                if aa_should_apply:
                     R_use = ws.aa_R[:, :aa_hist_len]
                     G_use = ws.aa_G[:, :aa_hist_len]
                     A = ws.aa_A[:aa_hist_len, :aa_hist_len]
@@ -246,38 +255,22 @@ def step(
 
                     A.copy_(R_use.T @ R_use)
                     A.diagonal().add_(aa_reg)
+                    L = torch.linalg.cholesky(A)
+                    x = torch.cholesky_solve(ones, L)
+                    alpha.copy_((x / (ones.T @ x)).squeeze(1))
 
-                    try:
-                        L, info = torch.linalg.cholesky_ex(A)
-                        if bool((info == 0).all().item()):
-                            x = torch.cholesky_solve(ones, L)
-                            denom = ones.T @ x
-                            denom_v = float(denom[0, 0].item())
-                            if math.isfinite(denom_v) and abs(denom_v) > 1e-30:
-                                alpha.copy_((x / denom).squeeze(1))
-                                if bool(torch.isfinite(alpha).all().item()):
-                                    alpha_abs_max = float(torch.max(torch.abs(alpha)).item())
-                                    if alpha_abs_max <= aa_alpha_max:
-                                        ws.aa_wtmp.copy_(G_use @ alpha)
-                                        ws.aa_wtmp.mul_(aa_beta)
-                                        ws.aa_wtmp.add_(ws.aa_wnew, alpha=(1.0 - aa_beta))
-                                        if bool(torch.isfinite(ws.aa_wtmp).all().item()):
-                                            aa_ok = True
-                    except RuntimeError:
-                        aa_ok = False
+                    ws.aa_wtmp.copy_(G_use @ alpha)
+                    if aa_beta < 1.0:
+                        ws.aa_wtmp.mul_(aa_beta)
+                        ws.aa_wtmp.add_(ws.aa_wnew, alpha=(1.0 - aa_beta))
 
-                if aa_ok:
-                    aa_applied += 1
                     ws.n.copy_(torch.clamp(ws.n_new, min=n_floor))
                     ws.nu.copy_(ws.nu_new)
                     ws.T.copy_(torch.clamp(ws.T_new, min=T_floor))
                     _unpack_W_interior(ws.aa_wtmp, ws.n, ws.nu, ws.T)
                     _project_W_interior(ws.n, ws.nu, ws.T, n_floor=n_floor, T_floor=T_floor, u_max=u_max)
+                    aa_applied += 1
                 else:
-                    if aa_hist_len >= 2:
-                        aa_hist_len = 0
-                        aa_hist_ptr = 0
-                        aa_restarted += 1
                     ws.n.copy_(torch.clamp(ws.n_new, min=n_floor))
                     ws.nu.copy_(ws.nu_new)
                     ws.T.copy_(torch.clamp(ws.T_new, min=T_floor))
@@ -310,6 +303,8 @@ def step(
         "aa_enable": aa_enable,
         "aa_applied": aa_applied,
         "aa_restart": aa_restarted,
+        "aa_stride": aa_stride,
+        "aa_start_iter": aa_start_iter,
         "w_residual": w_residual_val,
     }
 

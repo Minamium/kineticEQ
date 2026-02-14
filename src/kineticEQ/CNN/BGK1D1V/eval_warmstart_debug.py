@@ -51,6 +51,8 @@ def build_cfg(
     aa_enable: bool = False,
     aa_m: int = 6,
     aa_beta: float = 1.0,
+    aa_stride: int = 1,
+    aa_start_iter: int = 2,
     aa_reg: float = 1e-10,
     aa_alpha_max: float = 50.0,
     moments_cnn_modelpath: str | None = None,
@@ -69,6 +71,10 @@ def build_cfg(
         scheme_params = replace(scheme_params, aa_m=int(aa_m))
     if "aa_beta" in fnames:
         scheme_params = replace(scheme_params, aa_beta=float(aa_beta))
+    if "aa_stride" in fnames:
+        scheme_params = replace(scheme_params, aa_stride=int(aa_stride))
+    if "aa_start_iter" in fnames:
+        scheme_params = replace(scheme_params, aa_start_iter=int(aa_start_iter))
     if "aa_reg" in fnames:
         scheme_params = replace(scheme_params, aa_reg=float(aa_reg))
     if "aa_alpha_max" in fnames:
@@ -437,6 +443,8 @@ def parse_args():
     p.add_argument("--aa_enable", action="store_true", help="enable Anderson Acceleration in implicit Picard")
     p.add_argument("--aa_m", type=int, default=6)
     p.add_argument("--aa_beta", type=float, default=1.0)
+    p.add_argument("--aa_stride", type=int, default=1, help="apply AA every k Picard iterations")
+    p.add_argument("--aa_start_iter", type=int, default=2, help="first Picard iteration index to allow AA")
     p.add_argument("--aa_reg", type=float, default=1e-10)
     p.add_argument("--aa_alpha_max", type=float, default=50.0)
 
@@ -473,6 +481,8 @@ def main():
             "aa_enable": bool(args.aa_enable),
             "aa_m": int(args.aa_m),
             "aa_beta": float(args.aa_beta),
+            "aa_stride": int(args.aa_stride),
+            "aa_start_iter": int(args.aa_start_iter),
             "aa_reg": float(args.aa_reg),
             "aa_alpha_max": float(args.aa_alpha_max),
             "device": str(args.device),
@@ -500,6 +510,8 @@ def main():
             aa_enable=bool(args.aa_enable),
             aa_m=int(args.aa_m),
             aa_beta=float(args.aa_beta),
+            aa_stride=int(args.aa_stride),
+            aa_start_iter=int(args.aa_start_iter),
             aa_reg=float(args.aa_reg),
             aa_alpha_max=float(args.aa_alpha_max),
             moments_cnn_modelpath=None,
@@ -528,6 +540,8 @@ def main():
                 aa_enable=bool(args.aa_enable),
                 aa_m=int(args.aa_m),
                 aa_beta=float(args.aa_beta),
+                aa_stride=int(args.aa_stride),
+                aa_start_iter=int(args.aa_start_iter),
                 aa_reg=float(args.aa_reg),
                 aa_alpha_max=float(args.aa_alpha_max),
                 moments_cnn_modelpath=str(args.ckpt),
