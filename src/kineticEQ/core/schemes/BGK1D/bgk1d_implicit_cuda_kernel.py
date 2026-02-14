@@ -233,8 +233,9 @@ def step(
                     hist_idx = aa_hist_len
                     aa_hist_len += 1
                 else:
-                    ws.aa_G[:, :-1].copy_(ws.aa_G[:, 1:])
-                    ws.aa_R[:, :-1].copy_(ws.aa_R[:, 1:])
+                    # Avoid undefined behavior from overlapped in-place copy.
+                    ws.aa_G[:, :-1].copy_(ws.aa_G[:, 1:].clone())
+                    ws.aa_R[:, :-1].copy_(ws.aa_R[:, 1:].clone())
                     hist_idx = aa_cols - 1
 
                 ws.aa_G[:, hist_idx].copy_(ws.aa_wnew)
@@ -260,7 +261,8 @@ def step(
                     denom = (ones.T @ x).clamp_min(1e-30)
                     alpha.copy_((x / denom).squeeze(1))
 
-                    ws.aa_wtmp.copy_(torch.mv(G_use, alpha))
+                    alpha_vec = alpha.contiguous()
+                    ws.aa_wtmp.copy_(torch.sum(G_use * alpha_vec.unsqueeze(0), dim=1))
                     if aa_beta < 1.0:
                         ws.aa_wtmp.mul_(aa_beta)
                         ws.aa_wtmp.add_(ws.aa_wnew, alpha=(1.0 - aa_beta))
