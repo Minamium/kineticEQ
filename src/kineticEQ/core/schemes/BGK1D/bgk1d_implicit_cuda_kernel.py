@@ -20,6 +20,45 @@ import logging
 logger = logging.getLogger(__name__)
 Stepper = Callable[[int], None]
 
+
+def _pack_W_interior(n: torch.Tensor, nu: torch.Tensor, T: torch.Tensor, out: torch.Tensor) -> None:
+    n_inner = max(int(n.numel()) - 2, 0)
+    if n_inner <= 0:
+        return
+    out[:n_inner].copy_(n[1:-1])
+    out[n_inner:2 * n_inner].copy_(nu[1:-1])
+    out[2 * n_inner:3 * n_inner].copy_(T[1:-1])
+
+
+def _unpack_W_interior(w: torch.Tensor, n: torch.Tensor, nu: torch.Tensor, T: torch.Tensor) -> None:
+    n_inner = max(int(n.numel()) - 2, 0)
+    if n_inner <= 0:
+        return
+    n[1:-1].copy_(w[:n_inner])
+    nu[1:-1].copy_(w[n_inner:2 * n_inner])
+    T[1:-1].copy_(w[2 * n_inner:3 * n_inner])
+
+
+def _project_W_interior(
+    n: torch.Tensor,
+    nu: torch.Tensor,
+    T: torch.Tensor,
+    *,
+    n_floor: float,
+    T_floor: float,
+    u_max: float,
+) -> None:
+    n_int = n[1:-1]
+    nu_int = nu[1:-1]
+    T_int = T[1:-1]
+
+    n_int.clamp_(min=n_floor)
+    T_int.clamp_(min=T_floor)
+
+    u_int = nu_int / torch.clamp(n_int, min=n_floor)
+    u_int.clamp_(min=-u_max, max=u_max)
+    nu_int.copy_(n_int * u_int)
+
 # implicit stepper
 @torch.no_grad()
 def step(
@@ -44,6 +83,25 @@ def step(
     picard_iter = cfg.model_cfg.scheme_params.picard_iter
     picard_tol = cfg.model_cfg.scheme_params.picard_tol
     abs_tol = cfg.model_cfg.scheme_params.abs_tol
+
+    aa_enable_cfg = bool(getattr(cfg.model_cfg.scheme_params, "aa_enable", False))
+    aa_m = max(int(getattr(cfg.model_cfg.scheme_params, "aa_m", 0)), 0)
+    aa_beta = float(getattr(cfg.model_cfg.scheme_params, "aa_beta", 1.0))
+    aa_beta = min(max(aa_beta, 0.0), 1.0)
+    aa_reg = float(getattr(cfg.model_cfg.scheme_params, "aa_reg", 1e-10))
+    aa_reg = max(aa_reg, 0.0)
+    aa_alpha_max = float(getattr(cfg.model_cfg.scheme_params, "aa_alpha_max", 50.0))
+    aa_alpha_max = max(aa_alpha_max, 1.0)
+
+    n_inner = max(int(ws.B.shape[1]), 0)
+    aa_cols = max(min(aa_m + 1, int(ws.aa_G.shape[1])), 1)
+    aa_enable = aa_enable_cfg and (n_inner > 0) and (aa_m >= 1)
+    aa_hist_len = 0
+    aa_hist_ptr = 0
+    aa_applied = 0
+    aa_restarted = 0
+    w_residual_val = float("inf")
+    u_max = 0.95 * float(torch.max(torch.abs(state.v)).item()) if n_inner > 0 else 0.0
 
     # 初期候補 fz（外部フックがあればそれを優先）
     init_fz = getattr(ws, "_init_fz", None)
@@ -163,7 +221,70 @@ def step(
 
         # 次反復用 moments
         if z + 1 < picard_iter:
-            cuda_module.moments_n_nu_T(ws.fn_tmp, state.v, dv, ws.n, ws.nu, ws.T)
+            cuda_module.moments_n_nu_T(ws.fn_tmp, state.v, dv, ws.n_new, ws.nu_new, ws.T_new)
+
+            if aa_enable:
+                _pack_W_interior(ws.n, ws.nu, ws.T, ws.aa_wk)
+                _pack_W_interior(ws.n_new, ws.nu_new, ws.T_new, ws.aa_wnew)
+
+                ws.aa_wtmp.copy_(ws.aa_wnew)
+                ws.aa_wtmp.sub_(ws.aa_wk)
+                w_residual_val = float(torch.max(torch.abs(ws.aa_wtmp)).item())
+
+                ws.aa_G[:, aa_hist_ptr].copy_(ws.aa_wnew)
+                ws.aa_R[:, aa_hist_ptr].copy_(ws.aa_wtmp)
+                aa_hist_ptr = (aa_hist_ptr + 1) % aa_cols
+                aa_hist_len = min(aa_hist_len + 1, aa_cols)
+
+                aa_ok = False
+                if aa_hist_len >= 2:
+                    R_use = ws.aa_R[:, :aa_hist_len]
+                    G_use = ws.aa_G[:, :aa_hist_len]
+                    A = ws.aa_A[:aa_hist_len, :aa_hist_len]
+                    alpha = ws.aa_alpha[:aa_hist_len]
+                    ones = ws.aa_ones[:aa_hist_len, :]
+
+                    A.copy_(R_use.T @ R_use)
+                    A.diagonal().add_(aa_reg)
+
+                    try:
+                        L, info = torch.linalg.cholesky_ex(A)
+                        if bool((info == 0).all().item()):
+                            x = torch.cholesky_solve(ones, L)
+                            denom = ones.T @ x
+                            denom_v = float(denom[0, 0].item())
+                            if math.isfinite(denom_v) and abs(denom_v) > 1e-30:
+                                alpha.copy_((x / denom).squeeze(1))
+                                if bool(torch.isfinite(alpha).all().item()):
+                                    alpha_abs_max = float(torch.max(torch.abs(alpha)).item())
+                                    if alpha_abs_max <= aa_alpha_max:
+                                        ws.aa_wtmp.copy_(G_use @ alpha)
+                                        ws.aa_wtmp.mul_(aa_beta)
+                                        ws.aa_wtmp.add_(ws.aa_wnew, alpha=(1.0 - aa_beta))
+                                        if bool(torch.isfinite(ws.aa_wtmp).all().item()):
+                                            aa_ok = True
+                    except RuntimeError:
+                        aa_ok = False
+
+                if aa_ok:
+                    aa_applied += 1
+                    ws.n.copy_(torch.clamp(ws.n_new, min=n_floor))
+                    ws.nu.copy_(ws.nu_new)
+                    ws.T.copy_(torch.clamp(ws.T_new, min=T_floor))
+                    _unpack_W_interior(ws.aa_wtmp, ws.n, ws.nu, ws.T)
+                    _project_W_interior(ws.n, ws.nu, ws.T, n_floor=n_floor, T_floor=T_floor, u_max=u_max)
+                else:
+                    if aa_hist_len >= 2:
+                        aa_hist_len = 0
+                        aa_hist_ptr = 0
+                        aa_restarted += 1
+                    ws.n.copy_(torch.clamp(ws.n_new, min=n_floor))
+                    ws.nu.copy_(ws.nu_new)
+                    ws.T.copy_(torch.clamp(ws.T_new, min=T_floor))
+            else:
+                ws.n.copy_(torch.clamp(ws.n_new, min=n_floor))
+                ws.nu.copy_(ws.nu_new)
+                ws.T.copy_(torch.clamp(ws.T_new, min=T_floor))
 
         # 次反復へ
         ws.fz, ws.fn_tmp = ws.fn_tmp, ws.fz
@@ -186,6 +307,10 @@ def step(
         "picard_iter": z + 1,
         "picard_residual": residual_val,
         "std_picard_residual": std_residual_val,
+        "aa_enable": aa_enable,
+        "aa_applied": aa_applied,
+        "aa_restart": aa_restarted,
+        "w_residual": w_residual_val,
     }
 
     return state, benchlog
@@ -200,7 +325,8 @@ def build_stepper(cfg: Config, state: State1D1V) -> Stepper:
 
     # implicit 専用ワークスペース確保
     nx, nv = state.f.shape
-    ws = allocate_implicit_workspace(nx, nv, state.f.device, state.f.dtype)
+    aa_m = max(int(getattr(cfg.model_cfg.scheme_params, "aa_m", 0)), 0)
+    ws = allocate_implicit_workspace(nx, nv, state.f.device, state.f.dtype, aa_m=aa_m)
 
     if ws.B.shape[1] > 0:
         ws_bytes = int(

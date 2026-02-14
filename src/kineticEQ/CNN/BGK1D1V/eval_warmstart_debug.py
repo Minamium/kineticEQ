@@ -48,6 +48,11 @@ def build_cfg(
     picard_iter: int = 1000,
     picard_tol: float = 1e-3,
     abs_tol: float = 1e-13,
+    aa_enable: bool = False,
+    aa_m: int = 6,
+    aa_beta: float = 1.0,
+    aa_reg: float = 1e-10,
+    aa_alpha_max: float = 50.0,
     moments_cnn_modelpath: str | None = None,
 ) -> Config:
     scheme_params = BGK1D.implicit.Params(
@@ -57,8 +62,19 @@ def build_cfg(
     )
 
     # frozen + optional field 対応：存在する時だけ replace で埋める
+    fnames = {f.name for f in fields(scheme_params)}
+    if "aa_enable" in fnames:
+        scheme_params = replace(scheme_params, aa_enable=bool(aa_enable))
+    if "aa_m" in fnames:
+        scheme_params = replace(scheme_params, aa_m=int(aa_m))
+    if "aa_beta" in fnames:
+        scheme_params = replace(scheme_params, aa_beta=float(aa_beta))
+    if "aa_reg" in fnames:
+        scheme_params = replace(scheme_params, aa_reg=float(aa_reg))
+    if "aa_alpha_max" in fnames:
+        scheme_params = replace(scheme_params, aa_alpha_max=float(aa_alpha_max))
+
     if moments_cnn_modelpath is not None and str(moments_cnn_modelpath) != "":
-        fnames = {f.name for f in fields(scheme_params)}
         if "moments_cnn_modelpath" in fnames:
             scheme_params = replace(scheme_params, moments_cnn_modelpath=str(moments_cnn_modelpath))
         else:
@@ -418,6 +434,12 @@ def parse_args():
     p.add_argument("--picard_tol", type=float, default=1e-3)
     p.add_argument("--abs_tol", type=float, default=1e-13)
 
+    p.add_argument("--aa_enable", action="store_true", help="enable Anderson Acceleration in implicit Picard")
+    p.add_argument("--aa_m", type=int, default=6)
+    p.add_argument("--aa_beta", type=float, default=1.0)
+    p.add_argument("--aa_reg", type=float, default=1e-10)
+    p.add_argument("--aa_alpha_max", type=float, default=50.0)
+
     p.add_argument("--out", type=str, required=True)
     p.add_argument("--device", type=str, default="cuda")
     return p.parse_args()
@@ -448,6 +470,11 @@ def main():
             "picard_iter": int(args.picard_iter),
             "picard_tol": float(args.picard_tol),
             "abs_tol": float(args.abs_tol),
+            "aa_enable": bool(args.aa_enable),
+            "aa_m": int(args.aa_m),
+            "aa_beta": float(args.aa_beta),
+            "aa_reg": float(args.aa_reg),
+            "aa_alpha_max": float(args.aa_alpha_max),
             "device": str(args.device),
             "gpu_name": gpu_name,
             "eval_type": str(args.eval_type),
@@ -470,6 +497,11 @@ def main():
             picard_iter=int(args.picard_iter),
             picard_tol=float(args.picard_tol),
             abs_tol=float(args.abs_tol),
+            aa_enable=bool(args.aa_enable),
+            aa_m=int(args.aa_m),
+            aa_beta=float(args.aa_beta),
+            aa_reg=float(args.aa_reg),
+            aa_alpha_max=float(args.aa_alpha_max),
             moments_cnn_modelpath=None,
         )
 
@@ -493,6 +525,11 @@ def main():
                 picard_iter=int(args.picard_iter),
                 picard_tol=float(args.picard_tol),
                 abs_tol=float(args.abs_tol),
+                aa_enable=bool(args.aa_enable),
+                aa_m=int(args.aa_m),
+                aa_beta=float(args.aa_beta),
+                aa_reg=float(args.aa_reg),
+                aa_alpha_max=float(args.aa_alpha_max),
                 moments_cnn_modelpath=str(args.ckpt),
             )
             out = run_case_pair(
