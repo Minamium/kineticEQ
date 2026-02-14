@@ -139,6 +139,47 @@ __global__ void gather_ring_to_work_kernel(
 }
 
 template <typename scalar_t>
+__global__ void gram_rtr_kernel(
+    const scalar_t* __restrict__ Rwork, // (d, aa_cols) row-major
+    scalar_t* __restrict__ A,           // (aa_cols, aa_cols) row-major storage
+    int d,
+    int aa_cols,
+    int m
+) {
+    int p = blockIdx.y * blockDim.y + threadIdx.y; // row in [0, m)
+    int q = blockIdx.x * blockDim.x + threadIdx.x; // col in [0, m)
+    if (p >= m || q >= m) return;
+
+    double acc = 0.0;
+    for (int i = 0; i < d; ++i) {
+        const double rp = (double)Rwork[i * aa_cols + p];
+        const double rq = (double)Rwork[i * aa_cols + q];
+        acc += rp * rq;
+    }
+
+    A[p * aa_cols + q] = (scalar_t)acc;
+}
+
+template <typename scalar_t>
+__global__ void gtrans_alpha_kernel(
+    const scalar_t* __restrict__ Gwork,  // (d, aa_cols) row-major
+    const scalar_t* __restrict__ alpha,  // (aa_cols)
+    scalar_t* __restrict__ y,            // (d)
+    int d,
+    int aa_cols,
+    int m
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= d) return;
+
+    double acc = 0.0;
+    for (int j = 0; j < m; ++j) {
+        acc += (double)Gwork[i * aa_cols + j] * (double)alpha[j];
+    }
+    y[i] = (scalar_t)acc;
+}
+
+template <typename scalar_t>
 __global__ void add_reg_diag_kernel(scalar_t* __restrict__ A, int lda, int m, scalar_t reg) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= m) return;
@@ -441,6 +482,22 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
     TORCH_CHECK(aa_alpha.numel() == aa_cols, "aa_alpha must be (aa_cols)");
     TORCH_CHECK(aa_wk.numel() == d && aa_wnew.numel() == d && aa_wtmp.numel() == d, "aa_wk/wnew/wtmp must be (d)");
 
+    auto check_like_n = [&](const torch::Tensor& t, const char* name) {
+        TORCH_CHECK(t.defined(), name, " must be defined");
+        TORCH_CHECK(t.is_cuda(), name, " must be CUDA");
+        TORCH_CHECK(t.get_device() == device, name, " device mismatch");
+        TORCH_CHECK(t.scalar_type() == n.scalar_type(), name, " dtype mismatch");
+        TORCH_CHECK(t.is_contiguous(), name, " must be contiguous");
+    };
+
+    check_like_n(aa_G, "aa_G");
+    check_like_n(aa_R, "aa_R");
+    check_like_n(aa_A, "aa_A");
+    check_like_n(aa_alpha, "aa_alpha");
+    check_like_n(aa_wk, "aa_wk");
+    check_like_n(aa_wnew, "aa_wnew");
+    check_like_n(aa_wtmp, "aa_wtmp");
+
     // update ring indices on CPU (no sync)
     int64_t hist_len_in = std::max<int64_t>(hist_len, 0);
     int64_t head_in = std::max<int64_t>(head, 0) % std::max<int>(aa_cols, 1);
@@ -471,6 +528,7 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
     TORCH_CHECK(G_work.defined() && R_work.defined(), "G_work/R_work must be defined");
     TORCH_CHECK(G_work.numel() > 0 && R_work.numel() > 0, "G_work/R_work must be preallocated");
     TORCH_CHECK(G_work.is_cuda() && R_work.is_cuda(), "G_work/R_work must be CUDA");
+    TORCH_CHECK(G_work.get_device() == device && R_work.get_device() == device, "G_work/R_work device mismatch");
     TORCH_CHECK(G_work.scalar_type() == n.scalar_type() && R_work.scalar_type() == n.scalar_type(), "G_work/R_work dtype mismatch");
     TORCH_CHECK(G_work.is_contiguous() && R_work.is_contiguous(), "G_work/R_work must be contiguous");
     TORCH_CHECK(G_work.sizes() == aa_G.sizes() && R_work.sizes() == aa_R.sizes(), "G_work/R_work must match aa_G/aa_R shape");
@@ -526,9 +584,6 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
         }
 
         auto& h = get_handles(device);
-        CUBLAS_CHECK_MSG(cublasSetStream(h.cublas, cuda_stream), "cublasSetStream(step_inplace)");
-        // Re-enforce HOST pointer mode right before BLAS calls (handle may be shared/reused).
-        CUBLAS_CHECK_MSG(cublasSetPointerMode(h.cublas, CUBLAS_POINTER_MODE_HOST), "cublasSetPointerMode(HOST)");
         CUSOLVER_CHECK(cusolverDnSetStream(h.cusolver, cuda_stream));
 
         // Gather ring history into columns 0..m-1 of G_work/R_work using head_out (after insertion)
@@ -560,23 +615,20 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
         TORCH_CHECK(R_work.is_contiguous(), "R_work must be contiguous");
         TORCH_CHECK(aa_A.is_contiguous(), "aa_A must be contiguous");
 
-        const scalar_t one = (scalar_t)1;
-        const scalar_t zero = (scalar_t)0;
         scalar_t* A = (scalar_t*)aa_A.data_ptr<scalar_t>();
-        const scalar_t* Rcol = (const scalar_t*)R_work.data_ptr<scalar_t>();
+        const scalar_t* Rptr = (const scalar_t*)R_work.data_ptr<scalar_t>();
 
-        // cublas gemm: A(m×m) = R(m×d) * R(m×d)^T
-        // column-major: opN (m×d), opT (d×m)
-        CUBLAS_CHECK_MSG(Blas<scalar_t>::gemm(
-            h.cublas,
-            CUBLAS_OP_N, CUBLAS_OP_T,
-            m, m, d,
-            &one,
-            Rcol, aa_cols,
-            Rcol, aa_cols,
-            &zero,
-            A, aa_cols
-        ), "cublasGEMM(R*R^T)");
+        {
+            const dim3 block(16, 16);
+            const dim3 grid((m + block.x - 1) / block.x, (m + block.y - 1) / block.y);
+            gram_rtr_kernel<scalar_t><<<grid, block, 0, cuda_stream>>>(
+                Rptr,
+                A,
+                d,
+                aa_cols,
+                m
+            );
+        }
 
         // Add reg to diag
         {
@@ -598,10 +650,12 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
         TORCH_CHECK(solver_info.defined(), "solver_info must be defined");
         TORCH_CHECK(solver_info.is_cuda() && solver_info.scalar_type() == torch::kInt32 && solver_info.numel() == 1,
                     "solver_info must be int32 CUDA scalar");
+        TORCH_CHECK(solver_info.get_device() == device, "solver_info device mismatch");
         TORCH_CHECK(solver_info.is_contiguous(), "solver_info must be contiguous");
 
         TORCH_CHECK(solver_work.defined() && solver_work.numel() > 0, "solver_work must be preallocated");
         TORCH_CHECK(solver_work.is_cuda() && solver_work.scalar_type() == n.scalar_type(), "solver_work dtype/device mismatch");
+        TORCH_CHECK(solver_work.get_device() == device, "solver_work device mismatch");
         TORCH_CHECK(solver_work.is_contiguous(), "solver_work must be contiguous");
         const int lwork = (int)solver_work.numel();
 
@@ -631,26 +685,28 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
 
         // Compute wAA = G^T * alpha  (G is m×d column-major view of G_work with lda=aa_cols)
         TORCH_CHECK(G_work.is_contiguous(), "G_work must be contiguous");
-        const scalar_t* Gcol = (const scalar_t*)G_work.data_ptr<scalar_t>();
+        const scalar_t* Gptr = (const scalar_t*)G_work.data_ptr<scalar_t>();
         scalar_t* wAA = (scalar_t*)aa_wtmp.data_ptr<scalar_t>(); // overwrite r with wAA
 
-        // y(d) = G(m×d)^T * alpha(m)
-        CUBLAS_CHECK_MSG(Blas<scalar_t>::gemv(
-            h.cublas,
-            CUBLAS_OP_T,
-            m, d,
-            &one,
-            Gcol, aa_cols,
-            (const scalar_t*)aa_alpha.data_ptr<scalar_t>(), 1,
-            &zero,
-            wAA, 1
-        ), "cublasGEMV(G^T*alpha)");
-
-        // Blend with wnew (beta)
+        // y(d) = G(d,m) * alpha(m)
         {
             int threads8 = 256;
             int blocks8 = (d + threads8 - 1) / threads8;
-            blend_kernel<scalar_t><<<blocks8, threads8, 0, cuda_stream>>>(
+            gtrans_alpha_kernel<scalar_t><<<blocks8, threads8, 0, cuda_stream>>>(
+                Gptr,
+                (const scalar_t*)aa_alpha.data_ptr<scalar_t>(),
+                wAA,
+                d,
+                aa_cols,
+                m
+            );
+        }
+
+        // Blend with wnew (beta)
+        {
+            int threads9 = 256;
+            int blocks9 = (d + threads9 - 1) / threads9;
+            blend_kernel<scalar_t><<<blocks9, threads9, 0, cuda_stream>>>(
                 wAA,
                 (const scalar_t*)aa_wnew.data_ptr<scalar_t>(),
                 d,
@@ -672,9 +728,9 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
         );
 
         {
-            int threads9 = 256;
-            int blocks9 = (n_inner + threads9 - 1) / threads9;
-            unpack_project_kernel<scalar_t><<<blocks9, threads9, 0, cuda_stream>>>(
+            int threads10 = 256;
+            int blocks10 = (n_inner + threads10 - 1) / threads10;
+            unpack_project_kernel<scalar_t><<<blocks10, threads10, 0, cuda_stream>>>(
                 (scalar_t*)n.data_ptr<scalar_t>(),
                 (scalar_t*)nu.data_ptr<scalar_t>(),
                 (scalar_t*)T.data_ptr<scalar_t>(),
