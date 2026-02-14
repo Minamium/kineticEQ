@@ -37,8 +37,15 @@ static DeviceHandles& get_handles(int device) {
     if (!h.inited) {
         h.device = device;
         CUDA_CHECK(cudaSetDevice(device));
+
         CUBLAS_CHECK(cublasCreate(&h.cublas));
+        // IMPORTANT:
+        // Ensure this handle always uses HOST pointer mode for alpha/beta scalars.
+        // Other libraries/code can change pointer mode on a shared handle; we enforce HOST.
+        CUBLAS_CHECK(cublasSetPointerMode(h.cublas, CUBLAS_POINTER_MODE_HOST));
+
         CUSOLVER_CHECK(cusolverDnCreate(&h.cusolver));
+
         h.inited = true;
     }
     return h;
@@ -360,7 +367,10 @@ int64_t implicit_aa_potrf_lwork_cuda(torch::Tensor aa_A, int64_t n) {
 
     const auto stream = at::cuda::getCurrentCUDAStream();
     const cudaStream_t cuda_stream = stream.stream();
+
     CUBLAS_CHECK(cublasSetStream(h.cublas, cuda_stream));
+    // Re-enforce HOST pointer mode (handle may be shared/reused)
+    CUBLAS_CHECK(cublasSetPointerMode(h.cublas, CUBLAS_POINTER_MODE_HOST));
     CUSOLVER_CHECK(cusolverDnSetStream(h.cusolver, cuda_stream));
 
     TORCH_CHECK(aa_A.is_cuda() && aa_A.is_contiguous(), "aa_A must be contiguous CUDA");
@@ -517,6 +527,8 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
 
         auto& h = get_handles(device);
         CUBLAS_CHECK_MSG(cublasSetStream(h.cublas, cuda_stream), "cublasSetStream(step_inplace)");
+        // Re-enforce HOST pointer mode right before BLAS calls (handle may be shared/reused).
+        CUBLAS_CHECK_MSG(cublasSetPointerMode(h.cublas, CUBLAS_POINTER_MODE_HOST), "cublasSetPointerMode(HOST)");
         CUSOLVER_CHECK(cusolverDnSetStream(h.cusolver, cuda_stream));
 
         // Gather ring history into columns 0..m-1 of G_work/R_work using head_out (after insertion)
@@ -540,6 +552,14 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
         // - R_work is (d, aa_cols) row-major
         // - treat it as column-major matrix of size (aa_cols × d) with lda=aa_cols (rows=aa_cols, cols=d)
         // - use first m rows => (m × d), lda=aa_cols
+        //
+        // Safety checks for common cuBLAS INVALID_VALUE causes
+        TORCH_CHECK(m >= 2, "AA apply requires m>=2");
+        TORCH_CHECK(m <= aa_cols, "m must be <= aa_cols");
+        TORCH_CHECK(d > 0, "d must be > 0");
+        TORCH_CHECK(R_work.is_contiguous(), "R_work must be contiguous");
+        TORCH_CHECK(aa_A.is_contiguous(), "aa_A must be contiguous");
+
         const scalar_t one = (scalar_t)1;
         const scalar_t zero = (scalar_t)0;
         scalar_t* A = (scalar_t*)aa_A.data_ptr<scalar_t>();
@@ -610,6 +630,7 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
         }
 
         // Compute wAA = G^T * alpha  (G is m×d column-major view of G_work with lda=aa_cols)
+        TORCH_CHECK(G_work.is_contiguous(), "G_work must be contiguous");
         const scalar_t* Gcol = (const scalar_t*)G_work.data_ptr<scalar_t>();
         scalar_t* wAA = (scalar_t*)aa_wtmp.data_ptr<scalar_t>(); // overwrite r with wAA
 
