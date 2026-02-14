@@ -247,8 +247,8 @@ def step(
                 )
 
                 if aa_should_apply:
-                    R_use = ws.aa_R[:, :aa_hist_len]
-                    G_use = ws.aa_G[:, :aa_hist_len]
+                    R_use = ws.aa_R[:, :aa_hist_len].contiguous()
+                    G_use = ws.aa_G[:, :aa_hist_len].contiguous()
                     A = ws.aa_A[:aa_hist_len, :aa_hist_len]
                     alpha = ws.aa_alpha[:aa_hist_len]
                     ones = ws.aa_ones[:aa_hist_len, :]
@@ -257,9 +257,10 @@ def step(
                     A.diagonal().add_(aa_reg)
                     L = torch.linalg.cholesky(A)
                     x = torch.cholesky_solve(ones, L)
-                    alpha.copy_((x / (ones.T @ x)).squeeze(1))
+                    denom = (ones.T @ x).clamp_min(1e-30)
+                    alpha.copy_((x / denom).squeeze(1))
 
-                    ws.aa_wtmp.copy_(G_use @ alpha)
+                    ws.aa_wtmp.copy_(torch.mv(G_use, alpha))
                     if aa_beta < 1.0:
                         ws.aa_wtmp.mul_(aa_beta)
                         ws.aa_wtmp.add_(ws.aa_wnew, alpha=(1.0 - aa_beta))
