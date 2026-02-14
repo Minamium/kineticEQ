@@ -1,4 +1,15 @@
 // kineticEQ/src/kineticEQ/cuda_kernel/BGK1D1V/implicit_AA/implicit_AA_kernel.cu
+// NOTE:
+// - This version keeps your current "barycentric / alpha-sum=1" AA formulation,
+//   but removes the cuBLAS GEMM/GEMV dependency for Gram + G^T*alpha by using CUDA kernels.
+// - Also enforces cuBLAS HOST pointer mode on the cached handle to avoid pointer-mode surprises.
+// - Keeps the same C++ symbols used by implicit_AA_binding.cpp:
+//     * implicit_aa_potrf_lwork_cuda
+//     * implicit_aa_step_inplace_cuda
+//
+// If you want the true "difference AA (Δ-type)" later, we can refactor further;
+// for now this is a safe/stable drop-in for the current Python/C++ interface.
+
 #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -39,9 +50,7 @@ static DeviceHandles& get_handles(int device) {
         CUDA_CHECK(cudaSetDevice(device));
 
         CUBLAS_CHECK(cublasCreate(&h.cublas));
-        // IMPORTANT:
-        // Ensure this handle always uses HOST pointer mode for alpha/beta scalars.
-        // Other libraries/code can change pointer mode on a shared handle; we enforce HOST.
+        // IMPORTANT: keep HOST pointer mode for alpha/beta scalars.
         CUBLAS_CHECK(cublasSetPointerMode(h.cublas, CUBLAS_POINTER_MODE_HOST));
 
         CUSOLVER_CHECK(cusolverDnCreate(&h.cusolver));
@@ -125,15 +134,15 @@ __global__ void gather_ring_to_work_kernel(
     int total = d * m;
     if (tid >= total) return;
 
-    int i = tid / m;   // row [0..d)
-    int j = tid - i * m; // col [0..m)
+    int i = tid / m;      // row [0..d)
+    int j = tid - i * m;  // col [0..m)
 
     // ring: valid columns are head-m ... head-1
     int col = head - m + j;
     col %= aa_cols;
     if (col < 0) col += aa_cols;
 
-    // read G(i,col) -> write Gwork(i,j)
+    // read G(i,col) -> write Gwork(i,j) in the same row-major pitch=aa_cols
     Gwork[i * aa_cols + j] = G[i * aa_cols + col];
     Rwork[i * aa_cols + j] = R[i * aa_cols + col];
 }
@@ -156,7 +165,6 @@ __global__ void gram_rtr_kernel(
         const double rq = (double)Rwork[i * aa_cols + q];
         acc += rp * rq;
     }
-
     A[p * aa_cols + q] = (scalar_t)acc;
 }
 
@@ -195,7 +203,6 @@ __global__ void init_alpha_ones_kernel(scalar_t* __restrict__ alpha, int aa_cols
 }
 
 // Normalize alpha[0:m] by sum, clamp to [-alpha_max, alpha_max], and set alpha[m:]=0.
-// One block is enough because m <= ~16 typically.
 template <typename scalar_t>
 __global__ void normalize_alpha_kernel(scalar_t* __restrict__ alpha, int aa_cols, int m, scalar_t alpha_max) {
     __shared__ scalar_t ssum;
@@ -299,7 +306,7 @@ __global__ void copy_noaa_kernel(
     T[i]  = Tn;
 }
 
-// set boundary from *_new (keeps consistent with your python path)
+// set boundary from *_new
 template <typename scalar_t>
 __global__ void copy_boundary_kernel(
     scalar_t* __restrict__ n,
@@ -330,31 +337,11 @@ __global__ void copy_boundary_kernel(
 }
 
 // ------------------------
-// cuBLAS/cuSOLVER wrappers
+// cuSOLVER wrappers (potrf/potrs)
 // ------------------------
 template <typename scalar_t> struct Blas;
 
 template <> struct Blas<float> {
-    static cublasStatus_t gemm(cublasHandle_t h,
-                              cublasOperation_t opA, cublasOperation_t opB,
-                              int m, int n, int k,
-                              const float* alpha,
-                              const float* A, int lda,
-                              const float* B, int ldb,
-                              const float* beta,
-                              float* C, int ldc) {
-        return cublasSgemm(h, opA, opB, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
-    }
-    static cublasStatus_t gemv(cublasHandle_t h,
-                              cublasOperation_t opA,
-                              int m, int n,
-                              const float* alpha,
-                              const float* A, int lda,
-                              const float* x, int incx,
-                              const float* beta,
-                              float* y, int incy) {
-        return cublasSgemv(h, opA, m, n, alpha, A, lda, x, incx, beta, y, incy);
-    }
     static cusolverStatus_t potrf_buffersize(cusolverDnHandle_t s, int n, float* A, int lda, int* lwork) {
         return cusolverDnSpotrf_bufferSize(s, CUBLAS_FILL_MODE_LOWER, n, A, lda, lwork);
     }
@@ -367,26 +354,6 @@ template <> struct Blas<float> {
 };
 
 template <> struct Blas<double> {
-    static cublasStatus_t gemm(cublasHandle_t h,
-                              cublasOperation_t opA, cublasOperation_t opB,
-                              int m, int n, int k,
-                              const double* alpha,
-                              const double* A, int lda,
-                              const double* B, int ldb,
-                              const double* beta,
-                              double* C, int ldc) {
-        return cublasDgemm(h, opA, opB, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
-    }
-    static cublasStatus_t gemv(cublasHandle_t h,
-                              cublasOperation_t opA,
-                              int m, int n,
-                              const double* alpha,
-                              const double* A, int lda,
-                              const double* x, int incx,
-                              const double* beta,
-                              double* y, int incy) {
-        return cublasDgemv(h, opA, m, n, alpha, A, lda, x, incx, beta, y, incy);
-    }
     static cusolverStatus_t potrf_buffersize(cusolverDnHandle_t s, int n, double* A, int lda, int* lwork) {
         return cusolverDnDpotrf_bufferSize(s, CUBLAS_FILL_MODE_LOWER, n, A, lda, lwork);
     }
@@ -409,8 +376,8 @@ int64_t implicit_aa_potrf_lwork_cuda(torch::Tensor aa_A, int64_t n) {
     const auto stream = at::cuda::getCurrentCUDAStream();
     const cudaStream_t cuda_stream = stream.stream();
 
+    // Keep handle consistent
     CUBLAS_CHECK(cublasSetStream(h.cublas, cuda_stream));
-    // Re-enforce HOST pointer mode (handle may be shared/reused)
     CUBLAS_CHECK(cublasSetPointerMode(h.cublas, CUBLAS_POINTER_MODE_HOST));
     CUSOLVER_CHECK(cusolverDnSetStream(h.cusolver, cuda_stream));
 
@@ -499,12 +466,12 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
     check_like_n(aa_wtmp, "aa_wtmp");
 
     // update ring indices on CPU (no sync)
-    int64_t hist_len_in = std::max<int64_t>(hist_len, 0);
-    int64_t head_in = std::max<int64_t>(head, 0) % std::max<int>(aa_cols, 1);
+    int64_t hist_len_in  = std::max<int64_t>(hist_len, 0);
+    int64_t head_in      = std::max<int64_t>(head, 0) % std::max<int>(aa_cols, 1);
     int64_t hist_len_out = std::min<int64_t>(hist_len_in + 1, aa_cols);
-    int64_t head_out = (head_in + 1) % aa_cols;
+    int64_t head_out     = (head_in + 1) % aa_cols;
 
-    // If degenerate (no interior), just copy new moments with floors.
+    // degenerate (no interior)
     if (n_inner <= 0 || d <= 0) {
         AT_DISPATCH_FLOATING_TYPES(n.scalar_type(), "copy_noaa_degenerate", [&](){
             const scalar_t n_floor = (scalar_t)n_floor_;
@@ -524,7 +491,7 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
         return {hist_len_out, head_out};
     }
 
-    // Reusable workspace is required from Python side; no hidden allocation here.
+    // work buffers must exist (Python prealloc)
     TORCH_CHECK(G_work.defined() && R_work.defined(), "G_work/R_work must be defined");
     TORCH_CHECK(G_work.numel() > 0 && R_work.numel() > 0, "G_work/R_work must be preallocated");
     TORCH_CHECK(G_work.is_cuda() && R_work.is_cuda(), "G_work/R_work must be CUDA");
@@ -533,10 +500,11 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
     TORCH_CHECK(G_work.is_contiguous() && R_work.is_contiguous(), "G_work/R_work must be contiguous");
     TORCH_CHECK(G_work.sizes() == aa_G.sizes() && R_work.sizes() == aa_R.sizes(), "G_work/R_work must match aa_G/aa_R shape");
 
-    // Pack wk,wnew,r (=wtmp) from (n,nu,T) and (n_new,nu_new,T_new)
-    AT_DISPATCH_FLOATING_TYPES(n.scalar_type(), "implicit_aa_pack_write", [&](){
+    AT_DISPATCH_FLOATING_TYPES(n.scalar_type(), "implicit_aa_step", [&](){
         const int threads = 256;
-        const int blocks = (n_inner + threads - 1) / threads;
+        const int blocks  = (n_inner + threads - 1) / threads;
+
+        // pack wk/wnew/r
         pack_wk_wnew_r_kernel<scalar_t><<<blocks, threads, 0, cuda_stream>>>(
             (const scalar_t*)n.data_ptr<scalar_t>(),
             (const scalar_t*)nu.data_ptr<scalar_t>(),
@@ -550,26 +518,25 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
             n_inner
         );
 
-        // Write new column into history at head_in
+        // write history at head_in
         {
             int blocks2 = (d + threads - 1) / threads;
             write_history_col_kernel<scalar_t><<<blocks2, threads, 0, cuda_stream>>>(
                 (const scalar_t*)aa_wnew.data_ptr<scalar_t>(),
-                (const scalar_t*)aa_wtmp.data_ptr<scalar_t>(), // r
+                (const scalar_t*)aa_wtmp.data_ptr<scalar_t>(),
                 (scalar_t*)aa_G.data_ptr<scalar_t>(),
                 (scalar_t*)aa_R.data_ptr<scalar_t>(),
                 d, aa_cols, (int)head_in
             );
         }
 
-        // Decide whether to apply AA
         const int m = (int)hist_len_out;
         const bool do_apply = apply && (m >= 2);
 
         if (!do_apply) {
-            // Just copy new moments with floors
+            // no AA: copy new moments with floors
             int threads3 = 256;
-            int blocks3 = (int)((nx + threads3 - 1) / threads3);
+            int blocks3  = (int)((nx + threads3 - 1) / threads3);
             copy_noaa_kernel<scalar_t><<<blocks3, threads3, 0, cuda_stream>>>(
                 (scalar_t*)n.data_ptr<scalar_t>(),
                 (scalar_t*)nu.data_ptr<scalar_t>(),
@@ -583,10 +550,13 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
             return;
         }
 
+        // handles/streams
         auto& h = get_handles(device);
+        CUBLAS_CHECK(cublasSetStream(h.cublas, cuda_stream));
+        CUBLAS_CHECK(cublasSetPointerMode(h.cublas, CUBLAS_POINTER_MODE_HOST));
         CUSOLVER_CHECK(cusolverDnSetStream(h.cusolver, cuda_stream));
 
-        // Gather ring history into columns 0..m-1 of G_work/R_work using head_out (after insertion)
+        // gather ring -> work (columns 0..m-1)
         {
             int threads4 = 256;
             int total = d * m;
@@ -596,48 +566,30 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
                 (const scalar_t*)aa_R.data_ptr<scalar_t>(),
                 (scalar_t*)G_work.data_ptr<scalar_t>(),
                 (scalar_t*)R_work.data_ptr<scalar_t>(),
-                d, aa_cols,
-                (int)head_out,
-                m
+                d, aa_cols, (int)head_out, m
             );
         }
 
-        // Build A = R^T R (size m×m) in aa_A (top-left)
-        // Interpretation:
-        // - R_work is (d, aa_cols) row-major
-        // - treat it as column-major matrix of size (aa_cols × d) with lda=aa_cols (rows=aa_cols, cols=d)
-        // - use first m rows => (m × d), lda=aa_cols
-        //
-        // Safety checks for common cuBLAS INVALID_VALUE causes
-        TORCH_CHECK(m >= 2, "AA apply requires m>=2");
-        TORCH_CHECK(m <= aa_cols, "m must be <= aa_cols");
-        TORCH_CHECK(d > 0, "d must be > 0");
-        TORCH_CHECK(R_work.is_contiguous(), "R_work must be contiguous");
-        TORCH_CHECK(aa_A.is_contiguous(), "aa_A must be contiguous");
-
+        // build A = R^T R via kernel (row-major storage with pitch aa_cols)
         scalar_t* A = (scalar_t*)aa_A.data_ptr<scalar_t>();
         const scalar_t* Rptr = (const scalar_t*)R_work.data_ptr<scalar_t>();
 
         {
-            const dim3 block(16, 16);
-            const dim3 grid((m + block.x - 1) / block.x, (m + block.y - 1) / block.y);
-            gram_rtr_kernel<scalar_t><<<grid, block, 0, cuda_stream>>>(
-                Rptr,
-                A,
-                d,
-                aa_cols,
-                m
+            dim3 block2d(16, 16);
+            dim3 grid2d((m + block2d.x - 1) / block2d.x, (m + block2d.y - 1) / block2d.y);
+            gram_rtr_kernel<scalar_t><<<grid2d, block2d, 0, cuda_stream>>>(
+                Rptr, A, d, aa_cols, m
             );
         }
 
-        // Add reg to diag
+        // reg diag
         {
             int threads5 = 128;
             int blocks5 = (m + threads5 - 1) / threads5;
             add_reg_diag_kernel<scalar_t><<<blocks5, threads5, 0, cuda_stream>>>(A, aa_cols, m, (scalar_t)reg_);
         }
 
-        // Prepare alpha RHS = ones (first m), zeros elsewhere
+        // RHS alpha = ones (first m), 0 else
         {
             int threads6 = 128;
             int blocks6 = (aa_cols + threads6 - 1) / threads6;
@@ -646,7 +598,7 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
             );
         }
 
-        // Solver work/info are also required preallocated buffers.
+        // solver buffers checks
         TORCH_CHECK(solver_info.defined(), "solver_info must be defined");
         TORCH_CHECK(solver_info.is_cuda() && solver_info.scalar_type() == torch::kInt32 && solver_info.numel() == 1,
                     "solver_info must be int32 CUDA scalar");
@@ -667,7 +619,7 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
             (int*)solver_info.data_ptr<int>()
         ));
 
-        // Solve A x = ones  (x stored in aa_alpha first m entries)
+        // Solve A x = ones (x in aa_alpha)
         CUSOLVER_CHECK(Blas<scalar_t>::potrs(
             h.cusolver, m, 1,
             A, aa_cols,
@@ -675,7 +627,7 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
             (int*)solver_info.data_ptr<int>()
         ));
 
-        // Normalize alpha by sum, clamp
+        // normalize alpha
         {
             int threads7 = 32;
             normalize_alpha_kernel<scalar_t><<<1, threads7, 0, cuda_stream>>>(
@@ -683,12 +635,9 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
             );
         }
 
-        // Compute wAA = G^T * alpha  (G is m×d column-major view of G_work with lda=aa_cols)
-        TORCH_CHECK(G_work.is_contiguous(), "G_work must be contiguous");
+        // wAA = G^T * alpha (but using kernel: y[i]=sum_j G(i,j)*alpha[j])
         const scalar_t* Gptr = (const scalar_t*)G_work.data_ptr<scalar_t>();
         scalar_t* wAA = (scalar_t*)aa_wtmp.data_ptr<scalar_t>(); // overwrite r with wAA
-
-        // y(d) = G(d,m) * alpha(m)
         {
             int threads8 = 256;
             int blocks8 = (d + threads8 - 1) / threads8;
@@ -696,13 +645,11 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
                 Gptr,
                 (const scalar_t*)aa_alpha.data_ptr<scalar_t>(),
                 wAA,
-                d,
-                aa_cols,
-                m
+                d, aa_cols, m
             );
         }
 
-        // Blend with wnew (beta)
+        // blend with wnew
         {
             int threads9 = 256;
             int blocks9 = (d + threads9 - 1) / threads9;
@@ -714,7 +661,7 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
             );
         }
 
-        // Unpack to n,nu,T interior + projection; boundaries from *_new
+        // boundaries from new, interior from wAA with projection
         copy_boundary_kernel<scalar_t><<<1, 1, 0, cuda_stream>>>(
             (scalar_t*)n.data_ptr<scalar_t>(),
             (scalar_t*)nu.data_ptr<scalar_t>(),
