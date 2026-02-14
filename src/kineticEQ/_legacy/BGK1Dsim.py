@@ -1444,27 +1444,81 @@ class BGK1D:
         if self._implicit_cuda is None:
             raise RuntimeError("implicit_fused backend is not loaded. Set implicit_solver='backend'.")
 
+        if not hasattr(self._implicit_cuda, "moments_n_nu_T") or not hasattr(self._implicit_cuda, "build_system_from_moments"):
+            raise RuntimeError("implicit_fused backend does not expose moments-based APIs")
+
+        if not hasattr(self, "_implicit_backend_n"):
+            self._implicit_backend_n = torch.empty((self.nx,), device=self.f.device, dtype=self.f.dtype)
+            self._implicit_backend_nu = torch.empty((self.nx,), device=self.f.device, dtype=self.f.dtype)
+            self._implicit_backend_T = torch.empty((self.nx,), device=self.f.device, dtype=self.f.dtype)
+            self._implicit_backend_B0 = torch.empty((self.nv, self.nx - 2), device=self.f.device, dtype=self.f.dtype)
+
+        if (not hasattr(self, "_implicit_backend_gtsv_ws")) and hasattr(self._cusolver, "gtsv_ws_bytes"):
+            ws_bytes = int(
+                self._cusolver.gtsv_ws_bytes(
+                    self._dl.contiguous(),
+                    self._dd.contiguous(),
+                    self._du.contiguous(),
+                    self._B.contiguous(),
+                )
+            )
+            self._implicit_backend_gtsv_ws = torch.empty(
+                (max(ws_bytes, 1),),
+                device=self.f.device,
+                dtype=torch.uint8,
+            )
+
         # 初期候補：前ステップ
         self._fz.copy_(self.f)
         swapped_last = False
         residual_val = float('inf')
 
         for z in range(self.picard_iter):
-            # (a,b,c,B) を一括構築（Maxwellの境界寄与も旧実装と同等）
-            self._implicit_cuda.build_system_fused(
-                self.f, self._fz, self.v,
-                float(self.dv), float(self.dt), float(self.dx),
-                float(self.tau_tilde), float(self._inv_sqrt_2pi.item()),
-                self._dl, self._dd, self._du, self._B
+            self._implicit_backend_B0.copy_(self.f[1:-1, :].T)
+
+            self._implicit_cuda.moments_n_nu_T(
+                self._fz,
+                self.v,
+                float(self.dv),
+                self._implicit_backend_n,
+                self._implicit_backend_nu,
+                self._implicit_backend_T,
             )
 
-            # 既存 cuSOLVER バインダで一括解法（戻り値 shape: (nv, nx-2)）
-            solution = self._cusolver.gtsv_strided(
-                self._dl.contiguous(),
-                self._dd.contiguous(),
-                self._du.contiguous(),
-                self._B.contiguous()
+            self._implicit_cuda.build_system_from_moments(
+                self._implicit_backend_B0,
+                self.v,
+                float(self.dt),
+                float(self.dx),
+                float(self.tau_tilde),
+                float(self._inv_sqrt_2pi.item()),
+                self._implicit_backend_n,
+                self._implicit_backend_nu,
+                self._implicit_backend_T,
+                self.f[0, :].contiguous(),
+                self.f[-1, :].contiguous(),
+                self._dl,
+                self._dd,
+                self._du,
+                self._B,
             )
+
+            if hasattr(self._cusolver, "gtsv_strided_inplace") and hasattr(self, "_implicit_backend_gtsv_ws"):
+                self._cusolver.gtsv_strided_inplace(
+                    self._dl.contiguous(),
+                    self._dd.contiguous(),
+                    self._du.contiguous(),
+                    self._B.contiguous(),
+                    self._implicit_backend_gtsv_ws,
+                )
+                solution = self._B
+            else:
+                solution = self._cusolver.gtsv_strided(
+                    self._dl.contiguous(),
+                    self._dd.contiguous(),
+                    self._du.contiguous(),
+                    self._B.contiguous(),
+                )
 
             # 内部セルのみ書き戻し。境界は前状態を維持
             self._fn_tmp.copy_(self._fz)

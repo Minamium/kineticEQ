@@ -31,7 +31,7 @@ if str(_SRC) not in sys.path:
 from kineticEQ import Engine, Config, BGK1D
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calculate_moments
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_momentCNN_util import (
-    load_moments_cnn_model, predict_next_moments_delta, _build_fz_from_moments
+    load_moments_cnn_model, predict_next_moments_delta
 )
 from kineticEQ.plotting.bgk1d.plot_state import plot_state
 
@@ -236,8 +236,8 @@ def run_case_baseline_input(
       - eng_base: baseline (no CNN), provides TRUE state f_t
       - eng_tf:   baseline config (no CNN in stepper), but each step:
           (1) sync eng_tf.state to eng_base.state (so both start from same f_t)
-          (2) build fz from CNN prediction using eng_base's TRUE moments
-          (3) inject fz and run one step
+          (2) build W=(n,nu,T) from CNN prediction using eng_base's TRUE moments
+          (3) inject W and run one step
     This isolates the CNN's single-step quality from rollout accumulation.
 
     Output schema is identical to run_case_pair (warm = tf).
@@ -286,7 +286,7 @@ def run_case_baseline_input(
             eng_tf.state.f_tmp.copy_(eng_base.state.f_tmp)
 
         # ============================================================
-        # (C) CNN prediction -> build Maxwellian fz (on synced eng_tf.state)
+        # (C) CNN prediction -> build W=(n,nu,T)
         # ============================================================
         n1p = n0.clone()
         u1p = u0.clone()
@@ -299,10 +299,9 @@ def run_case_baseline_input(
             delta_type=dtp,
         )
 
-        fz = _build_fz_from_moments(eng_tf.state, n1p, u1p, T1p)
-
-        # inject fz for THIS step (t=s -> s+1)
-        eng_tf.stepper.ws._init_fz = fz
+        # inject W for THIS step (t=s -> s+1)
+        # _init_W is consumed once inside implicit stepper
+        eng_tf.stepper.ws._init_W = (n1p, n1p * u1p, T1p)
 
         # ============================================================
         # (D) baseline step (advance base to t=s+1)
@@ -317,7 +316,7 @@ def run_case_baseline_input(
         resid_base[s] = float(bench_b.get("std_picard_residual", np.nan))
 
         # ============================================================
-        # (E) teacher-forcing step (solve from same f_t with CNN-init fz)
+        # (E) teacher-forcing step (solve from same f_t with CNN-init W)
         # ============================================================
         t0 = _now_sync(device)
         eng_tf.stepper(s)

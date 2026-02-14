@@ -7,7 +7,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 import torch
-from kineticEQ.core.states.state_1d import State1D1V
 from kineticEQ.CNN.BGK1D1V.models import MomentCNN1D
 
 # CNNモデルのロード
@@ -108,50 +107,6 @@ def load_moments_cnn_model(model_path: str, device: torch.device) -> tuple[Momen
     model.load_state_dict(sd, strict=True)
     model.to(device).eval()
     return model, meta
-
-
-@torch.no_grad()
-def _maxwellian_from_nuT(state: State1D1V, n: torch.Tensor, u: torch.Tensor, T: torch.Tensor) -> torch.Tensor:
-    """
-    Non-destructive Maxwellian builder (eval_warmstart_debug と同等).
-    Requires: state.v_col (nx, nv), state.inv_sqrt_2pi (scalar tensor)
-    Returns: (nx, nv)
-    """
-    coeff = (n * state.inv_sqrt_2pi) / torch.sqrt(T)          # (nx,)
-    invT  = 0.5 / T                                           # (nx,)
-    diff  = state.v_col - u[:, None]                          # (nx, nv)
-    expo  = diff.mul(diff)
-    expo.mul_(-invT[:, None])
-    torch.exp(expo, out=expo)
-    expo.mul_(coeff[:, None])
-    return expo
-
-
-@torch.no_grad()
-def _build_fz_from_moments(
-    state: State1D1V,
-    n1: torch.Tensor, u1: torch.Tensor, T1: torch.Tensor,
-    n_floor: float = 1e-12, T_floor: float = 1e-12,
-) -> torch.Tensor:
-    """
-    eval_warmstart_debug.build_fz_from_moments と同等:
-      - n,T を floor
-      - Maxwellian を作る
-      - 境界は state.f の境界を保持
-    """
-    if (not torch.isfinite(n1).all()) or (not torch.isfinite(u1).all()) or (not torch.isfinite(T1).all()):
-        return state.f.clone()
-
-    n1 = torch.clamp(n1, min=float(n_floor))
-    T1 = torch.clamp(T1, min=float(T_floor))
-
-    fz = _maxwellian_from_nuT(state, n1, u1, T1)
-
-    # keep boundary from current distribution
-    fz[0, :].copy_(state.f[0, :])
-    fz[-1, :].copy_(state.f[-1, :])
-    return fz
-
 
 # モデルによる推論
 @torch.no_grad()

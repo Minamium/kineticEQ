@@ -64,8 +64,19 @@ def step(
     # 初期 moments from fz
     cuda_module.moments_n_nu_T(ws.fz, state.v, dv, ws.n, ws.nu, ws.T)
 
+    # 外部フック: W=(n,nu,T) を直接注入（teacher-forcing/eval用）
+    external_W_injected = False
+    init_W = getattr(ws, "_init_W", None)
+    if init_W is not None:
+        n_init, nu_init, T_init = init_W
+        ws.n.copy_(torch.clamp(n_init, min=n_floor))
+        ws.nu.copy_(nu_init)
+        ws.T.copy_(torch.clamp(T_init, min=T_floor))
+        ws._init_W = None
+        external_W_injected = True
+
     # CNN warm-start: W=(n,nu,T) を直接更新
-    if cfg.model_cfg.scheme_params.moments_cnn_modelpath is not None:
+    if (cfg.model_cfg.scheme_params.moments_cnn_modelpath is not None) and (not external_W_injected):
         if model is None:
             raise RuntimeError("moments_cnn_modelpath is set but model is None")
 
