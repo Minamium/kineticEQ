@@ -14,6 +14,7 @@
 
 #define CUDA_CHECK(err) TORCH_CHECK((err) == cudaSuccess, "CUDA error: ", cudaGetErrorString(err))
 #define CUBLAS_CHECK(st) TORCH_CHECK((st) == CUBLAS_STATUS_SUCCESS, "cuBLAS error code: ", int(st))
+#define CUBLAS_CHECK_MSG(st, msg) TORCH_CHECK((st) == CUBLAS_STATUS_SUCCESS, msg, " cuBLAS error code: ", int(st))
 #define CUSOLVER_CHECK(st) TORCH_CHECK((st) == CUSOLVER_STATUS_SUCCESS, "cuSOLVER error code: ", int(st))
 
 // ------------------------
@@ -411,12 +412,9 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
 ) {
     c10::cuda::CUDAGuard device_guard(n.device());
     int device = n.get_device();
-    auto& h = get_handles(device);
 
     const auto stream = at::cuda::getCurrentCUDAStream();
     const cudaStream_t cuda_stream = stream.stream();
-    CUBLAS_CHECK(cublasSetStream(h.cublas, cuda_stream));
-    CUSOLVER_CHECK(cusolverDnSetStream(h.cusolver, cuda_stream));
 
     const int64_t nx = n.numel();
     TORCH_CHECK(nx >= 2, "nx must be >= 2");
@@ -517,6 +515,10 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
             return;
         }
 
+        auto& h = get_handles(device);
+        CUBLAS_CHECK_MSG(cublasSetStream(h.cublas, cuda_stream), "cublasSetStream(step_inplace)");
+        CUSOLVER_CHECK(cusolverDnSetStream(h.cusolver, cuda_stream));
+
         // Gather ring history into columns 0..m-1 of G_work/R_work using head_out (after insertion)
         {
             int threads4 = 256;
@@ -545,7 +547,7 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
 
         // cublas gemm: A(m×m) = R(m×d) * R(m×d)^T
         // column-major: opN (m×d), opT (d×m)
-        CUBLAS_CHECK(Blas<scalar_t>::gemm(
+        CUBLAS_CHECK_MSG(Blas<scalar_t>::gemm(
             h.cublas,
             CUBLAS_OP_N, CUBLAS_OP_T,
             m, m, d,
@@ -554,7 +556,7 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
             Rcol, aa_cols,
             &zero,
             A, aa_cols
-        ));
+        ), "cublasGEMM(R*R^T)");
 
         // Add reg to diag
         {
@@ -612,7 +614,7 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
         scalar_t* wAA = (scalar_t*)aa_wtmp.data_ptr<scalar_t>(); // overwrite r with wAA
 
         // y(d) = G(m×d)^T * alpha(m)
-        CUBLAS_CHECK(Blas<scalar_t>::gemv(
+        CUBLAS_CHECK_MSG(Blas<scalar_t>::gemv(
             h.cublas,
             CUBLAS_OP_T,
             m, d,
@@ -621,7 +623,7 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
             (const scalar_t*)aa_alpha.data_ptr<scalar_t>(), 1,
             &zero,
             wAA, 1
-        ));
+        ), "cublasGEMV(G^T*alpha)");
 
         // Blend with wnew (beta)
         {
