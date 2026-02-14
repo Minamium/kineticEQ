@@ -1,6 +1,6 @@
 // kineticEQ/src/kineticEQ/cuda_kernel/BGK1D1V/implicit_AA/implicit_AA_kernel.cu
 #include <torch/extension.h>
-#include <ATen/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -353,7 +353,7 @@ template <> struct Blas<double> {
 // lwork query
 // ------------------------
 int64_t implicit_aa_potrf_lwork_cuda(torch::Tensor aa_A, int64_t n) {
-    at::cuda::CUDAGuard device_guard(aa_A.device());
+    c10::cuda::CUDAGuard device_guard(aa_A.device());
     int device = aa_A.get_device();
     auto& h = get_handles(device);
 
@@ -409,7 +409,7 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
     torch::Tensor G_work,
     torch::Tensor R_work
 ) {
-    at::cuda::CUDAGuard device_guard(n.device());
+    c10::cuda::CUDAGuard device_guard(n.device());
     int device = n.get_device();
     auto& h = get_handles(device);
 
@@ -459,15 +459,11 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
         return {hist_len_out, head_out};
     }
 
-    // Ensure work buffers exist (recommended: allocate once in Python and reuse)
-    auto opts = n.options();
-    if (!G_work.defined() || G_work.numel() == 0) {
-        G_work = torch::zeros({d, aa_cols}, opts);
-    }
-    if (!R_work.defined() || R_work.numel() == 0) {
-        R_work = torch::zeros({d, aa_cols}, opts);
-    }
+    // Reusable workspace is required from Python side; no hidden allocation here.
+    TORCH_CHECK(G_work.defined() && R_work.defined(), "G_work/R_work must be defined");
+    TORCH_CHECK(G_work.numel() > 0 && R_work.numel() > 0, "G_work/R_work must be preallocated");
     TORCH_CHECK(G_work.is_cuda() && R_work.is_cuda(), "G_work/R_work must be CUDA");
+    TORCH_CHECK(G_work.scalar_type() == n.scalar_type() && R_work.scalar_type() == n.scalar_type(), "G_work/R_work dtype mismatch");
     TORCH_CHECK(G_work.is_contiguous() && R_work.is_contiguous(), "G_work/R_work must be contiguous");
     TORCH_CHECK(G_work.sizes() == aa_G.sizes() && R_work.sizes() == aa_R.sizes(), "G_work/R_work must match aa_G/aa_R shape");
 
@@ -576,32 +572,23 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
             );
         }
 
-        // Solver work/info
-        torch::Tensor work = solver_work;
-        torch::Tensor info = solver_info;
-        if (!info.defined() || info.numel() == 0) {
-            info = torch::zeros({1}, torch::TensorOptions().device(n.device()).dtype(torch::kInt32));
-        }
-        TORCH_CHECK(info.is_cuda() && info.scalar_type() == torch::kInt32 && info.numel() == 1, "solver_info must be int32 CUDA scalar");
+        // Solver work/info are also required preallocated buffers.
+        TORCH_CHECK(solver_info.defined(), "solver_info must be defined");
+        TORCH_CHECK(solver_info.is_cuda() && solver_info.scalar_type() == torch::kInt32 && solver_info.numel() == 1,
+                    "solver_info must be int32 CUDA scalar");
+        TORCH_CHECK(solver_info.is_contiguous(), "solver_info must be contiguous");
 
-        int lwork = 0;
-        if (!work.defined() || work.numel() == 0) {
-            // query needed work for (aa_cols) is overkill; for correctness query for (m)
-            int lw = 0;
-            CUSOLVER_CHECK(Blas<scalar_t>::potrf_buffersize(h.cusolver, m, A, aa_cols, &lw));
-            lwork = lw;
-            work = torch::empty({lwork}, opts);
-        } else {
-            TORCH_CHECK(work.is_cuda() && work.scalar_type() == n.scalar_type(), "solver_work dtype/device mismatch");
-            lwork = (int)work.numel();
-        }
+        TORCH_CHECK(solver_work.defined() && solver_work.numel() > 0, "solver_work must be preallocated");
+        TORCH_CHECK(solver_work.is_cuda() && solver_work.scalar_type() == n.scalar_type(), "solver_work dtype/device mismatch");
+        TORCH_CHECK(solver_work.is_contiguous(), "solver_work must be contiguous");
+        const int lwork = (int)solver_work.numel();
 
         // Cholesky factorization (in-place on A)
         CUSOLVER_CHECK(Blas<scalar_t>::potrf(
             h.cusolver, m, A, aa_cols,
-            (scalar_t*)work.data_ptr<scalar_t>(),
+            (scalar_t*)solver_work.data_ptr<scalar_t>(),
             lwork,
-            (int*)info.data_ptr<int>()
+            (int*)solver_info.data_ptr<int>()
         ));
 
         // Solve A x = ones  (x stored in aa_alpha first m entries)
@@ -609,7 +596,7 @@ std::tuple<int64_t, int64_t> implicit_aa_step_inplace_cuda(
             h.cusolver, m, 1,
             A, aa_cols,
             (scalar_t*)aa_alpha.data_ptr<scalar_t>(), aa_cols,
-            (int*)info.data_ptr<int>()
+            (int*)solver_info.data_ptr<int>()
         ));
 
         // Normalize alpha by sum, clamp
