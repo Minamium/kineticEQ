@@ -10,6 +10,11 @@ class ImplicitWorkspace:
     dd: torch.Tensor
     du: torch.Tensor
     B: torch.Tensor
+    n: torch.Tensor
+    nu: torch.Tensor
+    T: torch.Tensor
+    B0: torch.Tensor
+    gtsv_ws: torch.Tensor
 
 
 def allocate_implicit_workspace(nx: int, nv: int, device, dtype) -> ImplicitWorkspace:
@@ -21,4 +26,9 @@ def allocate_implicit_workspace(nx: int, nv: int, device, dtype) -> ImplicitWork
         dd=torch.zeros((nv, n_inner), device=device, dtype=dtype),
         du=torch.zeros((nv, n_inner), device=device, dtype=dtype),
         B=torch.zeros((nv, n_inner), device=device, dtype=dtype),
+        n=torch.zeros((nx,), device=device, dtype=dtype),
+        nu=torch.zeros((nx,), device=device, dtype=dtype),
+        T=torch.zeros((nx,), device=device, dtype=dtype),
+        B0=torch.zeros((nv, n_inner), device=device, dtype=dtype),
+        gtsv_ws=torch.empty((0,), device=device, dtype=torch.uint8),
     )
