@@ -30,8 +30,8 @@ def load_explicit_fused():
     return load(
         name="explicit_fused",
         sources=[
-            str(_KERNEL_DIR / "explicit_fused" / "explicit_binding.cpp"),
-            str(_KERNEL_DIR / "explicit_fused" / "explicit_kernel.cu"),
+            str(_KERNEL_DIR / "BGK1D1V" / "explicit_fused" / "explicit_binding.cpp"),
+            str(_KERNEL_DIR / "BGK1D1V" / "explicit_fused" / "explicit_kernel.cu"),
         ],
         **_common_flags(),
     )
@@ -43,8 +43,8 @@ def load_implicit_fused():
     return load(
         name="implicit_fused",
         sources=[
-            str(_KERNEL_DIR / "implicit_fused" / "implicit_binding.cpp"),
-            str(_KERNEL_DIR / "implicit_fused" / "implicit_kernels.cu"),
+            str(_KERNEL_DIR / "BGK1D1V" / "implicit_fused" / "implicit_binding.cpp"),
+            str(_KERNEL_DIR / "BGK1D1V" / "implicit_fused" / "implicit_kernels.cu"),
         ],
         extra_ldflags=["-lcusparse"],
         **_common_flags(),
@@ -57,8 +57,8 @@ def load_gtsv():
     return load(
         name="gtsv_batch",
         sources=[
-            str(_KERNEL_DIR / "gtsv" / "gtsv_binding.cpp"),
-            str(_KERNEL_DIR / "gtsv" / "gtsv_batch.cu"),
+            str(_KERNEL_DIR / "BGK1D1V" / "gtsv" / "gtsv_binding.cpp"),
+            str(_KERNEL_DIR / "BGK1D1V" / "gtsv" / "gtsv_batch.cu"),
         ],
         extra_ldflags=["-lcusparse"],
         **_common_flags(),
@@ -71,8 +71,22 @@ def load_lo_blocktridiag():
     return load(
         name="lo_blocktridiag",
         sources=[
-            str(_KERNEL_DIR / "lo_blocktridiag" / "block_tridiag_binding.cpp"),
-            str(_KERNEL_DIR / "lo_blocktridiag" / "block_tridiag_kernel.cu"),
+            str(_KERNEL_DIR / "BGK1D1V" / "lo_blocktridiag" / "block_tridiag_binding.cpp"),
+            str(_KERNEL_DIR / "BGK1D1V" / "lo_blocktridiag" / "block_tridiag_kernel.cu"),
         ],
+        **_common_flags(),
+    )
+
+@functools.lru_cache(maxsize=1)
+def load_implicit_AA():
+    _setup_cuda_arch()
+    _BUILD_DIR.mkdir(exist_ok=True)
+    return load(
+        name="implicit_AA",
+        sources=[
+            str(_KERNEL_DIR / "BGK1D1V" / "implicit_AA" / "implicit_AA_binding.cpp"),
+            str(_KERNEL_DIR / "BGK1D1V" / "implicit_AA" / "implicit_AA_kernel.cu"),
+        ],
+        extra_ldflags=["-lcublas", "-lcusolver"],
         **_common_flags(),
     )

@@ -25,6 +25,10 @@ class ImplicitWorkspace:
     aa_wk: torch.Tensor
     aa_wnew: torch.Tensor
     aa_wtmp: torch.Tensor
+    aa_G_work: torch.Tensor
+    aa_R_work: torch.Tensor
+    aa_solver_work: torch.Tensor
+    aa_solver_info: torch.Tensor
     gtsv_ws: torch.Tensor
 
 
@@ -54,5 +58,9 @@ def allocate_implicit_workspace(nx: int, nv: int, device, dtype, aa_m: int = 0) 
         aa_wk=torch.zeros((d,), device=device, dtype=dtype),
         aa_wnew=torch.zeros((d,), device=device, dtype=dtype),
         aa_wtmp=torch.zeros((d,), device=device, dtype=dtype),
+        aa_G_work=torch.empty((0,), device=device, dtype=dtype),
+        aa_R_work=torch.empty((0,), device=device, dtype=dtype),
+        aa_solver_work=torch.empty((0,), device=device, dtype=dtype),
+        aa_solver_info=torch.empty((0,), device=device, dtype=torch.int32),
         gtsv_ws=torch.empty((0,), device=device, dtype=torch.uint8),
     )

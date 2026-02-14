@@ -459,6 +459,8 @@ def main():
     device = torch.device(args.device)
     print(f"device={device}", flush=True)
 
+    aa_enable_effective = bool(args.aa_enable)
+
     gpu_name = None
     if device.type == "cuda" and torch.cuda.is_available():
         try:
@@ -507,7 +509,7 @@ def main():
             picard_iter=int(args.picard_iter),
             picard_tol=float(args.picard_tol),
             abs_tol=float(args.abs_tol),
-            aa_enable=bool(args.aa_enable),
+            aa_enable=bool(aa_enable_effective),
             aa_m=int(args.aa_m),
             aa_beta=float(args.aa_beta),
             aa_stride=int(args.aa_stride),
@@ -537,7 +539,7 @@ def main():
                 picard_iter=int(args.picard_iter),
                 picard_tol=float(args.picard_tol),
                 abs_tol=float(args.abs_tol),
-                aa_enable=bool(args.aa_enable),
+                aa_enable=bool(aa_enable_effective),
                 aa_m=int(args.aa_m),
                 aa_beta=float(args.aa_beta),
                 aa_stride=int(args.aa_stride),

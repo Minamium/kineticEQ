@@ -9,6 +9,7 @@ from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_set_initial_condition import
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_check_CFL import bgk1d_check_CFL
 from kineticEQ.cuda_kernel.compile import load_implicit_fused
 from kineticEQ.cuda_kernel.compile import load_gtsv
+from kineticEQ.cuda_kernel.compile import load_implicit_AA
 from kineticEQ.CNN.BGK1D1V.models import MomentCNN1D
 
 # CNN用ユーティリティ
@@ -20,45 +21,6 @@ import logging
 logger = logging.getLogger(__name__)
 Stepper = Callable[[int], None]
 
-
-def _pack_W_interior(n: torch.Tensor, nu: torch.Tensor, T: torch.Tensor, out: torch.Tensor) -> None:
-    n_inner = max(int(n.numel()) - 2, 0)
-    if n_inner <= 0:
-        return
-    out[:n_inner].copy_(n[1:-1])
-    out[n_inner:2 * n_inner].copy_(nu[1:-1])
-    out[2 * n_inner:3 * n_inner].copy_(T[1:-1])
-
-
-def _unpack_W_interior(w: torch.Tensor, n: torch.Tensor, nu: torch.Tensor, T: torch.Tensor) -> None:
-    n_inner = max(int(n.numel()) - 2, 0)
-    if n_inner <= 0:
-        return
-    n[1:-1].copy_(w[:n_inner])
-    nu[1:-1].copy_(w[n_inner:2 * n_inner])
-    T[1:-1].copy_(w[2 * n_inner:3 * n_inner])
-
-
-def _project_W_interior(
-    n: torch.Tensor,
-    nu: torch.Tensor,
-    T: torch.Tensor,
-    *,
-    n_floor: float,
-    T_floor: float,
-    u_max: float,
-) -> None:
-    n_int = n[1:-1]
-    nu_int = nu[1:-1]
-    T_int = T[1:-1]
-
-    n_int.clamp_(min=n_floor)
-    T_int.clamp_(min=T_floor)
-
-    u_int = nu_int / torch.clamp(n_int, min=n_floor)
-    u_int.clamp_(min=-u_max, max=u_max)
-    nu_int.copy_(n_int * u_int)
-
 # implicit stepper
 @torch.no_grad()
 def step(
@@ -69,6 +31,7 @@ def step(
     gtsv_module, 
     num_steps: int,
     inv_sqrt_2pi: float,
+    aa_module = None,
     model: MomentCNN1D | None = None,
     model_meta: dict | None = None,
 ) -> tuple[State1D1V, dict]:
@@ -92,23 +55,18 @@ def step(
     aa_start_iter = max(int(getattr(cfg.model_cfg.scheme_params, "aa_start_iter", 2)), 1)
     aa_reg = float(getattr(cfg.model_cfg.scheme_params, "aa_reg", 1e-10))
     aa_reg = max(aa_reg, 1e-14)
+    aa_alpha_max = float(getattr(cfg.model_cfg.scheme_params, "aa_alpha_max", 50.0))
+    aa_alpha_max = max(aa_alpha_max, 0.0)
 
     n_inner = max(int(ws.B.shape[1]), 0)
-    aa_cols = max(min(aa_m + 1, int(ws.aa_G.shape[1])), 1)
-    aa_enable = aa_enable_cfg and (n_inner > 0) and (aa_m >= 1)
+    aa_cols = int(ws.aa_G.shape[1]) if ws.aa_G.dim() == 2 else 0
+    aa_enable = aa_enable_cfg and (aa_module is not None) and (n_inner > 0) and (aa_m >= 1) and (aa_cols >= 2)
     aa_hist_len = 0
+    aa_head = 0
     aa_applied = 0
     aa_restarted = 0
     w_residual_val = float("nan")
     u_max = 0.95 * float(torch.max(torch.abs(state.v)).item()) if n_inner > 0 else 0.0
-
-    # 初期候補 fz（外部フックがあればそれを優先）
-    init_fz = getattr(ws, "_init_fz", None)
-    if init_fz is None:
-        ws.fz.copy_(state.f)
-    else:
-        ws.fz.copy_(init_fz)
-        ws._init_fz = None
 
     # 固定境界 f（本step中は不変）
     f_bc_l = state.f[0, :].contiguous()
@@ -117,6 +75,9 @@ def step(
     # f_prev interior を RHS 基底として1回だけ転置キャッシュ
     if ws.B0.numel() > 0:
         ws.B0.copy_(state.f[1:-1, :].T)
+
+    # 初期候補は常に現在の state.f を使う（外部 fz 注入は廃止）
+    ws.fz.copy_(state.f)
 
     # 初期 moments from fz
     cuda_module.moments_n_nu_T(ws.fz, state.v, dv, ws.n, ws.nu, ws.T)
@@ -223,60 +184,42 @@ def step(
             cuda_module.moments_n_nu_T(ws.fn_tmp, state.v, dv, ws.n_new, ws.nu_new, ws.T_new)
 
             if aa_enable:
-                _pack_W_interior(ws.n, ws.nu, ws.T, ws.aa_wk)
-                _pack_W_interior(ws.n_new, ws.nu_new, ws.T_new, ws.aa_wnew)
-
-                ws.aa_wtmp.copy_(ws.aa_wnew)
-                ws.aa_wtmp.sub_(ws.aa_wk)
-
-                if aa_hist_len < aa_cols:
-                    hist_idx = aa_hist_len
-                    aa_hist_len += 1
-                else:
-                    # Avoid undefined behavior from overlapped in-place copy.
-                    ws.aa_G[:, :-1].copy_(ws.aa_G[:, 1:].clone())
-                    ws.aa_R[:, :-1].copy_(ws.aa_R[:, 1:].clone())
-                    hist_idx = aa_cols - 1
-
-                ws.aa_G[:, hist_idx].copy_(ws.aa_wnew)
-                ws.aa_R[:, hist_idx].copy_(ws.aa_wtmp)
-
                 aa_should_apply = (
-                    aa_hist_len >= 2
-                    and (z + 1) >= aa_start_iter
+                    (z + 1) >= aa_start_iter
                     and ((z + 1 - aa_start_iter) % aa_stride == 0)
                 )
 
-                if aa_should_apply:
-                    R_use = ws.aa_R[:, :aa_hist_len].contiguous()
-                    G_use = ws.aa_G[:, :aa_hist_len].contiguous()
-                    A = ws.aa_A[:aa_hist_len, :aa_hist_len]
-                    alpha = ws.aa_alpha[:aa_hist_len]
-                    ones = ws.aa_ones[:aa_hist_len, :]
+                aa_hist_len, aa_head = aa_module.step_inplace(
+                    ws.n,
+                    ws.nu,
+                    ws.T,
+                    ws.n_new,
+                    ws.nu_new,
+                    ws.T_new,
+                    ws.aa_G,
+                    ws.aa_R,
+                    ws.aa_A,
+                    ws.aa_alpha,
+                    ws.aa_wk,
+                    ws.aa_wnew,
+                    ws.aa_wtmp,
+                    int(aa_hist_len),
+                    int(aa_head),
+                    bool(aa_should_apply),
+                    float(aa_beta),
+                    float(aa_reg),
+                    float(aa_alpha_max),
+                    float(n_floor),
+                    float(T_floor),
+                    float(u_max),
+                    ws.aa_solver_work,
+                    ws.aa_solver_info,
+                    ws.aa_G_work,
+                    ws.aa_R_work,
+                )
 
-                    A.copy_(R_use.T @ R_use)
-                    A.diagonal().add_(aa_reg)
-                    L = torch.linalg.cholesky(A)
-                    x = torch.cholesky_solve(ones, L)
-                    denom = (ones.T @ x).clamp_min(1e-30)
-                    alpha.copy_((x / denom).squeeze(1))
-
-                    alpha_vec = alpha.contiguous()
-                    ws.aa_wtmp.copy_(torch.sum(G_use * alpha_vec.unsqueeze(0), dim=1))
-                    if aa_beta < 1.0:
-                        ws.aa_wtmp.mul_(aa_beta)
-                        ws.aa_wtmp.add_(ws.aa_wnew, alpha=(1.0 - aa_beta))
-
-                    ws.n.copy_(torch.clamp(ws.n_new, min=n_floor))
-                    ws.nu.copy_(ws.nu_new)
-                    ws.T.copy_(torch.clamp(ws.T_new, min=T_floor))
-                    _unpack_W_interior(ws.aa_wtmp, ws.n, ws.nu, ws.T)
-                    _project_W_interior(ws.n, ws.nu, ws.T, n_floor=n_floor, T_floor=T_floor, u_max=u_max)
+                if aa_should_apply and aa_hist_len >= 2:
                     aa_applied += 1
-                else:
-                    ws.n.copy_(torch.clamp(ws.n_new, min=n_floor))
-                    ws.nu.copy_(ws.nu_new)
-                    ws.T.copy_(torch.clamp(ws.T_new, min=T_floor))
             else:
                 ws.n.copy_(torch.clamp(ws.n_new, min=n_floor))
                 ws.nu.copy_(ws.nu_new)
@@ -321,10 +264,27 @@ def build_stepper(cfg: Config, state: State1D1V) -> Stepper:
     cuda_module = load_implicit_fused()
     gtsv_module = load_gtsv()
 
+    aa_enable_cfg = bool(getattr(cfg.model_cfg.scheme_params, "aa_enable", False))
+    aa_m = max(int(getattr(cfg.model_cfg.scheme_params, "aa_m", 0)), 0)
+    aa_module = load_implicit_AA() if (aa_enable_cfg and aa_m >= 1) else None
+
     # implicit 専用ワークスペース確保
     nx, nv = state.f.shape
-    aa_m = max(int(getattr(cfg.model_cfg.scheme_params, "aa_m", 0)), 0)
-    ws = allocate_implicit_workspace(nx, nv, state.f.device, state.f.dtype, aa_m=aa_m)
+    ws = allocate_implicit_workspace(
+        nx,
+        nv,
+        state.f.device,
+        state.f.dtype,
+        aa_m=(aa_m if aa_module is not None else 0),
+    )
+
+    if aa_module is not None and ws.aa_A.numel() > 0:
+        aa_cols = int(ws.aa_A.shape[0])
+        lwork = int(aa_module.potrf_lwork(ws.aa_A, aa_cols))
+        ws.aa_solver_work = torch.empty((max(lwork, 1),), device=state.f.device, dtype=state.f.dtype)
+        ws.aa_solver_info = torch.zeros((1,), device=state.f.device, dtype=torch.int32)
+        ws.aa_G_work = torch.empty_like(ws.aa_G)
+        ws.aa_R_work = torch.empty_like(ws.aa_R)
 
     if ws.B.shape[1] > 0:
         ws_bytes = int(
@@ -362,6 +322,7 @@ def build_stepper(cfg: Config, state: State1D1V) -> Stepper:
             gtsv_module,
             num_steps,
             inv_sqrt_2pi,
+            aa_module,
             model,
             model_meta,
         )
