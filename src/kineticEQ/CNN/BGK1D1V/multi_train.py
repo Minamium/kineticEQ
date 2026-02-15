@@ -31,7 +31,7 @@ from typing import Any, IO
 # ---------------------------------------------------------------------------
 # train.py の store_true / nargs="+" 引数 (CLI変換で特殊扱いが必要)
 # ---------------------------------------------------------------------------
-_STORE_TRUE_FLAGS = frozenset({"amp", "sched_plateau", "warm_eval", "no_shuffle"})
+_STORE_TRUE_FLAGS = frozenset({"amp", "sched_plateau", "warm_eval", "no_shuffle", "aa_enable"})
 _LIST_ARGS = frozenset({"dilation_cycle"})
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -72,6 +72,7 @@ def validate_combo(params: dict[str, Any]) -> tuple[bool, str]:
 _ABBREV = {
     "shock_ratio": "sr",
     "shock_q": "sq",
+    "shock_loss_softmax_beta": "slb",
     "loss_kind": "lk",
     "loss_softmax_beta": "beta",
     "hidden": "h",
@@ -85,6 +86,7 @@ _ABBREV = {
     "epochs": "ep",
     "delta_type": "dt",
     "seed": "s",
+    "aa_enable": "aa",
 }
 
 
@@ -94,7 +96,9 @@ def make_run_name(idx: int, sweep_params: dict[str, Any]) -> str:
     for key in sorted(sweep_params.keys()):
         ab = _ABBREV.get(key, key[:4])
         val = sweep_params[key]
-        if isinstance(val, float):
+        if isinstance(val, bool):
+            parts.append(f"{ab}{int(val)}")
+        elif isinstance(val, float):
             parts.append(f"{ab}{val:g}")
         elif isinstance(val, list):
             parts.append(f"{ab}{'_'.join(map(str, val))}")
@@ -290,8 +294,65 @@ def run_sweep(
 # result aggregation
 # ---------------------------------------------------------------------------
 
+def _parse_run_log(run_dir: Path) -> dict[str, Any] | None:
+    """Extract comprehensive stats from a single run's log.jsonl."""
+    log_path = run_dir / "log.jsonl"
+    if not log_path.exists():
+        return None
+    text = log_path.read_text().strip()
+    if not text:
+        return None
+
+    records = [json.loads(line) for line in text.split("\n")]
+    epoch_recs = [r for r in records if not r.get("warm_eval")]
+    warm_recs = [r for r in records if r.get("warm_eval")]
+
+    if not epoch_recs:
+        return None
+
+    best_val = min(r.get("best_val", float("inf")) for r in epoch_recs)
+    last_ep = epoch_recs[-1]
+
+    # find the epoch record with best val_loss
+    best_ep_rec = min(epoch_recs, key=lambda r: r.get("val_loss", float("inf")))
+
+    total_train_sec = sum(r.get("train_time_sec", 0.0) for r in epoch_recs)
+
+    # warm_eval stats (last available)
+    picard_base = None
+    picard_warm = None
+    best_speed = None
+    if warm_recs:
+        last_warm = warm_recs[-1]
+        picard_base = last_warm.get("picard_sum_base")
+        picard_warm = last_warm.get("picard_sum_warm")
+        best_speed = max(r.get("best_speed", 0.0) for r in warm_recs)
+
+    # fallback: read best_speed.pt
+    if best_speed is None or best_speed == 0.0:
+        best_speed = _read_best_speed(run_dir)
+
+    return {
+        "best_val": best_val,
+        "best_speed": best_speed,
+        "final_epoch": last_ep.get("epoch"),
+        "final_lr": last_ep.get("lr"),
+        "total_train_sec": total_train_sec,
+        "picard_base": picard_base,
+        "picard_warm": picard_warm,
+        "train_loss_last": last_ep.get("train_loss"),
+        "val_loss_last": last_ep.get("val_loss"),
+        "val_rn_mae": best_ep_rec.get("val_rn_abs_mean"),
+        "val_ru_mae": best_ep_rec.get("val_ru_abs_mean"),
+        "val_rT_mae": best_ep_rec.get("val_rT_abs_mean"),
+        "val_rn_max": best_ep_rec.get("val_rn_abs_max"),
+        "val_ru_max": best_ep_rec.get("val_ru_abs_max"),
+        "val_rT_max": best_ep_rec.get("val_rT_abs_max"),
+    }
+
+
 def aggregate_results(save_root: Path, manifest: list[dict] | None = None):
-    """Read log.jsonl from each run and print a ranked summary."""
+    """Read log.jsonl from each run and produce ranked summary + TSV stats."""
     if manifest is None:
         mp = save_root / "sweep_manifest.json"
         if not mp.exists():
@@ -299,56 +360,147 @@ def aggregate_results(save_root: Path, manifest: list[dict] | None = None):
             return
         manifest = json.loads(mp.read_text())
 
+    # --- collect all sweep param keys ---
+    sweep_keys: list[str] = []
+    if manifest:
+        sweep_keys = sorted(manifest[0].get("sweep_params", {}).keys())
+
     results: list[dict[str, Any]] = []
     for entry in manifest:
         run_dir = Path(entry["save_dir"])
-        log_path = run_dir / "log.jsonl"
-        if not log_path.exists():
-            continue
+        stats = _parse_run_log(run_dir)
 
-        lines = log_path.read_text().strip().split("\n")
-        if not lines:
-            continue
-
-        records = [json.loads(l) for l in lines]
-        best_val = min(r.get("best_val", float("inf")) for r in records)
-        last = records[-1]
-
-        # best_speed from checkpoint (optional, torch needed)
-        best_speed = _read_best_speed(run_dir)
-
-        results.append({
+        sp = entry.get("sweep_params", {})
+        row: dict[str, Any] = {
             "run_name": entry["run_name"],
-            "sweep_params": entry["sweep_params"],
-            "best_val": best_val,
-            "best_speed": best_speed,
-            "final_epoch": last.get("epoch"),
-            "final_lr": last.get("lr"),
-            "val_rn_mae": last.get("val_rn_abs_mean"),
-            "val_ru_mae": last.get("val_ru_abs_mean"),
-            "val_rT_mae": last.get("val_rT_abs_mean"),
-        })
+            **{k: sp.get(k) for k in sweep_keys},
+        }
+
+        if stats is None:
+            row["status"] = "no_log"
+            row.update({k: None for k in [
+                "best_val", "best_speed", "final_epoch", "total_train_sec",
+                "picard_base", "picard_warm", "iter_ratio",
+                "val_rn_mae", "val_ru_mae", "val_rT_mae", "val_rT_max",
+                "train_loss_last", "val_loss_last", "final_lr",
+            ]})
+        else:
+            pb = stats["picard_base"]
+            pw = stats["picard_warm"]
+            iter_ratio = (pb / max(pw, 1)) if pb is not None and pw is not None else None
+            row.update({
+                "status": "ok",
+                "best_val": stats["best_val"],
+                "best_speed": stats["best_speed"],
+                "final_epoch": stats["final_epoch"],
+                "total_train_sec": stats["total_train_sec"],
+                "picard_base": pb,
+                "picard_warm": pw,
+                "iter_ratio": iter_ratio,
+                "val_rn_mae": stats["val_rn_mae"],
+                "val_ru_mae": stats["val_ru_mae"],
+                "val_rT_mae": stats["val_rT_mae"],
+                "val_rT_max": stats["val_rT_max"],
+                "train_loss_last": stats["train_loss_last"],
+                "val_loss_last": stats["val_loss_last"],
+                "final_lr": stats["final_lr"],
+            })
+
+        results.append(row)
 
     if not results:
         print("No results to aggregate.")
         return
 
-    # rank by best_val
-    results.sort(key=lambda r: r["best_val"])
+    # --- sort by best_speed desc (primary), best_val asc (secondary) ---
+    def _sort_key(r):
+        spd = r.get("best_speed")
+        bv = r.get("best_val")
+        return (-(spd if spd is not None else -1e9),
+                bv if bv is not None else 1e9)
+    results.sort(key=_sort_key)
 
-    print(f"\n{'=' * 60}")
-    n_show = min(10, len(results))
-    print(f"Top {n_show} by best_val:")
-    print(f"{'#':>3}  {'run_name':<45}  {'best_val':>12}  {'speed':>7}  sweep_params")
-    print("-" * 100)
-    for i, r in enumerate(results[:n_show]):
-        sp = f"{r['best_speed']:.2f}" if r["best_speed"] is not None else "N/A"
-        print(f"{i+1:3d}  {r['run_name']:<45}  {r['best_val']:12.6e}  {sp:>7}  {r['sweep_params']}")
+    # --- write TSV ---
+    tsv_cols = (
+        ["rank", "run_name"] + sweep_keys +
+        ["best_val", "best_speed", "iter_ratio",
+         "picard_base", "picard_warm",
+         "ep", "total_time_s", "train_loss", "val_loss",
+         "val_rn_mae", "val_ru_mae", "val_rT_mae", "val_rT_max",
+         "lr", "status"]
+    )
+    def _fmt(val, fmt_str=None):
+        if val is None:
+            return ""
+        if isinstance(val, bool):
+            return str(int(val))
+        if fmt_str:
+            return fmt_str.format(val)
+        return str(val)
 
-    # save full summary
+    tsv_path = save_root / "sweep_stats.tsv"
+    with tsv_path.open("w") as f:
+        f.write("\t".join(tsv_cols) + "\n")
+        for rank, r in enumerate(results, 1):
+            cells = [
+                str(rank),
+                r["run_name"],
+                *[_fmt(r.get(k)) for k in sweep_keys],
+                _fmt(r.get("best_val"), "{:.6e}"),
+                _fmt(r.get("best_speed"), "{:.3f}"),
+                _fmt(r.get("iter_ratio"), "{:.2f}"),
+                _fmt(r.get("picard_base")),
+                _fmt(r.get("picard_warm")),
+                _fmt(r.get("final_epoch")),
+                _fmt(r.get("total_train_sec"), "{:.1f}"),
+                _fmt(r.get("train_loss_last"), "{:.6e}"),
+                _fmt(r.get("val_loss_last"), "{:.6e}"),
+                _fmt(r.get("val_rn_mae"), "{:.4e}"),
+                _fmt(r.get("val_ru_mae"), "{:.4e}"),
+                _fmt(r.get("val_rT_mae"), "{:.4e}"),
+                _fmt(r.get("val_rT_max"), "{:.4e}"),
+                _fmt(r.get("final_lr"), "{:.2e}"),
+                r.get("status", ""),
+            ]
+            f.write("\t".join(cells) + "\n")
+
+    # --- console summary ---
+    n_ok = sum(1 for r in results if r["status"] == "ok")
+    n_total = len(results)
+    print(f"\n{'=' * 80}")
+    print(f"Sweep stats: {n_ok}/{n_total} runs completed")
+    print(f"{'=' * 80}")
+
+    # top N by speed
+    top_n = min(15, n_ok)
+    ok_results = [r for r in results if r["status"] == "ok"]
+    if ok_results:
+        hdr = (f"{'#':>3}  {'AA':>2}  {'sr':>5}  {'sq':>5}  {'slb':>5}"
+               f"  {'best_val':>11}  {'speed':>6}  {'iter_r':>6}"
+               f"  {'ep':>3}  {'time_s':>7}  {'rT_mae':>9}  {'rT_max':>9}")
+        print(f"\nTop {top_n} by best_speed:")
+        print(hdr)
+        print("-" * len(hdr))
+        for i, r in enumerate(ok_results[:top_n]):
+            aa_str = "Y" if r.get("aa_enable") else "N"
+            sp_str = f"{r['best_speed']:.2f}" if r.get("best_speed") is not None else "N/A"
+            ir_str = f"{r['iter_ratio']:.1f}" if r.get("iter_ratio") is not None else "N/A"
+            rt_mae = f"{r['val_rT_mae']:.3e}" if r.get("val_rT_mae") is not None else "N/A"
+            rt_max = f"{r['val_rT_max']:.3e}" if r.get("val_rT_max") is not None else "N/A"
+            sr_v = r.get("shock_ratio", "")
+            sq_v = r.get("shock_q", "")
+            slb_v = r.get("shock_loss_softmax_beta", "")
+            print(f"{i+1:3d}  {aa_str:>2}  {sr_v:>5}  {sq_v:>5}  {slb_v:>5}"
+                  f"  {r['best_val']:11.5e}  {sp_str:>6}  {ir_str:>6}"
+                  f"  {r.get('final_epoch',''):>3}  {r.get('total_train_sec',0):7.0f}"
+                  f"  {rt_mae:>9}  {rt_max:>9}")
+
+    # --- save JSON ---
     summary_path = save_root / "sweep_summary.json"
     summary_path.write_text(json.dumps(results, indent=2, ensure_ascii=False))
-    print(f"\nFull summary: {summary_path}")
+    print(f"\nFiles written:")
+    print(f"  {tsv_path}")
+    print(f"  {summary_path}")
 
 
 def _read_best_speed(run_dir: Path) -> float | None:

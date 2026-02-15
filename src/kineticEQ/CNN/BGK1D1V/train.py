@@ -122,6 +122,15 @@ def parse_args():
     ap.add_argument("--warm_eval_debug_steps", type=int, default=0, help="0 disables per-step debug_log collection")
     ap.add_argument("--warm_eval_n_floor", type=float, default=1e-12)
     ap.add_argument("--warm_eval_T_floor", type=float, default=1e-12)
+
+    # Anderson Acceleration (implicit Picard solver)
+    ap.add_argument("--aa_enable", action="store_true", help="enable Anderson Acceleration")
+    ap.add_argument("--aa_m", type=int, default=6, help="AA history depth")
+    ap.add_argument("--aa_beta", type=float, default=1.0, help="AA damping parameter")
+    ap.add_argument("--aa_stride", type=int, default=1, help="apply AA every k Picard iterations")
+    ap.add_argument("--aa_start_iter", type=int, default=2, help="first Picard iter to allow AA")
+    ap.add_argument("--aa_reg", type=float, default=1e-10, help="AA Gram regularization")
+    ap.add_argument("--aa_alpha_max", type=float, default=50.0, help="AA alpha clamp")
     return ap.parse_args()
 
 
@@ -464,6 +473,16 @@ def main():
                 # Use the checkpoint just saved above (latest model)
                 last_ckpt = save_dir / "last.pt"
 
+                _aa_kw = dict(
+                    aa_enable=bool(args.aa_enable),
+                    aa_m=int(args.aa_m),
+                    aa_beta=float(args.aa_beta),
+                    aa_stride=int(args.aa_stride),
+                    aa_start_iter=int(args.aa_start_iter),
+                    aa_reg=float(args.aa_reg),
+                    aa_alpha_max=float(args.aa_alpha_max),
+                )
+
                 cfg_base = build_cfg(
                     tau=float(args.warm_eval_tau),
                     dt=float(args.warm_eval_dt),
@@ -475,6 +494,7 @@ def main():
                     picard_iter=int(args.warm_eval_picard_iter),
                     picard_tol=float(args.warm_eval_picard_tol),
                     abs_tol=float(args.warm_eval_abs_tol),
+                    **_aa_kw,
                     moments_cnn_modelpath=None,           # baseline
                 )
 
@@ -489,6 +509,7 @@ def main():
                     picard_iter=int(args.warm_eval_picard_iter),
                     picard_tol=float(args.warm_eval_picard_tol),
                     abs_tol=float(args.warm_eval_abs_tol),
+                    **_aa_kw,
                     moments_cnn_modelpath=str(last_ckpt),  # warmstart enabled
                 )
 
