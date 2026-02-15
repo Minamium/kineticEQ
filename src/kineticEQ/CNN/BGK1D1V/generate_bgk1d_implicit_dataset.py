@@ -29,6 +29,7 @@ def main():
     ap.add_argument("--out_dir", type=str, default="mgpu_output")
     ap.add_argument("--cases", type=int, default=240)
     ap.add_argument("--dt", type=float, default=5e-4)
+    ap.add_argument("--tau_tilde", type=float, default=5e-7)
     ap.add_argument("--nx", type=int, default=512)
     ap.add_argument("--nv", type=int, default=256)
     ap.add_argument("--picard_tol", type=float, default=1e-8)
@@ -57,10 +58,10 @@ def main():
         # 70%: tau = 5e-7
         # 30%: tau = 5e-7 * 10^{U[-0.3, +0.3]}  ≈ 0.5x .. 2x
         if torch.rand((), generator=g_case).item() < 0.70:
-            tau = 5e-7
+            tau = args.tau_tilde
         else:
             log10_factor = (torch.rand((), generator=g_case).item() * 0.6) - 0.3
-            tau = 5e-7 * (10.0 ** log10_factor)
+            tau = args.tau_tilde * (10.0 ** log10_factor)
 
         # 安全柵（極端値が入らないように任意でクランプ）
         # ここは必要なら調整：中心近傍sweepなので基本不要だが、保険として入れておくのはアリ
