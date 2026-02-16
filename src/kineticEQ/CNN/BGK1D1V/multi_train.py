@@ -258,6 +258,8 @@ def run_sweep(
         running[gpu_id] = _RunningJob(proc, entry, fh, gpu_id)
 
     t_start = time.time()
+    t_last_agg = 0.0  # last aggregate timestamp
+    _AGG_INTERVAL = 60.0  # seconds between stats refresh
 
     while queue or running:
         _poll()
@@ -268,6 +270,15 @@ def run_sweep(
             gpu_id = free_gpus.pop(0)
             entry = queue.pop(0)
             _launch(gpu_id, entry)
+
+        # periodic stats update (files only, no console spam)
+        now = time.time()
+        if now - t_last_agg >= _AGG_INTERVAL:
+            try:
+                aggregate_results(save_root_path, manifest, quiet=True)
+            except Exception:
+                pass  # never crash the sweep loop for stats
+            t_last_agg = now
 
         if running:
             time.sleep(poll_interval)
@@ -351,8 +362,13 @@ def _parse_run_log(run_dir: Path) -> dict[str, Any] | None:
     }
 
 
-def aggregate_results(save_root: Path, manifest: list[dict] | None = None):
-    """Read log.jsonl from each run and produce ranked summary + TSV stats."""
+def aggregate_results(save_root: Path, manifest: list[dict] | None = None, *,
+                      quiet: bool = False):
+    """Read log.jsonl from each run and produce ranked summary + TSV stats.
+
+    If quiet=True, only write files (sweep_stats.tsv, sweep_summary.json)
+    without printing to console.  Used for periodic mid-sweep updates.
+    """
     if manifest is None:
         mp = save_root / "sweep_manifest.json"
         if not mp.exists():
@@ -409,7 +425,8 @@ def aggregate_results(save_root: Path, manifest: list[dict] | None = None):
         results.append(row)
 
     if not results:
-        print("No results to aggregate.")
+        if not quiet:
+            print("No results to aggregate.")
         return
 
     # --- sort by best_speed desc (primary), best_val asc (secondary) ---
@@ -464,6 +481,13 @@ def aggregate_results(save_root: Path, manifest: list[dict] | None = None):
             ]
             f.write("\t".join(cells) + "\n")
 
+    # --- save JSON ---
+    summary_path = save_root / "sweep_summary.json"
+    summary_path.write_text(json.dumps(results, indent=2, ensure_ascii=False))
+
+    if quiet:
+        return
+
     # --- console summary ---
     n_ok = sum(1 for r in results if r["status"] == "ok")
     n_total = len(results)
@@ -495,9 +519,6 @@ def aggregate_results(save_root: Path, manifest: list[dict] | None = None):
                   f"  {r.get('final_epoch',''):>3}  {r.get('total_train_sec',0):7.0f}"
                   f"  {rt_mae:>9}  {rt_max:>9}")
 
-    # --- save JSON ---
-    summary_path = save_root / "sweep_summary.json"
-    summary_path.write_text(json.dumps(results, indent=2, ensure_ascii=False))
     print(f"\nFiles written:")
     print(f"  {tsv_path}")
     print(f"  {summary_path}")
