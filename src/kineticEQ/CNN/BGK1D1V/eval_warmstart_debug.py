@@ -294,8 +294,10 @@ def run_case_baseline_input(
     for s in range(n_steps):
 
         # 10% interval logging
-        if s % (n_steps // 10) == 0:
+        log_stride = max(1, n_steps // 10)
+        if s % log_stride == 0 or s == n_steps - 1:
             print(f"[log] tf step {s}/{n_steps}", flush=True)
+
         # ============================================================
         # (A) true moments from BASE at time t=s  (BEFORE stepping base)
         # ============================================================
