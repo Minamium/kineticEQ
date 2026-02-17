@@ -292,7 +292,9 @@ def run_case_baseline_input(
     t0_all = _now_sync(device)
 
     for s in range(n_steps):
-        if s % 100 == 0:
+
+        # 10% interval logging
+        if s % (n_steps // 10) == 0:
             print(f"[log] tf step {s}/{n_steps}", flush=True)
         # ============================================================
         # (A) true moments from BASE at time t=s  (BEFORE stepping base)
