@@ -165,6 +165,8 @@ def step(
         ws.fn_tmp[0, :].copy_(f_bc_l)
         ws.fn_tmp[-1, :].copy_(f_bc_r)
 
+        
+
         # 正規化誤差
         df  = torch.abs(ws.fn_tmp - ws.fz)
         ref = torch.maximum(torch.abs(ws.fn_tmp), torch.abs(ws.fz))
