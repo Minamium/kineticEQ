@@ -48,6 +48,7 @@ def build_cfg(
     picard_iter: int = 1000,
     picard_tol: float = 1e-3,
     abs_tol: float = 1e-13,
+    conv_type: str = "f",
     aa_enable: bool = False,
     aa_m: int = 6,
     aa_beta: float = 1.0,
@@ -57,6 +58,10 @@ def build_cfg(
     aa_alpha_max: float = 50.0,
     moments_cnn_modelpath: str | None = None,
 ) -> Config:
+    conv_type_norm = str(conv_type).lower()
+    if conv_type_norm not in ("f", "w"):
+        raise ValueError(f"invalid conv_type={conv_type!r}, expected 'f' or 'w'")
+
     scheme_params = BGK1D.implicit.Params(
         picard_iter=int(picard_iter),
         picard_tol=float(picard_tol),
@@ -79,6 +84,8 @@ def build_cfg(
         scheme_params = replace(scheme_params, aa_reg=float(aa_reg))
     if "aa_alpha_max" in fnames:
         scheme_params = replace(scheme_params, aa_alpha_max=float(aa_alpha_max))
+    if "conv_type" in fnames:
+        scheme_params = replace(scheme_params, conv_type=conv_type_norm)
 
     if moments_cnn_modelpath is not None and str(moments_cnn_modelpath) != "":
         if "moments_cnn_modelpath" in fnames:
@@ -443,6 +450,7 @@ def parse_args():
     p.add_argument("--picard_iter", type=int, default=10_000)
     p.add_argument("--picard_tol", type=float, default=1e-3)
     p.add_argument("--abs_tol", type=float, default=1e-13)
+    p.add_argument("--conv_type", type=str, choices=["f", "w"], default="f", help="Picard convergence metric: f (distribution) or w (moments)")
 
     p.add_argument("--aa_enable", action="store_true", help="enable Anderson Acceleration in implicit Picard")
     p.add_argument("--aa_m", type=int, default=6)
@@ -484,6 +492,7 @@ def main():
             "picard_iter": int(args.picard_iter),
             "picard_tol": float(args.picard_tol),
             "abs_tol": float(args.abs_tol),
+            "conv_type": str(args.conv_type),
             "aa_enable": bool(args.aa_enable),
             "aa_m": int(args.aa_m),
             "aa_beta": float(args.aa_beta),
@@ -513,6 +522,7 @@ def main():
             picard_iter=int(args.picard_iter),
             picard_tol=float(args.picard_tol),
             abs_tol=float(args.abs_tol),
+            conv_type=str(args.conv_type),
             aa_enable=bool(aa_enable_effective),
             aa_m=int(args.aa_m),
             aa_beta=float(args.aa_beta),
@@ -543,6 +553,7 @@ def main():
                 picard_iter=int(args.picard_iter),
                 picard_tol=float(args.picard_tol),
                 abs_tol=float(args.abs_tol),
+                conv_type=str(args.conv_type),
                 aa_enable=bool(aa_enable_effective),
                 aa_m=int(args.aa_m),
                 aa_beta=float(args.aa_beta),

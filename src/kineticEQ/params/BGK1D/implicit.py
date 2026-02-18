@@ -3,9 +3,13 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Params:
+    # --- Picard iteration ---
     picard_iter: int = 16
     picard_tol: float = 1e-4
     abs_tol: float = 1e-16
+    
+    # --- convergence type ---
+    conv_type: str = "f"
 
     # --- Anderson Acceleration on W=(n,nu,T) ---
     aa_enable: bool = False

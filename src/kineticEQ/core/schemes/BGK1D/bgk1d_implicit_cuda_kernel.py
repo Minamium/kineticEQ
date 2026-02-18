@@ -46,6 +46,9 @@ def step(
     picard_iter = cfg.model_cfg.scheme_params.picard_iter
     picard_tol = cfg.model_cfg.scheme_params.picard_tol
     abs_tol = cfg.model_cfg.scheme_params.abs_tol
+    conv_type = str(getattr(cfg.model_cfg.scheme_params, "conv_type", "f")).lower()
+    if conv_type not in ("f", "w"):
+        raise ValueError(f"invalid conv_type={conv_type!r}, expected 'f' or 'w'")
 
     aa_enable_cfg = bool(getattr(cfg.model_cfg.scheme_params, "aa_enable", False))
     aa_m = max(int(getattr(cfg.model_cfg.scheme_params, "aa_m", 0)), 0)
@@ -167,15 +170,41 @@ def step(
 
         
 
-        # 正規化誤差
-        df  = torch.abs(ws.fn_tmp - ws.fz)
-        ref = torch.maximum(torch.abs(ws.fn_tmp), torch.abs(ws.fz))
-        den = abs_tol + picard_tol * ref
+        # 正規化誤差による収束判定
+        cuda_module.moments_n_nu_T(ws.fn_tmp, state.v, dv, ws.n_new, ws.nu_new, ws.T_new)
+        if conv_type == "f":
+            df  = torch.abs(ws.fn_tmp - ws.fz)
+            ref = torch.maximum(torch.abs(ws.fn_tmp), torch.abs(ws.fz))
+            den = abs_tol + picard_tol * ref
 
-        residual = torch.max(df / den)
-        residual_val = float((torch.max(df) / torch.max(ref)).item())
-        std_residual_val = float(residual.item())
+            residual = torch.max(df / den)
+            residual_val = float(torch.max(df / torch.clamp(ref, min=abs_tol)).item())
+            std_residual_val = float(residual.item())
 
+        else:
+            df_n = torch.abs(ws.n_new - ws.n)
+            df_nu = torch.abs(ws.nu_new - ws.nu)
+            df_T = torch.abs(ws.T_new - ws.T)
+
+            ref_n = torch.maximum(torch.abs(ws.n_new), torch.abs(ws.n))
+            ref_nu = torch.maximum(torch.abs(ws.nu_new), torch.abs(ws.nu))
+            ref_T = torch.maximum(torch.abs(ws.T_new), torch.abs(ws.T))
+
+            den_n = abs_tol + picard_tol * ref_n
+            den_nu = abs_tol + picard_tol * ref_nu
+            den_T = abs_tol + picard_tol * ref_T
+
+            r_n = torch.max(df_n / den_n)
+            r_nu = torch.max(df_nu / den_nu)
+            r_T = torch.max(df_T / den_T)
+            residual = torch.maximum(r_n, torch.maximum(r_nu, r_T))
+
+            rel_n = torch.max(df_n / torch.clamp(ref_n, min=abs_tol))
+            rel_nu = torch.max(df_nu / torch.clamp(ref_nu, min=abs_tol))
+            rel_T = torch.max(df_T / torch.clamp(ref_T, min=abs_tol))
+            residual_val = float(torch.maximum(rel_n, torch.maximum(rel_nu, rel_T)).item())
+            std_residual_val = float(residual.item())
+ 
         latest = ws.fn_tmp
 
         if residual <= 1.0:
@@ -183,7 +212,6 @@ def step(
 
         # 次反復用 moments
         if z + 1 < picard_iter:
-            cuda_module.moments_n_nu_T(ws.fn_tmp, state.v, dv, ws.n_new, ws.nu_new, ws.T_new)
 
             if aa_enable:
                 aa_should_apply = (
