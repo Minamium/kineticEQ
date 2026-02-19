@@ -276,12 +276,6 @@ def step(
         "picard_iter": z + 1,
         "picard_residual": residual_val,
         "std_picard_residual": std_residual_val,
-        "aa_enable": aa_enable,
-        "aa_applied": aa_applied,
-        "aa_restart": aa_restarted,
-        "aa_stride": aa_stride,
-        "aa_start_iter": aa_start_iter,
-        "w_residual": w_residual_val,
     }
 
     return state, benchlog
