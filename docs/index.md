@@ -6,46 +6,33 @@ nav_order: 1
 # kineticEQ
 
 PyTorch ベースの運動論方程式（BGK 方程式）ソルバー。
-カスタム CUDA/C++ カーネルによる高速計算と、Python API による柔軟な設定を両立する。
+Python API (`Config` / `Engine`) と、BGK1D 向けの CUDA/C++ 拡張カーネルを統合している。
 
-## 特徴
+## 現在の実装ステータス
 
-- **複数の数値スキーム** -- 陽解法 (`explicit`)、陰解法 (`implicit`, Picard 反復)、HOLO 法 (`holo`)
-- **2 種類の計算バックエンド** -- 純 PyTorch (`torch`) およびカスタム CUDA カーネル (`cuda_kernel`)
-- **CNN Warmstart** -- 陰解法の初期推定値を CNN で予測し、Picard 反復回数を削減
-- **組み込みベンチマーク・収束テスト** -- `analysis` モジュールによるスキーム比較、収束次数検証、タイミング計測
+| モデル | スキーム | backend=`torch` | backend=`cuda_kernel` | 状態 |
+|---|---|---|---|---|
+| `BGK1D1V` | `explicit` | 対応 | 対応 | 実運用可能 |
+| `BGK1D1V` | `implicit` | 未対応 | 対応 | 実運用可能 |
+| `BGK1D1V` | `holo` | 未対応 | 対応 | 実運用可能 |
+| `BGK2D2V` | `explicit` | 実装未完了 | 未登録 | 現状は Engine 実行不可 |
 
-## 対応モデル
+補足:
+- `Config` では `scheme="holo_nn"` を受理するが、stepper 未登録のため実行は不可。
+- BGK1D の `cuda_kernel` 経路は実質 `float64` 前提（拡張側の dtype チェックが `kDouble` 固定）。
 
-| モデル | 説明 |
-|--------|------|
-| `BGK1D1V` | 1 次元空間 + 1 次元速度空間の BGK 方程式 |
-| `BGK2D2V` | 2 次元空間 + 2 次元速度空間の BGK 方程式 |
+## 主要機能
 
-## Quick Start
-
-```python
-from kineticEQ import Config, Engine, BGK1D
-
-cfg = Config(
-    model="BGK1D1V",
-    scheme="explicit",
-    backend="cuda_kernel",
-    device="cuda",
-    model_cfg=BGK1D.ModelConfig(
-        grid=BGK1D.Grid1D1V(nx=256, nv=128, Lx=1.0, v_max=10.0),
-        time=BGK1D.TimeConfig(dt=1e-6, T_total=0.01),
-        params=BGK1D.BGK1D1VParams(tau_tilde=1e-5),
-    )
-)
-
-engine = Engine(cfg)
-result = engine.run()
-```
+- **BGK1D の複数スキーム**: `explicit` / `implicit(Picard)` / `holo(HOLO)`
+- **CUDA 拡張**: fused explicit、implicit 系列、cuSPARSE gtsv、AA、LO block-tridiag
+- **CNN warmstart**: implicit Picard の初期モーメント推定
+- **分析モジュール**: benchmark / convergence / scheme comparison + plotting
 
 ## Documentation
 
 - [Installation](getting-started/installation.md)
 - [Engine Overview](getting-started/Engine_overview.md)
+- [Examples](getting-started/examples.md)
 - [Models](Models/index.md)
 - [API Reference](api_Reference/api_lib.md)
+- [Implementations](Implementations/index.md)

@@ -9,33 +9,31 @@ nav_order: 11
 ## 動作要件
 
 - **Python** >= 3.10
-- **CUDA 対応 GPU** (`cuda_kernel` バックエンドを使う場合)
-- **C++ コンパイラ** (gcc / g++) -- CUDA カーネルの JIT コンパイルに必要
+- **PyTorch** >= 2.0
+- `cuda_kernel` を使う場合:
+  - CUDA 対応 GPU
+  - nvcc / C++ コンパイラ
 
-## 依存パッケージ
+## 必須依存
 
-`pyproject.toml` で宣言されている必須依存:
+`pyproject.toml`:
 
-| パッケージ | 用途 |
-|-----------|------|
-| `torch` >= 2.0 | テンソル演算、CUDA バックエンド |
-| `numpy` | 配列操作 |
-| `scipy` | 数値計算ユーティリティ |
-| `tqdm` | 進捗バー表示 |
-| `ninja` | CUDA カーネル JIT コンパイルの高速化 |
-| `setuptools`, `wheel` | ビルド |
-| `zarr`, `numcodecs` | データセット I/O |
+- `torch>=2.0`
+- `numpy`
+- `scipy`
+- `tqdm`
+- `ninja`
+- `setuptools`
+- `wheel`
+- `zarr`
+- `numcodecs`
 
-オプション依存 (`pip install kineticEQ[viz]`):
+オプション (`pip install -e ".[viz]"`):
 
-| パッケージ | 用途 |
-|-----------|------|
-| `matplotlib` | プロット |
-| `plotly` >= 5 | インタラクティブ可視化 |
+- `matplotlib`
+- `plotly>=5`
 
 ## インストール
-
-### 開発インストール（推奨）
 
 ```bash
 git clone https://github.com/Minamium/kineticEQ.git
@@ -43,24 +41,39 @@ cd kineticEQ
 pip install -e ".[viz]"
 ```
 
-### CUDA カーネルについて
+## CUDA 拡張の JIT コンパイル
 
-`cuda_kernel` バックエンドを使用すると、初回実行時に `torch.utils.cpp_extension` を通じて CUDA カーネルが JIT コンパイルされる。
-コンパイル済みキャッシュはデフォルトで `~/.cache/torch_extensions/` に保存される。
+`backend="cuda_kernel"` の初回実行時に `torch.utils.cpp_extension.load` で拡張がビルドされる。
 
-環境変数 `TORCH_EXTENSIONS_DIR` でキャッシュの保存先を変更できる:
+ビルド対象（`src/kineticEQ/cuda_kernel/compile.py`）:
+
+- `load_explicit_fused()`
+- `load_implicit_fused()`
+- `load_gtsv()`
+- `load_lo_blocktridiag()`
+- `load_implicit_AA()`
+
+`load_all_kernels()` は現行実装には存在しない。
+
+キャッシュ先の変更:
 
 ```bash
 export TORCH_EXTENSIONS_DIR="/path/to/cache"
 ```
 
-### HPC クラスタでの注意点
+## HPC での注意
 
-- 計算ノードからインターネットに接続できない場合、ログインノードで事前に `pip install` を完了しておく
-- JIT コンパイルキャッシュをジョブ投入前に生成しておくと、walltime の無駄を防げる:
+- 事前にログインノードで依存を導入
+- ジョブ前に必要カーネルを明示ロードしてキャッシュしておく
 
 ```python
-from kineticEQ.cuda_kernel.compile import load_all_kernels
+from kineticEQ.cuda_kernel.compile import (
+    load_explicit_fused,
+    load_implicit_fused,
+    load_gtsv,
+    load_lo_blocktridiag,
+    load_implicit_AA,
+)
 ```
 
-- `TORCH_CUDA_ARCH_LIST` 環境変数で対象 GPU アーキテクチャを指定する（例: V100 は `"7.0"`, A100 は `"8.0"`）
+- `TORCH_CUDA_ARCH_LIST` を対象 GPU に合わせる

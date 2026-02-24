@@ -903,6 +903,8 @@ def plot_moment_cnn_test(
         ax5.set_xscale("log")
         ax5.set_xlabel("Picard Tolerance", fontsize=fs_l)
         ax5.set_ylabel("Mean Step Time [s]", fontsize=fs_l)
+        # Walltime axis should be zero-based to avoid misleading comparisons.
+        ax5.set_ylim(bottom=0.0)
         ax5.set_title(plot_5_title or f"Mean Step Time per Picard Tolerance (GPU: {gpu_title}){ref_title45}{title_suffix}",
                       fontsize=fs_t)
         ax5.tick_params(labelsize=fs_tk)
