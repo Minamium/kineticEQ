@@ -12,6 +12,7 @@
     
     "loss_kind": "smoothl1",
     "delta_type": "dnu",
+    "conv_type": "f",
     "loss_softmax_beta": 20.0,
     "loss_eps": 1e-6,
     "nb": 10,

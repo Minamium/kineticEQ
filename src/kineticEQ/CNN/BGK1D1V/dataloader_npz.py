@@ -37,7 +37,7 @@ class BGK1D1VNPZDeltaDataset(Dataset):
     X: (5, nx) = [n(t), u(t), T(t), log10(dt), log10(tau)]
 
     Y (delta): (3, nx)
-      target="dW":   [Δn, Δu, ΔT]  (legacy)
+      target="dw":   [Δn, Δu, ΔT]  (legacy)
       target="dnu":  [Δn, Δ(nu), ΔT]  (recommended)
     """
 
@@ -53,15 +53,16 @@ class BGK1D1VNPZDeltaDataset(Dataset):
         super().__init__()
         if split not in ("train", "val", "test"):
             raise ValueError(f"split must be train/val/test, got {split}")
-        if target not in ("dW", "dnu"):
-            raise ValueError(f"target must be 'dW' or 'dnu', got {target}")
+        target_norm = str(target).strip().lower()
+        if target_norm not in ("dw", "dnu"):
+            raise ValueError(f"target must be 'dw' or 'dnu', got {target}")
 
         self.manifest_path = Path(manifest_path)
         self.manifest = _load_manifest(self.manifest_path)
         self.dtype = dtype
         self.mmap = mmap
         self.cache_npz = cache_npz
-        self.target = target
+        self.target = target_norm
         self._const = {}
 
         split_case_ids = set(self.manifest["splits"][split])
@@ -162,7 +163,7 @@ class BGK1D1VNPZDeltaDataset(Dataset):
         dn = n_tp1 - n_t
         dT = T_tp1 - T_t
 
-        if self.target == "dW":
+        if self.target == "dw":
             du = u_tp1 - u_t
             y = torch.stack([dn, du, dT], dim=0).to(dtype=self.dtype)
         else:

@@ -67,6 +67,13 @@ def parse_args():
 
     # learning target
     ap.add_argument("--delta_type", type=str, default="dnu", choices=["dnu", "dw"])
+    ap.add_argument(
+        "--conv_type",
+        type=str,
+        default="f",
+        choices=["f", "w"],
+        help="Picard convergence metric for warm_eval: f (distribution) or w (moments)",
+    )
 
     # shuffle
     ap.add_argument("--no_shuffle", action="store_true")
@@ -494,6 +501,7 @@ def main():
                     picard_iter=int(args.warm_eval_picard_iter),
                     picard_tol=float(args.warm_eval_picard_tol),
                     abs_tol=float(args.warm_eval_abs_tol),
+                    conv_type=str(args.conv_type),
                     **_aa_kw,
                     moments_cnn_modelpath=None,           # baseline
                 )
@@ -509,6 +517,7 @@ def main():
                     picard_iter=int(args.warm_eval_picard_iter),
                     picard_tol=float(args.warm_eval_picard_tol),
                     abs_tol=float(args.warm_eval_abs_tol),
+                    conv_type=str(args.conv_type),
                     **_aa_kw,
                     moments_cnn_modelpath=str(last_ckpt),  # warmstart enabled
                 )
