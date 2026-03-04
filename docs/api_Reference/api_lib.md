@@ -28,11 +28,10 @@ Config(
 ```
 
 - `model`: `BGK1D1V` / `BGK2D2V`
-- `scheme`: `explicit` / `implicit` / `holo` / `holo_nn`(予約)
+- `scheme`: `explicit` / `implicit` / `holo`
 - `backend`: `torch` / `cuda_kernel`
 
 注記:
-- `holo_nn` は stepper 未登録
 - `BGK2D2V` は現行 Engine 経路では未対応
 
 ## Engine

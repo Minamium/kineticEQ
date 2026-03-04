@@ -14,7 +14,7 @@ nav_order: 32
 
 - `config.py`
   - Enum 正規化 (`parse_enum`)
-  - alias (`exp`, `imp`, `hl`, `hl_nn` など)
+  - alias (`exp`, `imp`, `hl` など)
   - `Config` dataclass
 - `engine.py`
   - `model_cfg` 補完

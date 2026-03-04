@@ -29,4 +29,3 @@ nav_order: 31
 ## 未整備領域
 
 - `BGK2D2V` の Engine 実行経路
-- `scheme="holo_nn"` の stepper

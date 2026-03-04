@@ -30,7 +30,7 @@ cfg = Config(
 | フィールド | デフォルト | 備考 |
 |---|---:|---|
 | `model` | `"BGK1D1V"` | `BGK1D1V` / `BGK2D2V` |
-| `scheme` | `"explicit"` | `explicit` / `implicit` / `holo` / `holo_nn`(予約) |
+| `scheme` | `"explicit"` | `explicit` / `implicit` / `holo` |
 | `backend` | `"torch"` | `torch` / `cuda_kernel` |
 | `device` | `"cuda"` | `resolve_device` で検証 |
 | `dtype` | `"float64"` | `float32` / `float64` |
@@ -41,7 +41,7 @@ cfg = Config(
 ### エイリアス
 
 - `model`: `bgk1d`, `bgk1d1v`, `bgk2d2v`
-- `scheme`: `exp`, `imp`, `hl`, `hl_nn`
+- `scheme`: `exp`, `imp`, `hl`
 - `backend`: `pytorch`, `cuda_backend`
 - `dtype`: `fp32`, `fp64`
 
@@ -123,5 +123,4 @@ result = engine.run()
 ## 6. 注意点（実装準拠）
 
 - `BGK1D1V + cuda_kernel` は `float64` 前提
-- `scheme="holo_nn"` は Config 受理するが、現時点で stepper 未登録
 - `BGK2D2V` は Engine 経路が未整備で、現状は実行不可

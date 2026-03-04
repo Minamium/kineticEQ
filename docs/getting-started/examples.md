@@ -107,4 +107,3 @@ plot_timing_benchmark(out, out_dir="./results/benchmarks")
 ## 5. 現在は使えない構成
 
 - `model="BGK2D2V"` は現行 Engine 実装では実行不可
-- `scheme="holo_nn"` は Config 受理するが stepper 未登録
