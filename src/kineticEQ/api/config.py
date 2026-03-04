@@ -41,7 +41,6 @@ class Scheme(str, Enum):
     EXPLICIT = "explicit"
     IMPLICIT = "implicit"
     HOLO = "holo"
-    HOLO_NN = "holo_nn"
 
 # 計算カーネルのバックエンド
 class Backend(str, Enum):
@@ -86,8 +85,7 @@ class Config:
         object.__setattr__(self, "scheme", parse_enum(Scheme, self.scheme,
                                  aliases={"exp": Scheme.EXPLICIT,
                                           "imp": Scheme.IMPLICIT,
-                                          "hl": Scheme.HOLO,
-                                          "hl_nn": Scheme.HOLO_NN}))
+                                          "hl": Scheme.HOLO}))
         object.__setattr__(self, "backend", parse_enum(Backend, self.backend,
                                  aliases={"pytorch": Backend.TORCH,
                                           "cuda_backend": Backend.CUDA_KERNEL}))
