@@ -21,4 +21,6 @@ class Params:
     aa_alpha_max: float = 50.0
     
     # --- CNN warmstart ---
+    # None: auto(=pathがあれば有効), False: 明示無効, True: 明示有効(ただしpath必須)
+    warm_enable: bool | None = None
     moments_cnn_modelpath: str | None = None

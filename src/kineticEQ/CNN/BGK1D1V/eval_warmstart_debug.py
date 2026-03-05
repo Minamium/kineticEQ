@@ -56,6 +56,7 @@ def build_cfg(
     aa_start_iter: int = 2,
     aa_reg: float = 1e-10,
     aa_alpha_max: float = 50.0,
+    warm_enable: bool | None = None,
     moments_cnn_modelpath: str | None = None,
 ) -> Config:
     conv_type_norm = str(conv_type).lower()
@@ -86,6 +87,11 @@ def build_cfg(
         scheme_params = replace(scheme_params, aa_alpha_max=float(aa_alpha_max))
     if "conv_type" in fnames:
         scheme_params = replace(scheme_params, conv_type=conv_type_norm)
+    if warm_enable is not None:
+        if "warm_enable" in fnames:
+            scheme_params = replace(scheme_params, warm_enable=bool(warm_enable))
+        elif "Warm_enable" in fnames:
+            scheme_params = replace(scheme_params, Warm_enable=bool(warm_enable))
 
     if moments_cnn_modelpath is not None and str(moments_cnn_modelpath) != "":
         if "moments_cnn_modelpath" in fnames:
@@ -459,6 +465,13 @@ def parse_args():
     p.add_argument("--aa_start_iter", type=int, default=2, help="first Picard iteration index to allow AA")
     p.add_argument("--aa_reg", type=float, default=1e-10)
     p.add_argument("--aa_alpha_max", type=float, default=50.0)
+    p.add_argument(
+        "--warm_enable",
+        type=str,
+        choices=["auto", "true", "false"],
+        default="auto",
+        help="warm-start switch: auto(pathがあれば有効) / true / false",
+    )
 
     p.add_argument("--out", type=str, required=True)
     p.add_argument("--device", type=str, default="cuda")
@@ -470,6 +483,16 @@ def main():
     print(f"args parsed: eval_type={args.eval_type}", flush=True)
     device = torch.device(args.device)
     print(f"device={device}", flush=True)
+
+    warm_enable_cfg: bool | None
+    if str(args.warm_enable) == "auto":
+        warm_enable_cfg = None
+    elif str(args.warm_enable) == "true":
+        warm_enable_cfg = True
+    elif str(args.warm_enable) == "false":
+        warm_enable_cfg = False
+    else:
+        raise ValueError(f"invalid warm_enable={args.warm_enable!r}")
 
     aa_enable_effective = bool(args.aa_enable)
 
@@ -500,6 +523,7 @@ def main():
             "aa_start_iter": int(args.aa_start_iter),
             "aa_reg": float(args.aa_reg),
             "aa_alpha_max": float(args.aa_alpha_max),
+            "warm_enable": warm_enable_cfg,
             "device": str(args.device),
             "gpu_name": gpu_name,
             "eval_type": str(args.eval_type),
@@ -530,6 +554,7 @@ def main():
             aa_start_iter=int(args.aa_start_iter),
             aa_reg=float(args.aa_reg),
             aa_alpha_max=float(args.aa_alpha_max),
+            warm_enable=None,
             moments_cnn_modelpath=None,
         )
 
@@ -561,6 +586,7 @@ def main():
                 aa_start_iter=int(args.aa_start_iter),
                 aa_reg=float(args.aa_reg),
                 aa_alpha_max=float(args.aa_alpha_max),
+                warm_enable=warm_enable_cfg,
                 moments_cnn_modelpath=str(args.ckpt),
             )
             out = run_case_pair(

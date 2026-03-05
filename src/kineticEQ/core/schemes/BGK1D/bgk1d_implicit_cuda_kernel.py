@@ -34,6 +34,7 @@ def step(
     aa_module = None,
     model: MomentCNN1D | None = None,
     model_meta: dict | None = None,
+    warmstart_enabled: bool = False,
 ) -> tuple[State1D1V, dict]:
     dt = float(cfg.model_cfg.time.dt)
     dx = float(state.dx)
@@ -97,7 +98,7 @@ def step(
         external_W_injected = True
 
     # CNN warm-start: W=(n,nu,T) を直接更新
-    if (cfg.model_cfg.scheme_params.moments_cnn_modelpath is not None) and (not external_W_injected):
+    if warmstart_enabled and (not external_W_injected):
         if model is None:
             raise RuntimeError("moments_cnn_modelpath is set but model is None")
 
@@ -325,10 +326,27 @@ def build_stepper(cfg: Config, state: State1D1V) -> Stepper:
 
     inv_sqrt_2pi = 1.0 / math.sqrt(2.0 * math.pi)
 
-    # モデルパスがあればロード
-    if cfg.model_cfg.scheme_params.moments_cnn_modelpath is not None:
+    scheme_params = cfg.model_cfg.scheme_params
+    model_path = getattr(scheme_params, "moments_cnn_modelpath", None)
+    has_model_path = (model_path is not None) and (str(model_path) != "")
+
+    warm_enable_cfg = getattr(scheme_params, "warm_enable", None)
+    if warm_enable_cfg is None:
+        warm_enable_cfg = getattr(scheme_params, "Warm_enable", None)
+
+    if warm_enable_cfg is None:
+        # auto: path があれば warm-start 有効
+        warmstart_enabled = has_model_path
+    else:
+        # 明示指定: False のみ無効化。True でも path が無ければ無効。
+        warmstart_enabled = bool(warm_enable_cfg) and has_model_path
+        if bool(warm_enable_cfg) and (not has_model_path):
+            logger.warning("warm_enable=True but moments_cnn_modelpath is not set; warm-start is disabled")
+
+    # 有効時のみモデルロード
+    if warmstart_enabled:
         model, model_meta = load_moments_cnn_model(
-            cfg.model_cfg.scheme_params.moments_cnn_modelpath,
+            str(model_path),
             device=state.f.device
         )
     else:
@@ -349,6 +367,7 @@ def build_stepper(cfg: Config, state: State1D1V) -> Stepper:
             aa_module,
             model,
             model_meta,
+            warmstart_enabled,
         )
         _stepper.benchlog = benchlog  # bench-logを属性として載せる
 
