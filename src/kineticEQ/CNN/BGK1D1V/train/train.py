@@ -1,4 +1,4 @@
-# kineticEQ/CNN/BGK1D1V/train.py
+# kineticEQ/CNN/BGK1D1V/train/train.py
 from __future__ import annotations
 
 import argparse
@@ -11,15 +11,16 @@ from tqdm.auto import tqdm
 import torch
 from torch.utils.data import DataLoader
 
-from .models import MomentCNN1D
-from .dataloader_npz import BGK1D1VNPZDeltaDataset
+from ..util.models import MomentCNN1D
+from ..gen_traindata_v1.dataloader_npz import BGK1D1VNPZDeltaDataset
+from ..gen_traindata_v2.dataloader_pt import BGK1D1VShardDeltaDataset
 
 # --- optional warmstart debug eval (epoch-end) ---
-from .eval_warmstart_debug import build_cfg, run_case_pair
+from ..evaluation.eval_warmstart_debug import build_cfg, run_case_pair
 
 
 # ---------------- losses ----------------
-from .losses import (
+from ..util.losses import (
     compute_stdW_residuals,
     build_shock_mask_from_x,
     std_w_loss_from_residuals_shock,
@@ -30,14 +31,47 @@ def save_json(path: Path, obj):
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False))
 
 
-def make_loader(manifest: str, split: str, batch: int, workers: int, pin: bool, prefetch_factor: int, target: str, shuffle: bool):
-    ds = BGK1D1VNPZDeltaDataset(
-        manifest_path=manifest,
-        split=split,
-        mmap=True,
-        cache_npz=True,
-        target=target,
-    )
+def _read_manifest_format(manifest: str) -> str | None:
+    try:
+        obj = json.loads(Path(manifest).read_text())
+    except Exception:
+        return None
+    fmt = obj.get("format", None)
+    return str(fmt) if fmt is not None else None
+
+
+def make_loader(
+    manifest: str,
+    split: str,
+    batch: int,
+    workers: int,
+    pin: bool,
+    prefetch_factor: int,
+    target: str,
+    shuffle: bool,
+    *,
+    split_key: str,
+    cache_shards: int,
+):
+    manifest_format = _read_manifest_format(manifest)
+
+    if manifest_format == "kineticEQ_BGK1D1V_pt_v2":
+        ds = BGK1D1VShardDeltaDataset(
+            dataset_manifest_path=manifest,
+            split=split,
+            split_key=split_key,
+            target=target,
+            cache_shards=int(cache_shards),
+        )
+    else:
+        ds = BGK1D1VNPZDeltaDataset(
+            manifest_path=manifest,
+            split=split,
+            mmap=True,
+            cache_npz=True,
+            target=target,
+        )
+
     dl = DataLoader(
         ds,
         batch_size=batch,
@@ -54,6 +88,8 @@ def make_loader(manifest: str, split: str, batch: int, workers: int, pin: bool, 
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", type=str, required=True)
+    ap.add_argument("--split_key", type=str, default="split_iid", help="split key for v2 manifest")
+    ap.add_argument("--cache_shards", type=int, default=2, help="LRU shard cache size for v2 loader")
     ap.add_argument("--device", type=str, default="cuda")
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--batch", type=int, default=32)
@@ -195,10 +231,30 @@ def main():
             min_lr=float(args.sched_min_lr),
         )
 
-    train_ds, train_dl = make_loader(args.manifest, "train", args.batch, args.workers, pin=pin, prefetch_factor=args.prefetch_factor, 
-                                     target=args.delta_type, shuffle = (not args.no_shuffle))
-    val_ds,   val_dl   = make_loader(args.manifest, "val",   args.batch, args.workers, pin=pin, prefetch_factor=args.prefetch_factor, 
-                                     target=args.delta_type, shuffle=False)
+    train_ds, train_dl = make_loader(
+        args.manifest,
+        "train",
+        args.batch,
+        args.workers,
+        pin=pin,
+        prefetch_factor=args.prefetch_factor,
+        target=args.delta_type,
+        shuffle=(not args.no_shuffle),
+        split_key=str(args.split_key),
+        cache_shards=int(args.cache_shards),
+    )
+    val_ds, val_dl = make_loader(
+        args.manifest,
+        "val",
+        args.batch,
+        args.workers,
+        pin=pin,
+        prefetch_factor=args.prefetch_factor,
+        target=args.delta_type,
+        shuffle=False,
+        split_key=str(args.split_key),
+        cache_shards=int(args.cache_shards),
+    )
 
     best_val = float("inf")
     log_path = save_dir / "log.jsonl"

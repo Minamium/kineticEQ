@@ -7,7 +7,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 import torch
-from kineticEQ.CNN.BGK1D1V.models import MomentCNN1D
+from kineticEQ.CNN.BGK1D1V.util.models import MomentCNN1D
 
 # CNNモデルのロード
 def _load_ckpt_state(ckpt_path: str) -> tuple[dict, dict]:

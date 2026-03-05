@@ -1,17 +1,17 @@
-# kineticEQ/CNN/BGK1D1V/multi_train.py
-"""Hyperparameter sweep orchestrator for train.py.
+# kineticEQ/CNN/BGK1D1V/train/multi_train.py
+"""Hyperparameter sweep orchestrator for train/train.py.
 
 Each experiment runs as an independent subprocess on a dedicated GPU.
 No changes to train.py are required.
 
 Usage:
-  python -m kineticEQ.CNN.BGK1D1V.multi_train \\
+  python -m kineticEQ.CNN.BGK1D1V.train.multi_train \\
       --config config/multi_train.json \\
       --gpus 0,1,2,3,4,5,6,7 \\
       --save_root sweep_runs/exp001
 
   # dry-run (print commands only):
-  python -m kineticEQ.CNN.BGK1D1V.multi_train --config ... --dry_run
+  python -m kineticEQ.CNN.BGK1D1V.train.multi_train --config ... --dry_run
 
 If --config is omitted, defaults to
   kineticEQ/CNN/BGK1D1V/config/multi_train.json
@@ -35,7 +35,7 @@ _STORE_TRUE_FLAGS = frozenset({"amp", "sched_plateau", "warm_eval", "no_shuffle"
 _LIST_ARGS = frozenset({"dilation_cycle"})
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_DEFAULT_CONFIG = _SCRIPT_DIR / "config" / "multi_train.json"
+_DEFAULT_CONFIG = _SCRIPT_DIR.parent / "config" / "multi_train.json"
 
 # ---------------------------------------------------------------------------
 # sweep config
@@ -208,7 +208,7 @@ def run_sweep(
         print("\n=== DRY RUN ===")
         for m in manifest:
             cli = build_cli_args(base_args, m["sweep_params"], m["save_dir"])
-            print(f"  [{m['idx']:04d}] {sys.executable} -m kineticEQ.CNN.BGK1D1V.train "
+            print(f"  [{m['idx']:04d}] {sys.executable} -m kineticEQ.CNN.BGK1D1V.train.train "
                   + " ".join(cli))
         return
 
@@ -245,7 +245,7 @@ def run_sweep(
             return
 
         cli = build_cli_args(base_args, entry["sweep_params"], entry["save_dir"])
-        cmd = [sys.executable, "-m", "kineticEQ.CNN.BGK1D1V.train"] + cli
+        cmd = [sys.executable, "-m", "kineticEQ.CNN.BGK1D1V.train.train"] + cli
 
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu_id)}
 

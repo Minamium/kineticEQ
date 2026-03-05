@@ -10,7 +10,7 @@ from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_check_CFL import bgk1d_check
 from kineticEQ.cuda_kernel.compile import load_implicit_fused
 from kineticEQ.cuda_kernel.compile import load_gtsv
 from kineticEQ.cuda_kernel.compile import load_implicit_AA
-from kineticEQ.CNN.BGK1D1V.models import MomentCNN1D
+from kineticEQ.CNN.BGK1D1V.util.models import MomentCNN1D
 
 # CNN用ユーティリティ
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_momentCNN_util import (

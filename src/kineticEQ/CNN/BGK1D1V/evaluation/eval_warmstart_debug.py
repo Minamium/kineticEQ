@@ -1,7 +1,7 @@
-# kineticEQ/CNN/BGK1D1V/eval_warmstart_debug.py
+# kineticEQ/CNN/BGK1D1V/evaluation/eval_warmstart_debug.py
 
 # usage:
-# python -m kineticEQ.CNN.BGK1D1V.eval_warmstart_debug \
+# python -m kineticEQ.CNN.BGK1D1V.evaluation.eval_warmstart_debug \
 #   --ckpt cnn_models/bgk1d1v/best_speed.pt \
 #   --tau 5e-7 \
 #   --dt 5e-5 --T_total 0.05 \
@@ -24,7 +24,7 @@ from dataclasses import fields, replace
 
 # --- make repo importable when executed as a script ---
 _THIS = Path(__file__).resolve()
-_SRC = _THIS.parents[3]
+_SRC = _THIS.parents[4]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
@@ -45,6 +45,7 @@ def build_cfg(
     nv: int = 256,
     Lx: float = 1.0,
     v_max: float = 10.0,
+    device: str = "cuda",
     picard_iter: int = 1000,
     picard_tol: float = 1e-3,
     abs_tol: float = 1e-13,
@@ -114,7 +115,7 @@ def build_cfg(
         model="BGK1D1V",
         scheme="implicit",
         backend="cuda_kernel",
-        device="cuda",
+        device=str(device),
         model_cfg=model_cfg,
         log_level="err",
         use_tqdm=False,
@@ -543,6 +544,7 @@ def main():
             nv=int(args.nv),
             Lx=float(args.Lx),
             v_max=float(args.v_max),
+            device=str(args.device),
             picard_iter=int(args.picard_iter),
             picard_tol=float(args.picard_tol),
             abs_tol=float(args.abs_tol),
@@ -575,6 +577,7 @@ def main():
                 nv=int(args.nv),
                 Lx=float(args.Lx),
                 v_max=float(args.v_max),
+                device=str(args.device),
                 picard_iter=int(args.picard_iter),
                 picard_tol=float(args.picard_tol),
                 abs_tol=float(args.abs_tol),
