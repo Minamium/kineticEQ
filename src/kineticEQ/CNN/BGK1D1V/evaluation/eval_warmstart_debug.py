@@ -341,7 +341,9 @@ def run_case_baseline_input(
 
         # inject W for THIS step (t=s -> s+1)
         # _init_W is consumed once inside implicit stepper
-        eng_tf.stepper.ws._init_W = (n1p, n1p * u1p, T1p)
+        n1p_safe = torch.clamp(n1p, min=1e-12)
+        T1p_safe = torch.clamp(T1p, min=1e-12)
+        eng_tf.stepper.ws._init_W = (n1p_safe, n1p_safe * u1p, T1p_safe)
 
         # ============================================================
         # (D) baseline step (advance base to t=s+1)

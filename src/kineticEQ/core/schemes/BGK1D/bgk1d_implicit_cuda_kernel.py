@@ -91,9 +91,21 @@ def step(
     init_W = getattr(ws, "_init_W", None)
     if init_W is not None:
         n_init, nu_init, T_init = init_W
-        ws.n.copy_(torch.clamp(n_init, min=n_floor))
-        ws.nu.copy_(nu_init)
-        ws.T.copy_(torch.clamp(T_init, min=T_floor))
+        n_safe = torch.clamp(n_init, min=n_floor)
+        T_safe = torch.clamp(T_init, min=T_floor)
+
+        # nのclamp後も u=nu/n が大きく破綻しないよう、uを一度復元して再投影
+        n_den = torch.where(
+            torch.abs(n_init) >= n_floor,
+            n_init,
+            torch.full_like(n_init, n_floor),
+        )
+        u_init = nu_init / n_den
+        u_init = torch.nan_to_num(u_init, nan=0.0, posinf=0.0, neginf=0.0)
+
+        ws.n.copy_(n_safe)
+        ws.nu.copy_(n_safe * u_init)
+        ws.T.copy_(T_safe)
         ws._init_W = None
         external_W_injected = True
 

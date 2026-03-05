@@ -25,15 +25,17 @@ FAMILY_NAMES = (
     "double_hotspot_isobaric",
     "velocity_ramp",
     "thermal_velocity_mixed",
+    "multi_region_random",
 )
 
 DEFAULT_FAMILY_WEIGHTS = (
-    "shock_basic:0.25,"
-    "shock_strong:0.20,"
-    "isobaric_contact:0.15,"
-    "double_hotspot_isobaric:0.15,"
-    "velocity_ramp:0.15,"
-    "thermal_velocity_mixed:0.10"
+    "shock_basic:0.22,"
+    "shock_strong:0.18,"
+    "isobaric_contact:0.14,"
+    "double_hotspot_isobaric:0.14,"
+    "velocity_ramp:0.14,"
+    "thermal_velocity_mixed:0.09,"
+    "multi_region_random:0.09"
 )
 
 
@@ -253,12 +255,51 @@ def _build_thermal_velocity_mixed(rng: np.random.Generator, edge_width: float) -
     )
 
 
+def _build_multi_region_random(rng: np.random.Generator, min_width: float) -> tuple[dict, ...]:
+    # v1互換寄りの4領域ランダム族
+    wmin = float(min(max(min_width, 1e-3), 0.24))
+    rem = 1.0 - 4.0 * wmin
+    if rem <= 0.0:
+        raise ValueError(f"multi_region_min_width too large: {min_width}")
+
+    raw = rng.random(4)
+    raw /= max(float(raw.sum()), 1e-12)
+    w = wmin + rem * raw
+
+    x0 = float(w[0])
+    x1 = float(w[0] + w[1])
+    x2 = float(w[0] + w[1] + w[2])
+
+    n1 = float(1.0 + rng.uniform(-0.2, 0.2))
+    n2 = float(0.5 + rng.uniform(-0.2, 0.2))
+    n3 = float(1.0 + rng.uniform(-0.2, 0.2))
+    n4 = float(0.5 + rng.uniform(-0.2, 0.2))
+
+    T1 = float(1.0 + rng.uniform(-0.2, 0.2))
+    T2 = float(0.8 + rng.uniform(-0.2, 0.2))
+    T3 = float(1.0 + rng.uniform(-0.2, 0.2))
+    T4 = float(0.8 + rng.uniform(-0.2, 0.2))
+
+    u1 = 0.0
+    u2 = float(rng.uniform(-0.2, 0.2) * math.sqrt(max(T2, 1e-12)))
+    u3 = float(rng.uniform(-0.2, 0.2) * math.sqrt(max(T3, 1e-12)))
+    u4 = 0.0
+
+    return (
+        {"x_range": (0.0, x0), "n": n1, "u": u1, "T": T1},
+        {"x_range": (x0, x1), "n": n2, "u": u2, "T": T2},
+        {"x_range": (x1, x2), "n": n3, "u": u3, "T": T3},
+        {"x_range": (x2, 1.0), "n": n4, "u": u4, "T": T4},
+    )
+
+
 def _build_initial_regions(
     family: str,
     rng: np.random.Generator,
     *,
     velocity_segments: int,
     edge_width: float,
+    multi_region_min_width: float,
 ) -> tuple[dict, ...]:
     if family == "shock_basic":
         return _build_shock_basic(rng)
@@ -272,6 +313,8 @@ def _build_initial_regions(
         return _build_velocity_ramp(rng, segments=velocity_segments)
     if family == "thermal_velocity_mixed":
         return _build_thermal_velocity_mixed(rng, edge_width=edge_width)
+    if family == "multi_region_random":
+        return _build_multi_region_random(rng, min_width=multi_region_min_width)
     raise ValueError(f"unknown family: {family}")
 
 
@@ -326,6 +369,7 @@ def _sample_case_spec(case_id: int, family: str, args: argparse.Namespace) -> Ca
         rng,
         velocity_segments=int(args.velocity_segments),
         edge_width=float(args.edge_width),
+        multi_region_min_width=float(args.multi_region_min_width),
     )
     n_ratio, T_ratio, u_rms_over_sqrtT = _region_stats(initial_regions)
 
@@ -781,6 +825,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--family_weights", type=str, default=DEFAULT_FAMILY_WEIGHTS)
     p.add_argument("--velocity_segments", type=int, default=16)
     p.add_argument("--edge_width", type=float, default=0.02)
+    p.add_argument("--multi_region_min_width", type=float, default=0.10)
 
     p.add_argument("--ood_family_holdout", type=str, default="isobaric_contact,double_hotspot_isobaric")
     p.add_argument("--ood_ratio_threshold", type=float, default=6.0)
