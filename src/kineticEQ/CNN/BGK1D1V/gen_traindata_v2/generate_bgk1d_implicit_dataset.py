@@ -6,7 +6,9 @@ import math
 import os
 import shutil
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass, fields, replace
+from datetime import timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -37,6 +39,16 @@ DEFAULT_FAMILY_WEIGHTS = (
     "thermal_velocity_mixed:0.09,"
     "multi_region_random:0.09"
 )
+
+FAMILY_DIFFICULTY_BONUS = {
+    "shock_basic": 0.25,
+    "shock_strong": 0.55,
+    "isobaric_contact": 0.90,
+    "double_hotspot_isobaric": 0.65,
+    "velocity_ramp": 0.20,
+    "thermal_velocity_mixed": 0.75,
+    "multi_region_random": 0.40,
+}
 
 
 @dataclass(frozen=True)
@@ -413,20 +425,102 @@ def _build_all_case_specs(args: argparse.Namespace) -> list[CaseSpec]:
     return specs
 
 
+def _family_difficulty_bonus(family: str) -> float:
+    return float(FAMILY_DIFFICULTY_BONUS.get(str(family), 0.0))
+
+
+def _difficulty_proxy(case: CaseSpec) -> float:
+    return float(case.log10_dt_over_tau) + _family_difficulty_bonus(case.family)
+
+
+def _balanced_static_assign(all_specs: list[CaseSpec], world_size: int) -> list[list[CaseSpec]]:
+    if int(world_size) <= 1:
+        return [list(all_specs)]
+
+    ordered = sorted(
+        all_specs,
+        key=lambda case: (-_difficulty_proxy(case), str(case.family), int(case.case_id)),
+    )
+
+    buckets: list[list[CaseSpec]] = [[] for _ in range(int(world_size))]
+    for idx, case in enumerate(ordered):
+        wave = idx // int(world_size)
+        offset = idx % int(world_size)
+        target = offset if (wave % 2 == 0) else (int(world_size) - 1 - offset)
+        buckets[target].append(case)
+    return buckets
+
+
+def _assignment_summary(specs: list[CaseSpec]) -> str:
+    if not specs:
+        return "cases=0 families={} log10(dt/tau)_mean=nan range=[nan, nan]"
+
+    fam_counts = Counter(str(case.family) for case in specs)
+    fam_str = ", ".join(f"{name}:{fam_counts[name]}" for name in sorted(fam_counts))
+    log_vals = [float(case.log10_dt_over_tau) for case in specs]
+    mean_log = float(sum(log_vals) / len(log_vals))
+    min_log = float(min(log_vals))
+    max_log = float(max(log_vals))
+    return (
+        f"cases={len(specs)} "
+        f"families={{{fam_str}}} "
+        f"log10(dt/tau)_mean={mean_log:.3f} "
+        f"range=[{min_log:.3f}, {max_log:.3f}]"
+    )
+
+
+def _progress_summary(*, assigned: int, ok: int, failed: int) -> str:
+    return f"assigned={int(assigned)} ok={int(ok)} failed={int(failed)}"
+
+
+def _barrier(
+    label: str,
+    *,
+    is_dist: bool,
+    rank: int,
+    local_rank: int,
+    device: torch.device,
+    summary: str | None = None,
+) -> None:
+    if not is_dist:
+        return
+
+    if summary:
+        print(f"[rank {rank}] summary before {label}: {summary}", flush=True)
+    print(f"[rank {rank}] entering {label}", flush=True)
+    try:
+        if device.type == "cuda":
+            dist.barrier(device_ids=[int(local_rank)])
+        else:
+            dist.barrier()
+    except Exception as exc:
+        if summary:
+            print(f"[rank {rank}] {label} failed after {summary}", flush=True)
+        print(f"[rank {rank}] {label} error: {type(exc).__name__}: {exc}", flush=True)
+        raise
+    print(f"[rank {rank}] passed {label}", flush=True)
+
+
 def _setup_dist(device_arg: str) -> tuple[bool, int, int, int, torch.device]:
     is_dist = ("RANK" in os.environ) and ("WORLD_SIZE" in os.environ)
     if is_dist:
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(backend=backend, init_method="env://")
 
         if torch.cuda.is_available():
             torch.cuda.set_device(local_rank)
             device = torch.device(f"cuda:{local_rank}")
+            backend = "nccl"
         else:
             device = torch.device("cpu")
+            backend = "gloo"
+
+        dist.init_process_group(
+            backend=backend,
+            init_method="env://",
+            timeout=timedelta(hours=2),
+        )
         return True, rank, local_rank, world_size, device
 
     if device_arg == "auto":
@@ -526,6 +620,38 @@ def _run_case(case: CaseSpec, device: torch.device) -> CaseRun:
     )
 
 
+def _base_case_record(case: CaseSpec) -> dict:
+    rec = asdict(case)
+    rec["initial_regions"] = [dict(r) for r in case.initial_regions]
+    return rec
+
+
+def _estimate_n_steps(case: CaseSpec) -> int:
+    return int(max(1, math.ceil(float(case.T_total) / max(float(case.dt), 1e-30))))
+
+
+def _make_failed_record(case: CaseSpec, *, rank: int, error: Exception, elapsed_sec: float) -> dict:
+    rec = _base_case_record(case)
+    rec.update(
+        {
+            "status": "failed",
+            "rank": int(rank),
+            "run_elapsed_sec": float(elapsed_sec),
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+            "picard_iter_sum": 0,
+            "picard_iter_mean": float("nan"),
+            "std_residual_max": float("nan"),
+            "shard_path": None,
+            "local_case_index": -1,
+            "frame_start": -1,
+            "frame_end": -1,
+            "n_steps": _estimate_n_steps(case),
+        }
+    )
+    return rec
+
+
 class ShardWriter:
     def __init__(self, shards_dir: Path, rank: int, cases_per_shard: int):
         self.shards_dir = Path(shards_dir)
@@ -568,8 +694,9 @@ class ShardWriter:
             it_all[cursor:cursor + frames].copy_(torch.from_numpy(run.picard_iter.astype(np.int32, copy=False)))
             resid_all[cursor:cursor + frames].copy_(torch.from_numpy(run.std_residual.astype(np.float32, copy=False)))
 
-            case_info = asdict(case)
-            case_info["initial_regions"] = [dict(r) for r in case.initial_regions]
+            case_info = _base_case_record(case)
+            case_info["status"] = "ok"
+            case_info["rank"] = int(self.rank)
             case_info["run_elapsed_sec"] = float(run.elapsed_sec)
 
             it_valid = run.picard_iter[1:]
@@ -686,13 +813,16 @@ def _merge_and_write_manifests(
 
     rank_records.sort(key=lambda x: int(x["case_id"]))
 
-    n_all = len(rank_records)
-    all_indices = list(range(n_all))
+    ok_indices = [i for i, rec in enumerate(rank_records) if str(rec.get("status", "ok")) == "ok"]
+    failed_indices = [i for i, rec in enumerate(rank_records) if str(rec.get("status", "ok")) != "ok"]
+    for idx in failed_indices:
+        for key in ("split_iid", "split_ood_family", "split_ood_range"):
+            rank_records[idx][key] = "failed"
 
     _assign_random_split(
         rank_records,
         split_key="split_iid",
-        indices=all_indices,
+        indices=ok_indices,
         seed=int(args.split_seed),
         train_ratio=float(args.train_ratio),
         val_ratio=float(args.val_ratio),
@@ -701,7 +831,8 @@ def _merge_and_write_manifests(
 
     holdout_fams = {s.strip() for s in str(args.ood_family_holdout).split(",") if s.strip()}
     in_dist_idx: list[int] = []
-    for i, rec in enumerate(rank_records):
+    for i in ok_indices:
+        rec = rank_records[i]
         if str(rec["family"]) in holdout_fams:
             rec["split_ood_family"] = "test"
         else:
@@ -719,7 +850,8 @@ def _merge_and_write_manifests(
     )
 
     in_range_idx: list[int] = []
-    for i, rec in enumerate(rank_records):
+    for i in ok_indices:
+        rec = rank_records[i]
         n_ratio = float(rec.get("n_ratio", 1.0))
         T_ratio = float(rec.get("T_ratio", 1.0))
         log_dt_tau = float(rec.get("log10_dt_over_tau", 0.0))
@@ -750,18 +882,25 @@ def _merge_and_write_manifests(
     _write_jsonl(case_manifest, rank_records)
 
     fam_count: dict[str, int] = {}
+    failed_fam_count: dict[str, int] = {}
     for rec in rank_records:
         fam = str(rec["family"])
-        fam_count[fam] = fam_count.get(fam, 0) + 1
+        if str(rec.get("status", "ok")) == "ok":
+            fam_count[fam] = fam_count.get(fam, 0) + 1
+        else:
+            failed_fam_count[fam] = failed_fam_count.get(fam, 0) + 1
 
     split_count: dict[str, dict[str, int]] = {}
     for key in ("split_iid", "split_ood_family", "split_ood_range"):
         c = {"train": 0, "val": 0, "test": 0}
         for rec in rank_records:
-            c[str(rec[key])] += 1
+            split_name = str(rec.get(key, ""))
+            if split_name in c:
+                c[split_name] += 1
         split_count[key] = c
 
     n_shards = len(list((out_root / "shards").glob("*.pt")))
+    n_failed = len(failed_indices)
 
     dataset_manifest = {
         "schema_version": 2,
@@ -771,10 +910,14 @@ def _merge_and_write_manifests(
             "script": "kineticEQ.CNN.BGK1D1V.gen_traindata_v2.generate_bgk1d_implicit_dataset",
             "args": vars(args),
         },
-        "num_cases": int(len(rank_records)),
+        "num_cases": int(len(ok_indices)),
+        "num_records": int(len(rank_records)),
+        "num_ok_cases": int(len(ok_indices)),
+        "num_failed_cases": int(n_failed),
         "num_shards": int(n_shards),
         "world_size": int(world_size),
         "families": fam_count,
+        "failed_families": failed_fam_count,
         "split_counts": split_count,
         "paths": {
             "shards_dir": "shards",
@@ -858,14 +1001,21 @@ def main() -> None:
     if rank == 0 and args.overwrite and out_root.exists():
         shutil.rmtree(out_root)
 
-    if is_dist:
-        dist.barrier()
+    _barrier(
+        "barrier-1",
+        is_dist=is_dist,
+        rank=rank,
+        local_rank=local_rank,
+        device=device,
+    )
 
     (out_root / "shards").mkdir(parents=True, exist_ok=True)
     (out_root / "manifests").mkdir(parents=True, exist_ok=True)
 
     all_specs = _build_all_case_specs(args)
-    my_specs = all_specs[rank::world_size]
+    assigned_specs = _balanced_static_assign(all_specs, world_size)
+    my_specs = assigned_specs[rank]
+    print(f"[rank {rank}] assignment summary: {_assignment_summary(my_specs)}", flush=True)
 
     writer = ShardWriter(
         shards_dir=out_root / "shards",
@@ -875,9 +1025,26 @@ def main() -> None:
 
     local_records: list[dict] = []
     t_rank0 = time.perf_counter()
+    ok_cases = 0
+    failed_cases = 0
 
     for i, case in enumerate(my_specs, start=1):
-        run = _run_case(case, device=device)
+        case_t0 = time.perf_counter()
+        try:
+            run = _run_case(case, device=device)
+        except Exception as exc:
+            failed_cases += 1
+            failed_elapsed = float(time.perf_counter() - case_t0)
+            local_records.append(_make_failed_record(case, rank=rank, error=exc, elapsed_sec=failed_elapsed))
+            print(
+                f"[rank {rank}] case failed "
+                f"(case_id={case.case_id}, family={case.family}, "
+                f"error_type={type(exc).__name__}, error_message={exc})",
+                flush=True,
+            )
+            continue
+
+        ok_cases += 1
         local_records.extend(writer.add_case(case, run))
 
         if (i == 1) or (i % max(int(args.log_interval), 1) == 0) or (i == len(my_specs)):
@@ -892,22 +1059,42 @@ def main() -> None:
     local_manifest_path = out_root / "manifests" / f"case_manifest_rank{rank:02d}.jsonl"
     _write_jsonl(local_manifest_path, local_records)
 
-    if is_dist:
-        dist.barrier()
+    progress = _progress_summary(assigned=len(my_specs), ok=ok_cases, failed=failed_cases)
+    _barrier(
+        "barrier-2",
+        is_dist=is_dist,
+        rank=rank,
+        local_rank=local_rank,
+        device=device,
+        summary=progress,
+    )
 
     if rank == 0:
-        _merge_and_write_manifests(
-            out_root=out_root,
-            world_size=world_size,
-            args=args,
-        )
+        print("[rank 0] starting manifest merge", flush=True)
+        try:
+            _merge_and_write_manifests(
+                out_root=out_root,
+                world_size=world_size,
+                args=args,
+            )
+        except Exception as exc:
+            print(f"[rank 0] manifest merge failed: {type(exc).__name__}: {exc}", flush=True)
+            raise
+        print("[rank 0] finished manifest merge", flush=True)
         elapsed_all = time.perf_counter() - t_rank0
         print(f"[rank 0] finished dataset generation in {elapsed_all:.1f}s", flush=True)
         print(f"[rank 0] dataset_manifest: {(out_root / 'dataset_manifest.json').as_posix()}", flush=True)
         print(f"[rank 0] case_manifest: {(out_root / 'case_manifest.jsonl').as_posix()}", flush=True)
 
+    _barrier(
+        "barrier-3",
+        is_dist=is_dist,
+        rank=rank,
+        local_rank=local_rank,
+        device=device,
+        summary=progress,
+    )
     if is_dist:
-        dist.barrier()
         dist.destroy_process_group()
 
 
