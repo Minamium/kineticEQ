@@ -17,6 +17,36 @@ from kineticEQ import BGK1D, Config, Engine
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calculate_moments
 
 
+LOG_LEVEL_PRIORITY = {
+    "debug": 10,
+    "info": 20,
+    "warning": 30,
+    "error": 40,
+}
+
+
+def normalize_log_level(log_level: str) -> str:
+    s = str(log_level).strip().lower()
+    aliases = {
+        "warn": "warning",
+        "err": "error",
+    }
+    s = aliases.get(s, s)
+    if s not in LOG_LEVEL_PRIORITY:
+        raise ValueError(f"unsupported log_level: {log_level}")
+    return s
+
+
+def should_log(current_level: str, message_level: str) -> bool:
+    return LOG_LEVEL_PRIORITY[current_level] <= LOG_LEVEL_PRIORITY[message_level]
+
+
+def emit_log(log_level: str, message_level: str, message: str, rank: int) -> None:
+    if should_log(log_level, message_level):
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"{timestamp} [{message_level.upper()}] rank={rank} {message}", flush=True)
+
+
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out_dir", type=str, default="dataset_pt_v2")
@@ -31,7 +61,7 @@ def parse_args():
     ap.add_argument("--picard_iter", type=int, default=100_000)
     ap.add_argument("--picard_max_iter", type=int, default=None)
     ap.add_argument("--picard_tol", type=float, default=1e-8)
-    ap.add_argument("--abs_tol", type=float, default=1e-13)
+    ap.add_argument("--abs_tol", type=float, default=1e-10)
     ap.add_argument("--conv_type", type=str, default="w", choices=["w", "f"])
     ap.add_argument("--n_floor", type=float, default=1e-3)
     ap.add_argument("--w_min", type=float, default=0.10)
@@ -43,6 +73,7 @@ def parse_args():
     )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", type=str, default="cuda")
+    ap.add_argument("--log_level", type=str, default="info", choices=["debug", "info", "warning", "warn", "error", "err"])
     args = ap.parse_args()
     if args.picard_max_iter is not None:
         args.picard_iter = int(args.picard_max_iter)
@@ -51,6 +82,7 @@ def parse_args():
     args.picard_iter = int(args.picard_iter)
     args.nx = int(args.nx)
     args.nv = int(args.nv)
+    args.log_level = normalize_log_level(args.log_level)
     if args.cases < 1:
         raise ValueError("--cases must be >= 1")
     if args.cases_per_shard < 1:
@@ -198,11 +230,49 @@ def make_model_cfg(args, tau_tilde: float, initial_regions: list[dict[str, Any]]
     )
 
 
-def run_case(case_id: int, tau_tilde: float, args, device: str) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+def run_case(
+    case_id: int,
+    tau_tilde: float,
+    args,
+    device: str,
+    rank: int,
+    local_idx: int,
+    local_total: int,
+) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
     case_seed = int(args.seed) + int(case_id)
     g = make_case_generator(case_seed)
     initial_regions = sample_initial_regions(g, float(args.n_floor), float(args.w_min))
+    stats = region_stats(initial_regions)
     model_cfg = make_model_cfg(args, tau_tilde=float(tau_tilde), initial_regions=initial_regions)
+    emit_log(
+        args.log_level,
+        "debug",
+        (
+            f"case_start local={local_idx + 1}/{local_total} case_id={case_id} seed={case_seed} "
+            f"tau={float(tau_tilde):.3e} dt={float(args.dt):.3e} nx={int(args.nx)} nv={int(args.nv)}"
+        ),
+        rank,
+    )
+    emit_log(
+        args.log_level,
+        "debug",
+        "case_props "
+        + json.dumps(
+            {
+                "case_id": int(case_id),
+                "seed": int(case_seed),
+                "tau_tilde": float(tau_tilde),
+                "dt": float(args.dt),
+                "T_total": float(args.T_total),
+                "n_steps": int(model_cfg.time.n_steps),
+                "initial_regions": initial_regions,
+                "region_stats": stats,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        rank,
+    )
     engine = Engine(
         Config(
             model="BGK1D1V",
@@ -224,6 +294,7 @@ def run_case(case_id: int, tau_tilde: float, args, device: str) -> tuple[dict[st
     std_picard_residual = torch.empty((n_frames,), dtype=torch.float32)
 
     t0 = time.time()
+    next_progress_pct = 5
     with torch.no_grad():
         n0, u0, T0 = calculate_moments(engine.state, engine.state.f)
     W[0, 0].copy_(n0.detach().cpu().to(torch.float32))
@@ -242,6 +313,20 @@ def run_case(case_id: int, tau_tilde: float, args, device: str) -> tuple[dict[st
         W[step + 1, 2].copy_(T1.detach().cpu().to(torch.float32))
         picard_iter[step + 1] = int(bench.get("picard_iter", -1))
         std_picard_residual[step + 1] = float(bench.get("std_picard_residual", float("nan")))
+        progress_pct = int((100 * (step + 1)) // max(n_steps, 1))
+        while next_progress_pct <= 100 and progress_pct >= next_progress_pct:
+            emit_log(
+                args.log_level,
+                "debug",
+                (
+                    f"case_progress case_id={case_id} progress={next_progress_pct}% "
+                    f"step={step + 1}/{n_steps} elapsed={time.time() - t0:.3f}s "
+                    f"picard_iter={int(picard_iter[step + 1].item())} "
+                    f"std_picard_residual={float(std_picard_residual[step + 1].item()):.3e}"
+                ),
+                rank,
+            )
+            next_progress_pct += 5
 
     rec = {
         "case_id": int(case_id),
@@ -269,7 +354,7 @@ def run_case(case_id: int, tau_tilde: float, args, device: str) -> tuple[dict[st
         "error_message": "",
         "shard_path": "",
     }
-    rec.update(region_stats(initial_regions))
+    rec.update(stats)
     payload = {
         "W": W,
         "picard_iter": picard_iter,
@@ -452,6 +537,16 @@ def main():
         rank=rank,
         world_size=world_size,
     )
+    emit_log(
+        args.log_level,
+        "debug",
+        (
+            f"generator_start world_size={world_size} local_cases={len(local_plan)} "
+            f"cases={int(args.cases)} cases_per_shard={int(args.cases_per_shard)} "
+            f"tau_count={len(args.tau_tilde_list)} out_dir={str(out_dir)} device={device}"
+        ),
+        rank,
+    )
     shard_id_base = planned_shard_offset(
         total_cases=int(args.cases),
         tau_values=[float(v) for v in args.tau_tilde_list],
@@ -467,7 +562,15 @@ def main():
 
     for local_idx, (case_id, tau_tilde) in enumerate(local_plan):
         try:
-            rec, payload = run_case(case_id=int(case_id), tau_tilde=float(tau_tilde), args=args, device=device)
+            rec, payload = run_case(
+                case_id=int(case_id),
+                tau_tilde=float(tau_tilde),
+                args=args,
+                device=device,
+                rank=rank,
+                local_idx=local_idx,
+                local_total=len(local_plan),
+            )
             shard_cases.append(rec)
             shard_payloads.append(payload)
             local_records.append(rec)
@@ -481,9 +584,11 @@ def main():
                 local_shard_count += 1
                 shard_cases = []
                 shard_payloads = []
-            print(
-                f"rank={rank} local={local_idx + 1}/{len(local_plan)} case_id={case_id} tau={tau_tilde:.3e} elapsed={rec['elapsed_sec']:.3f}s",
-                flush=True,
+            emit_log(
+                args.log_level,
+                "info",
+                f"local={local_idx + 1}/{len(local_plan)} case_id={case_id} tau={tau_tilde:.3e} elapsed={rec['elapsed_sec']:.3f}s",
+                rank,
             )
         except Exception as e:
             local_records.append(
@@ -523,9 +628,11 @@ def main():
                     "shard_path": "",
                 }
             )
-            print(
-                f"rank={rank} case_id={case_id} tau={tau_tilde:.3e} failed={type(e).__name__}: {e}",
-                flush=True,
+            emit_log(
+                args.log_level,
+                "error",
+                f"case_id={case_id} tau={tau_tilde:.3e} failed={type(e).__name__}: {e}",
+                rank,
             )
 
     if shard_cases:
