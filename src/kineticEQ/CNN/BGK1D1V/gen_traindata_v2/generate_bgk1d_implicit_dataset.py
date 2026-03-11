@@ -449,37 +449,14 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def merge_partials(out_dir: Path, args, world_size: int) -> None:
-    part_dir = out_dir / "partials"
-    all_records: list[dict[str, Any]] = []
-    for rank in range(world_size):
-        part_path = part_dir / f"case_manifest.rank{rank:05d}.jsonl"
-        if not part_path.exists():
-            continue
-        with part_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                s = line.strip()
-                if s:
-                    all_records.append(json.loads(s))
-    all_records.sort(key=lambda x: int(x["case_id"]))
-    assign_split_iid(all_records, int(args.seed))
-    assign_split_ood_tau(all_records)
-    write_jsonl(out_dir / "case_manifest.jsonl", all_records)
-
-    ok_records = [rec for rec in all_records if not bool(rec.get("failed", False))]
-    shard_paths = sorted({str(rec["shard_path"]) for rec in ok_records if str(rec.get("shard_path", ""))})
-    manifest = {
-        "format": "kineticEQ_BGK1D1V_pt_v2",
+def build_generation_config(args, world_size: int) -> dict[str, Any]:
+    return {
+        "format": "kineticEQ_BGK1D1V_pt_v2_partial_config",
         "version": 2,
-        "num_cases": int(len(ok_records)),
         "num_cases_requested": int(args.cases),
-        "num_failed_cases": int(sum(bool(rec.get("failed", False)) for rec in all_records)),
-        "num_shards": int(len(shard_paths)),
         "cases_per_shard": int(args.cases_per_shard),
-        "paths": {
-            "case_manifest": "case_manifest.jsonl",
-            "shard_dir": "shards",
-        },
+        "seed": int(args.seed),
+        "world_size": int(world_size),
         "grid": {
             "nx": int(args.nx),
             "nv": int(args.nv),
@@ -505,21 +482,18 @@ def merge_partials(out_dir: Path, args, world_size: int) -> None:
             "u_rule": "u0=u3=0, u1=u2=(2U-1)*0.2",
             "tau_tilde_list": [float(v) for v in args.tau_tilde_list],
         },
-        "splits": {
-            "iid": {"train": 0.8, "val": 0.1, "test": 0.1},
-            "ood_tau_rule": "min_tau=test, max_tau=val, others=train",
+        "paths": {
+            "case_manifest": "case_manifest.jsonl",
+            "shard_dir": "shards",
+            "partial_dir": "partials",
         },
     }
-    write_json(out_dir / "dataset_manifest.json", manifest)
 
 
-def dist_barrier(local_rank: int) -> None:
-    if not dist.is_initialized():
-        return
-    if dist.get_backend() == "nccl":
-        dist.barrier(device_ids=[local_rank])
-    else:
-        dist.barrier()
+def write_partial_generation_config(out_dir: Path, rank: int, args, world_size: int) -> None:
+    cfg = build_generation_config(args=args, world_size=world_size)
+    cfg["rank"] = int(rank)
+    write_json(out_dir / "partials" / f"generation_config.rank{rank:05d}.json", cfg)
 
 
 def main():
@@ -530,6 +504,7 @@ def main():
     out_dir = Path(args.out_dir).resolve()
     (out_dir / "shards").mkdir(parents=True, exist_ok=True)
     (out_dir / "partials").mkdir(parents=True, exist_ok=True)
+    write_partial_generation_config(out_dir=out_dir, rank=rank, args=args, world_size=world_size)
 
     local_plan = balanced_local_plan(
         total_cases=int(args.cases),
@@ -644,15 +619,16 @@ def main():
         )
 
     write_jsonl(out_dir / "partials" / f"case_manifest.rank{rank:05d}.jsonl", local_records)
-
-    if is_dist:
-        dist_barrier(local_rank)
-
-    if rank == 0:
-        merge_partials(out_dir=out_dir, args=args, world_size=world_size)
-
-    if is_dist and dist.is_initialized():
-        dist.destroy_process_group()
+    emit_log(
+        args.log_level,
+        "info",
+        (
+            f"local_generation_done local_cases={len(local_records)} "
+            f"partial_manifest=partials/case_manifest.rank{rank:05d}.jsonl "
+            f"partial_config=partials/generation_config.rank{rank:05d}.json"
+        ),
+        rank,
+    )
 
 
 if __name__ == "__main__":
