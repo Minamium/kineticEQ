@@ -1,18 +1,15 @@
+# kineticEQ/CNN/BGK1D1V/gen_traindata_v2/generate_bgk1d_implicit_dataset.py
+
 from __future__ import annotations
 
 import argparse
 import json
 import math
 import os
-import shutil
 import time
-from collections import Counter
-from dataclasses import asdict, dataclass, fields, replace
-from datetime import timedelta
 from pathlib import Path
-from typing import Iterable
+from typing import Any
 
-import numpy as np
 import torch
 import torch.distributed as dist
 
@@ -20,1081 +17,534 @@ from kineticEQ import BGK1D, Config, Engine
 from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calculate_moments
 
 
-FAMILY_NAMES = (
-    "shock_basic",
-    "shock_strong",
-    "isobaric_contact",
-    "double_hotspot_isobaric",
-    "velocity_ramp",
-    "thermal_velocity_mixed",
-    "multi_region_random",
-)
-
-DEFAULT_FAMILY_WEIGHTS = (
-    "shock_basic:0.22,"
-    "shock_strong:0.18,"
-    "isobaric_contact:0.14,"
-    "double_hotspot_isobaric:0.14,"
-    "velocity_ramp:0.14,"
-    "thermal_velocity_mixed:0.09,"
-    "multi_region_random:0.09"
-)
-
-FAMILY_DIFFICULTY_BONUS = {
-    "shock_basic": 0.25,
-    "shock_strong": 0.55,
-    "isobaric_contact": 0.90,
-    "double_hotspot_isobaric": 0.65,
-    "velocity_ramp": 0.20,
-    "thermal_velocity_mixed": 0.75,
-    "multi_region_random": 0.40,
-}
-
-
-@dataclass(frozen=True)
-class CaseSpec:
-    case_id: int
-    family: str
-    seed: int
-
-    nx: int
-    nv: int
-    Lx: float
-    v_max: float
-
-    dt: float
-    tau_tilde: float
-    T_total: float
-
-    picard_iter: int
-    picard_tol: float
-    abs_tol: float
-    conv_type: str
-
-    initial_regions: tuple[dict, ...]
-
-    dt_over_tau: float
-    log10_dt: float
-    log10_tau: float
-    log10_dt_over_tau: float
-
-    n_ratio: float
-    T_ratio: float
-    u_rms_over_sqrtT: float
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out_dir", type=str, default="dataset_pt_v2")
+    ap.add_argument("--cases", type=int, default=1000)
+    ap.add_argument("--cases_per_shard", type=int, default=100)
+    ap.add_argument("--nx", type=int, default=512)
+    ap.add_argument("--nv", type=int, default=256)
+    ap.add_argument("--Lx", type=float, default=1.0)
+    ap.add_argument("--v_max", type=float, default=10.0)
+    ap.add_argument("--dt", type=float, default=5e-4)
+    ap.add_argument("--T_total", type=float, default=5e-2)
+    ap.add_argument("--picard_iter", type=int, default=100_000)
+    ap.add_argument("--picard_max_iter", type=int, default=None)
+    ap.add_argument("--picard_tol", type=float, default=1e-8)
+    ap.add_argument("--abs_tol", type=float, default=1e-13)
+    ap.add_argument("--conv_type", type=str, default="w", choices=["w", "f"])
+    ap.add_argument("--n_floor", type=float, default=1e-3)
+    ap.add_argument("--w_min", type=float, default=0.10)
+    ap.add_argument(
+        "--tau_tilde_list",
+        type=float,
+        nargs="+",
+        default=[1e-7, 2e-7, 3e-7, 4e-7, 5e-7, 6e-7, 7e-7, 8e-7, 9e-7, 1e-6],
+    )
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--device", type=str, default="cuda")
+    args = ap.parse_args()
+    if args.picard_max_iter is not None:
+        args.picard_iter = int(args.picard_max_iter)
+    args.cases = int(args.cases)
+    args.cases_per_shard = int(args.cases_per_shard)
+    args.picard_iter = int(args.picard_iter)
+    args.nx = int(args.nx)
+    args.nv = int(args.nv)
+    if args.cases < 1:
+        raise ValueError("--cases must be >= 1")
+    if args.cases_per_shard < 1:
+        raise ValueError("--cases_per_shard must be >= 1")
+    if args.w_min <= 0.0 or args.w_min >= 0.25:
+        raise ValueError("--w_min must satisfy 0 < w_min < 0.25")
+    if len(args.tau_tilde_list) < 1:
+        raise ValueError("--tau_tilde_list must be non-empty")
+    return args
 
 
-@dataclass
-class CaseRun:
-    W: np.ndarray
-    picard_iter: np.ndarray
-    std_residual: np.ndarray
-    elapsed_sec: float
+def setup_dist(device_arg: str) -> tuple[bool, int, int, int, str]:
+    if "RANK" not in os.environ or "WORLD_SIZE" not in os.environ:
+        if str(device_arg).startswith("cuda"):
+            if not torch.cuda.is_available():
+                raise RuntimeError("device=cuda was requested but CUDA is not available")
+            return False, 0, 0, 1, str(device_arg)
+        return False, 0, 0, 1, "cpu"
 
-
-def _sync(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-
-
-def _safe_log10(x: float, floor: float = 1e-300) -> float:
-    return float(math.log10(max(float(x), floor)))
-
-
-def _region_stats(initial_regions: tuple[dict, ...]) -> tuple[float, float, float]:
-    widths: list[float] = []
-    n_vals: list[float] = []
-    T_vals: list[float] = []
-    u_vals: list[float] = []
-
-    for reg in initial_regions:
-        x0, x1 = reg["x_range"]
-        w = max(float(x1) - float(x0), 0.0)
-        widths.append(w)
-        n_vals.append(float(reg["n"]))
-        T_vals.append(float(reg["T"]))
-        u_vals.append(float(reg["u"]))
-
-    wsum = float(sum(widths)) if widths else 1.0
-    wnorm = [w / max(wsum, 1e-12) for w in widths]
-
-    n_min = max(min(n_vals), 1e-12)
-    T_min = max(min(T_vals), 1e-12)
-    n_ratio = float(max(n_vals) / n_min)
-    T_ratio = float(max(T_vals) / T_min)
-
-    u_rms = math.sqrt(sum(w * (u * u) for w, u in zip(wnorm, u_vals)))
-    T_mean = sum(w * t for w, t in zip(wnorm, T_vals))
-    u_rms_over_sqrtT = float(u_rms / math.sqrt(max(T_mean, 1e-12)))
-
-    return n_ratio, T_ratio, u_rms_over_sqrtT
-
-
-def _sample_centered_log_uniform(
-    rng: np.random.Generator,
-    *,
-    center_value: float,
-    center_prob: float,
-    vmin: float,
-    vmax: float,
-) -> float:
-    p = float(min(max(center_prob, 0.0), 1.0))
-    if rng.random() < p:
-        return float(center_value)
-    lo = _safe_log10(vmin)
-    hi = _safe_log10(vmax)
-    return float(10.0 ** rng.uniform(lo, hi))
-
-
-def _build_shock_basic(rng: np.random.Generator) -> tuple[dict, ...]:
-    x0 = float(rng.uniform(0.4, 0.6))
-
-    n_ratio = float(10.0 ** rng.uniform(math.log10(1.2), math.log10(5.0)))
-    T_ratio = float(10.0 ** rng.uniform(math.log10(1.2), math.log10(5.0)))
-
-    if rng.random() < 0.5:
-        nL, nR = 1.0, 1.0 / n_ratio
-        TL, TR = 1.0, 1.0 / T_ratio
+    rank = int(os.environ["RANK"])
+    world = int(os.environ["WORLD_SIZE"])
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    use_cuda = str(device_arg).startswith("cuda")
+    if use_cuda:
+        if not torch.cuda.is_available():
+            raise RuntimeError("distributed CUDA generation requested but CUDA is not available")
+        torch.cuda.set_device(local_rank)
+        backend = "nccl"
+        device = f"cuda:{local_rank}"
     else:
-        nL, nR = 1.0, n_ratio
-        TL, TR = 1.0, 1.0 / T_ratio
-
-    return (
-        {"x_range": (0.0, x0), "n": float(nL), "u": 0.0, "T": float(TL)},
-        {"x_range": (x0, 1.0), "n": float(nR), "u": 0.0, "T": float(TR)},
-    )
-
-
-def _build_shock_strong(rng: np.random.Generator) -> tuple[dict, ...]:
-    x0 = float(rng.uniform(0.45, 0.55))
-
-    n_ratio = float(10.0 ** rng.uniform(math.log10(2.0), math.log10(20.0)))
-    T_ratio = float(10.0 ** rng.uniform(math.log10(2.0), math.log10(20.0)))
-
-    if rng.random() < 0.5:
-        nL, nR = 1.0, n_ratio
-        TL, TR = 1.0, 1.0 / T_ratio
-    else:
-        nL, nR = n_ratio, 1.0
-        TL, TR = 1.0 / T_ratio, 1.0
-
-    return (
-        {"x_range": (0.0, x0), "n": float(nL), "u": 0.0, "T": float(TL)},
-        {"x_range": (x0, 1.0), "n": float(nR), "u": 0.0, "T": float(TR)},
-    )
-
-
-def _build_isobaric_contact(rng: np.random.Generator) -> tuple[dict, ...]:
-    x0 = float(rng.uniform(0.35, 0.65))
-    p0 = float(10.0 ** rng.uniform(math.log10(0.2), math.log10(1.5)))
-
-    T_low = float(10.0 ** rng.uniform(math.log10(0.2), math.log10(0.8)))
-    Tr = float(10.0 ** rng.uniform(math.log10(1.2), math.log10(8.0)))
-    T_high = float(min(T_low * Tr, 2.0))
-
-    if rng.random() < 0.5:
-        TL, TR = T_high, T_low
-    else:
-        TL, TR = T_low, T_high
-
-    nL = p0 / TL
-    nR = p0 / TR
-
-    return (
-        {"x_range": (0.0, x0), "n": float(nL), "u": 0.0, "T": float(TL)},
-        {"x_range": (x0, 1.0), "n": float(nR), "u": 0.0, "T": float(TR)},
-    )
-
-
-def _build_double_hotspot_isobaric(rng: np.random.Generator) -> tuple[dict, ...]:
-    p0 = float(10.0 ** rng.uniform(math.log10(0.15), math.log10(1.2)))
-    Tc = float(10.0 ** rng.uniform(math.log10(0.15), math.log10(0.5)))
-    Th = float(10.0 ** rng.uniform(math.log10(0.8), math.log10(1.6)))
-
-    w_hot = float(rng.uniform(0.06, 0.16))
-    left_c = float(rng.uniform(0.15, 0.35))
-    right_c = float(rng.uniform(0.65, 0.85))
-
-    a = max(left_c - 0.5 * w_hot, 0.0)
-    b = min(left_c + 0.5 * w_hot, 1.0)
-    c = max(right_c - 0.5 * w_hot, 0.0)
-    d = min(right_c + 0.5 * w_hot, 1.0)
-
-    if not (0.0 < a < b < c < d < 1.0):
-        a, b, c, d = 0.15, 0.25, 0.75, 0.85
-
-    return (
-        {"x_range": (0.0, a), "n": float(p0 / Tc), "u": 0.0, "T": float(Tc)},
-        {"x_range": (a, b), "n": float(p0 / Th), "u": 0.0, "T": float(Th)},
-        {"x_range": (b, c), "n": float(p0 / Tc), "u": 0.0, "T": float(Tc)},
-        {"x_range": (c, d), "n": float(p0 / Th), "u": 0.0, "T": float(Th)},
-        {"x_range": (d, 1.0), "n": float(p0 / Tc), "u": 0.0, "T": float(Tc)},
-    )
-
-
-def _build_velocity_ramp(rng: np.random.Generator, segments: int) -> tuple[dict, ...]:
-    N = max(int(segments), 4)
-    U = float(rng.uniform(0.2, 0.8))
-    n0 = float(rng.uniform(0.8, 1.2))
-    T0 = float(rng.uniform(0.8, 1.2))
-
-    regions: list[dict] = []
-    for k in range(N):
-        x0 = k / N
-        x1 = (k + 1) / N
-        xc = 0.5 * (x0 + x1)
-        u = -U + 2.0 * U * xc
-        regions.append({"x_range": (float(x0), float(x1)), "n": n0, "u": float(u), "T": T0})
-    return tuple(regions)
-
-
-def _build_thermal_velocity_mixed(rng: np.random.Generator, edge_width: float) -> tuple[dict, ...]:
-    delta = float(min(max(edge_width, 1e-3), 0.2))
-    U = float(rng.uniform(0.2, 0.8))
-
-    TL = float(rng.uniform(0.8, 1.4))
-    TR = float(rng.uniform(0.2, 0.8))
-    TM = 0.5 * (TL + TR)
-
-    p0 = float(10.0 ** rng.uniform(math.log10(0.3), math.log10(1.2)))
-    nL = p0 / TL
-    nM = p0 / TM
-    nR = p0 / TR
-
-    return (
-        {"x_range": (0.0, delta), "n": float(nL), "u": float(-U), "T": float(TL)},
-        {"x_range": (delta, 1.0 - delta), "n": float(nM), "u": 0.0, "T": float(TM)},
-        {"x_range": (1.0 - delta, 1.0), "n": float(nR), "u": float(+U), "T": float(TR)},
-    )
-
-
-def _build_multi_region_random(rng: np.random.Generator, min_width: float) -> tuple[dict, ...]:
-    # v1互換寄りの4領域ランダム族
-    wmin = float(min(max(min_width, 1e-3), 0.24))
-    rem = 1.0 - 4.0 * wmin
-    if rem <= 0.0:
-        raise ValueError(f"multi_region_min_width too large: {min_width}")
-
-    raw = rng.random(4)
-    raw /= max(float(raw.sum()), 1e-12)
-    w = wmin + rem * raw
-
-    x0 = float(w[0])
-    x1 = float(w[0] + w[1])
-    x2 = float(w[0] + w[1] + w[2])
-
-    n1 = float(1.0 + rng.uniform(-0.2, 0.2))
-    n2 = float(0.5 + rng.uniform(-0.2, 0.2))
-    n3 = float(1.0 + rng.uniform(-0.2, 0.2))
-    n4 = float(0.5 + rng.uniform(-0.2, 0.2))
-
-    T1 = float(1.0 + rng.uniform(-0.2, 0.2))
-    T2 = float(0.8 + rng.uniform(-0.2, 0.2))
-    T3 = float(1.0 + rng.uniform(-0.2, 0.2))
-    T4 = float(0.8 + rng.uniform(-0.2, 0.2))
-
-    u1 = 0.0
-    u2 = float(rng.uniform(-0.2, 0.2) * math.sqrt(max(T2, 1e-12)))
-    u3 = float(rng.uniform(-0.2, 0.2) * math.sqrt(max(T3, 1e-12)))
-    u4 = 0.0
-
-    return (
-        {"x_range": (0.0, x0), "n": n1, "u": u1, "T": T1},
-        {"x_range": (x0, x1), "n": n2, "u": u2, "T": T2},
-        {"x_range": (x1, x2), "n": n3, "u": u3, "T": T3},
-        {"x_range": (x2, 1.0), "n": n4, "u": u4, "T": T4},
-    )
-
-
-def _build_initial_regions(
-    family: str,
-    rng: np.random.Generator,
-    *,
-    velocity_segments: int,
-    edge_width: float,
-    multi_region_min_width: float,
-) -> tuple[dict, ...]:
-    if family == "shock_basic":
-        return _build_shock_basic(rng)
-    if family == "shock_strong":
-        return _build_shock_strong(rng)
-    if family == "isobaric_contact":
-        return _build_isobaric_contact(rng)
-    if family == "double_hotspot_isobaric":
-        return _build_double_hotspot_isobaric(rng)
-    if family == "velocity_ramp":
-        return _build_velocity_ramp(rng, segments=velocity_segments)
-    if family == "thermal_velocity_mixed":
-        return _build_thermal_velocity_mixed(rng, edge_width=edge_width)
-    if family == "multi_region_random":
-        return _build_multi_region_random(rng, min_width=multi_region_min_width)
-    raise ValueError(f"unknown family: {family}")
-
-
-def _parse_family_weights(spec: str) -> tuple[list[str], np.ndarray]:
-    pairs = [s.strip() for s in str(spec).split(",") if s.strip()]
-    if not pairs:
-        raise ValueError("family_weights is empty")
-
-    names: list[str] = []
-    weights: list[float] = []
-    for p in pairs:
-        if ":" not in p:
-            raise ValueError(f"invalid family weight entry: {p!r}")
-        name, w = p.split(":", 1)
-        name = name.strip()
-        if name not in FAMILY_NAMES:
-            raise ValueError(f"unknown family in family_weights: {name!r}")
-        names.append(name)
-        weights.append(float(w))
-
-    w_arr = np.asarray(weights, dtype=np.float64)
-    if np.any(w_arr < 0.0):
-        raise ValueError("family weights must be non-negative")
-    s = float(w_arr.sum())
-    if s <= 0.0:
-        raise ValueError("sum of family weights must be > 0")
-    w_arr /= s
-    return names, w_arr
-
-
-def _sample_case_spec(case_id: int, family: str, args: argparse.Namespace) -> CaseSpec:
-    case_seed = int(args.seed) * 1_000_003 + int(case_id)
-    rng = np.random.default_rng(case_seed)
-
-    dt = _sample_centered_log_uniform(
-        rng,
-        center_value=float(args.dt_center),
-        center_prob=float(args.dt_center_prob),
-        vmin=float(args.dt_min),
-        vmax=float(args.dt_max),
-    )
-    tau = _sample_centered_log_uniform(
-        rng,
-        center_value=float(args.tau_center),
-        center_prob=float(args.tau_center_prob),
-        vmin=float(args.tau_min),
-        vmax=float(args.tau_max),
-    )
-
-    initial_regions = _build_initial_regions(
-        family,
-        rng,
-        velocity_segments=int(args.velocity_segments),
-        edge_width=float(args.edge_width),
-        multi_region_min_width=float(args.multi_region_min_width),
-    )
-    n_ratio, T_ratio, u_rms_over_sqrtT = _region_stats(initial_regions)
-
-    dt_over_tau = float(dt / max(tau, 1e-30))
-
-    return CaseSpec(
-        case_id=int(case_id),
-        family=str(family),
-        seed=int(case_seed),
-        nx=int(args.nx),
-        nv=int(args.nv),
-        Lx=float(args.Lx),
-        v_max=float(args.v_max),
-        dt=float(dt),
-        tau_tilde=float(tau),
-        T_total=float(args.T_total),
-        picard_iter=int(args.picard_iter),
-        picard_tol=float(args.picard_tol),
-        abs_tol=float(args.abs_tol),
-        conv_type=str(args.conv_type).lower(),
-        initial_regions=initial_regions,
-        dt_over_tau=dt_over_tau,
-        log10_dt=_safe_log10(dt),
-        log10_tau=_safe_log10(tau),
-        log10_dt_over_tau=_safe_log10(dt_over_tau),
-        n_ratio=float(n_ratio),
-        T_ratio=float(T_ratio),
-        u_rms_over_sqrtT=float(u_rms_over_sqrtT),
-    )
-
-
-def _build_all_case_specs(args: argparse.Namespace) -> list[CaseSpec]:
-    fam_names, fam_weights = _parse_family_weights(args.family_weights)
-    rng = np.random.default_rng(int(args.seed))
-
-    fam_idx = rng.choice(len(fam_names), size=int(args.cases), p=fam_weights)
-    specs: list[CaseSpec] = []
-    for cid in range(int(args.cases)):
-        fam = fam_names[int(fam_idx[cid])]
-        specs.append(_sample_case_spec(case_id=cid, family=fam, args=args))
-    return specs
-
-
-def _family_difficulty_bonus(family: str) -> float:
-    return float(FAMILY_DIFFICULTY_BONUS.get(str(family), 0.0))
-
-
-def _difficulty_proxy(case: CaseSpec) -> float:
-    return float(case.log10_dt_over_tau) + _family_difficulty_bonus(case.family)
-
-
-def _balanced_static_assign(all_specs: list[CaseSpec], world_size: int) -> list[list[CaseSpec]]:
-    if int(world_size) <= 1:
-        return [list(all_specs)]
-
-    ordered = sorted(
-        all_specs,
-        key=lambda case: (-_difficulty_proxy(case), str(case.family), int(case.case_id)),
-    )
-
-    buckets: list[list[CaseSpec]] = [[] for _ in range(int(world_size))]
-    for idx, case in enumerate(ordered):
-        wave = idx // int(world_size)
-        offset = idx % int(world_size)
-        target = offset if (wave % 2 == 0) else (int(world_size) - 1 - offset)
-        buckets[target].append(case)
-    return buckets
-
-
-def _assignment_summary(specs: list[CaseSpec]) -> str:
-    if not specs:
-        return "cases=0 families={} log10(dt/tau)_mean=nan range=[nan, nan]"
-
-    fam_counts = Counter(str(case.family) for case in specs)
-    fam_str = ", ".join(f"{name}:{fam_counts[name]}" for name in sorted(fam_counts))
-    log_vals = [float(case.log10_dt_over_tau) for case in specs]
-    mean_log = float(sum(log_vals) / len(log_vals))
-    min_log = float(min(log_vals))
-    max_log = float(max(log_vals))
-    return (
-        f"cases={len(specs)} "
-        f"families={{{fam_str}}} "
-        f"log10(dt/tau)_mean={mean_log:.3f} "
-        f"range=[{min_log:.3f}, {max_log:.3f}]"
-    )
-
-
-def _progress_summary(*, assigned: int, ok: int, failed: int) -> str:
-    return f"assigned={int(assigned)} ok={int(ok)} failed={int(failed)}"
-
-
-def _barrier(
-    label: str,
-    *,
-    is_dist: bool,
+        backend = "gloo"
+        device = "cpu"
+    dist.init_process_group(backend=backend, init_method="env://")
+    return True, rank, local_rank, world, device
+
+
+def balanced_local_plan(
+    total_cases: int,
+    tau_values: list[float],
     rank: int,
-    local_rank: int,
-    device: torch.device,
-    summary: str | None = None,
-) -> None:
-    if not is_dist:
-        return
-
-    if summary:
-        print(f"[rank {rank}] summary before {label}: {summary}", flush=True)
-    print(f"[rank {rank}] entering {label}", flush=True)
-    try:
-        if device.type == "cuda":
-            dist.barrier(device_ids=[int(local_rank)])
-        else:
-            dist.barrier()
-    except Exception as exc:
-        if summary:
-            print(f"[rank {rank}] {label} failed after {summary}", flush=True)
-        print(f"[rank {rank}] {label} error: {type(exc).__name__}: {exc}", flush=True)
-        raise
-    print(f"[rank {rank}] passed {label}", flush=True)
-
-
-def _setup_dist(device_arg: str) -> tuple[bool, int, int, int, torch.device]:
-    is_dist = ("RANK" in os.environ) and ("WORLD_SIZE" in os.environ)
-    if is_dist:
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-
-        if torch.cuda.is_available():
-            torch.cuda.set_device(local_rank)
-            device = torch.device(f"cuda:{local_rank}")
-            backend = "nccl"
-        else:
-            device = torch.device("cpu")
-            backend = "gloo"
-
-        dist.init_process_group(
-            backend=backend,
-            init_method="env://",
-            timeout=timedelta(hours=2),
-        )
-        return True, rank, local_rank, world_size, device
-
-    if device_arg == "auto":
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(device_arg)
-    return False, 0, 0, 1, device
-
-
-def _build_cfg(case: CaseSpec, device: torch.device) -> Config:
-    scheme_params = BGK1D.implicit.Params(
-        picard_iter=int(case.picard_iter),
-        picard_tol=float(case.picard_tol),
-        abs_tol=float(case.abs_tol),
-    )
-
-    fnames = {f.name for f in fields(scheme_params)}
-    if "conv_type" in fnames:
-        scheme_params = replace(scheme_params, conv_type=str(case.conv_type))
-    if "warm_enable" in fnames:
-        scheme_params = replace(scheme_params, warm_enable=False)
-    if "moments_cnn_modelpath" in fnames:
-        scheme_params = replace(scheme_params, moments_cnn_modelpath=None)
-
-    model_cfg = BGK1D.ModelConfig(
-        grid=BGK1D.Grid1D1V(
-            nx=int(case.nx),
-            nv=int(case.nv),
-            Lx=float(case.Lx),
-            v_max=float(case.v_max),
-        ),
-        time=BGK1D.TimeConfig(
-            dt=float(case.dt),
-            T_total=float(case.T_total),
-        ),
-        params=BGK1D.BGK1D1VParams(
-            tau_tilde=float(case.tau_tilde),
-        ),
-        scheme_params=scheme_params,
-        initial=BGK1D.InitialCondition1D(initial_regions=tuple(case.initial_regions)),
-    )
-
-    return Config(
-        model="BGK1D1V",
-        scheme="implicit",
-        backend="cuda_kernel",
-        model_cfg=model_cfg,
-        device=str(device),
-        log_level="err",
-        use_tqdm=False,
-    )
-
-
-def _run_case(case: CaseSpec, device: torch.device) -> CaseRun:
-    cfg = _build_cfg(case, device)
-    maker = Engine(cfg)
-
-    n_steps = int(cfg.model_cfg.time.n_steps)
-    nx = int(cfg.model_cfg.grid.nx)
-
-    W = np.empty((n_steps + 1, 3, nx), dtype=np.float32)
-    picard_iter = np.empty((n_steps + 1,), dtype=np.int32)
-    std_resid = np.empty((n_steps + 1,), dtype=np.float32)
-
-    with torch.no_grad():
-        n0, u0, T0 = calculate_moments(maker.state, maker.state.f)
-    W[0, 0] = n0.detach().cpu().float().numpy()
-    W[0, 1] = u0.detach().cpu().float().numpy()
-    W[0, 2] = T0.detach().cpu().float().numpy()
-    picard_iter[0] = 0
-    std_resid[0] = 0.0
-
-    _sync(device)
-    t0 = time.perf_counter()
-
-    for step in range(n_steps):
-        maker.stepper(step)
-        bench = getattr(maker.stepper, "benchlog", None) or {}
-
-        with torch.no_grad():
-            n, u, T = calculate_moments(maker.state, maker.state.f)
-
-        W[step + 1, 0] = n.detach().cpu().float().numpy()
-        W[step + 1, 1] = u.detach().cpu().float().numpy()
-        W[step + 1, 2] = T.detach().cpu().float().numpy()
-        picard_iter[step + 1] = int(bench.get("picard_iter", -1))
-        std_resid[step + 1] = float(bench.get("std_picard_residual", np.nan))
-
-    _sync(device)
-    elapsed = float(time.perf_counter() - t0)
-
-    return CaseRun(
-        W=W,
-        picard_iter=picard_iter,
-        std_residual=std_resid,
-        elapsed_sec=elapsed,
-    )
-
-
-def _base_case_record(case: CaseSpec) -> dict:
-    rec = asdict(case)
-    rec["initial_regions"] = [dict(r) for r in case.initial_regions]
-    return rec
-
-
-def _estimate_n_steps(case: CaseSpec) -> int:
-    return int(max(1, math.ceil(float(case.T_total) / max(float(case.dt), 1e-30))))
-
-
-def _make_failed_record(case: CaseSpec, *, rank: int, error: Exception, elapsed_sec: float) -> dict:
-    rec = _base_case_record(case)
-    rec.update(
-        {
-            "status": "failed",
-            "rank": int(rank),
-            "run_elapsed_sec": float(elapsed_sec),
-            "error_type": type(error).__name__,
-            "error_message": str(error),
-            "picard_iter_sum": 0,
-            "picard_iter_mean": float("nan"),
-            "std_residual_max": float("nan"),
-            "shard_path": None,
-            "local_case_index": -1,
-            "frame_start": -1,
-            "frame_end": -1,
-            "n_steps": _estimate_n_steps(case),
-        }
-    )
-    return rec
-
-
-class ShardWriter:
-    def __init__(self, shards_dir: Path, rank: int, cases_per_shard: int):
-        self.shards_dir = Path(shards_dir)
-        self.rank = int(rank)
-        self.cases_per_shard = max(int(cases_per_shard), 1)
-
-        self._buffer_cases: list[CaseSpec] = []
-        self._buffer_runs: list[CaseRun] = []
-        self._shard_idx = 0
-
-    def add_case(self, case: CaseSpec, run: CaseRun) -> list[dict]:
-        self._buffer_cases.append(case)
-        self._buffer_runs.append(run)
-        if len(self._buffer_cases) >= self.cases_per_shard:
-            return self.flush()
-        return []
-
-    def flush(self) -> list[dict]:
-        if not self._buffer_cases:
-            return []
-
-        n_cases = len(self._buffer_cases)
-        nx0 = int(self._buffer_cases[0].nx)
-        total_frames = int(sum(int(r.W.shape[0]) for r in self._buffer_runs))
-
-        W_all = torch.empty((total_frames, 3, nx0), dtype=torch.float32)
-        it_all = torch.empty((total_frames,), dtype=torch.int32)
-        resid_all = torch.empty((total_frames,), dtype=torch.float32)
-
-        case_ptr = [0]
-        case_meta: list[dict] = []
-
-        cursor = 0
-        for case, run in zip(self._buffer_cases, self._buffer_runs):
-            frames = int(run.W.shape[0])
-            if int(case.nx) != nx0:
-                raise ValueError("All cases in a shard must have same nx")
-
-            W_all[cursor:cursor + frames].copy_(torch.from_numpy(run.W))
-            it_all[cursor:cursor + frames].copy_(torch.from_numpy(run.picard_iter.astype(np.int32, copy=False)))
-            resid_all[cursor:cursor + frames].copy_(torch.from_numpy(run.std_residual.astype(np.float32, copy=False)))
-
-            case_info = _base_case_record(case)
-            case_info["status"] = "ok"
-            case_info["rank"] = int(self.rank)
-            case_info["run_elapsed_sec"] = float(run.elapsed_sec)
-
-            it_valid = run.picard_iter[1:]
-            it_valid = it_valid[it_valid > 0]
-            case_info["picard_iter_sum"] = int(np.sum(it_valid)) if it_valid.size else 0
-            case_info["picard_iter_mean"] = float(np.mean(it_valid)) if it_valid.size else float("nan")
-
-            std_tail = run.std_residual[1:]
-            case_info["std_residual_max"] = float(np.nanmax(std_tail)) if std_tail.size else float("nan")
-
-            case_meta.append(case_info)
-
-            cursor += frames
-            case_ptr.append(cursor)
-
-        shard_name = f"shard_rank{self.rank:02d}_{self._shard_idx:05d}.pt"
-        shard_rel = Path("shards") / shard_name
-        shard_path = self.shards_dir / shard_name
-
-        payload = {
-            "schema_version": 2,
-            "W": W_all,
-            "picard_iter": it_all,
-            "std_picard_residual": resid_all,
-            "case_ptr": torch.tensor(case_ptr, dtype=torch.int64),
-            "case_meta": case_meta,
-        }
-        torch.save(payload, shard_path)
-
-        records: list[dict] = []
-        for local_idx, meta in enumerate(case_meta):
-            frame_start = int(case_ptr[local_idx])
-            frame_end = int(case_ptr[local_idx + 1])
-
-            rec = dict(meta)
-            rec["shard_path"] = shard_rel.as_posix()
-            rec["local_case_index"] = int(local_idx)
-            rec["frame_start"] = frame_start
-            rec["frame_end"] = frame_end
-            rec["n_steps"] = int(max(frame_end - frame_start - 1, 0))
-            records.append(rec)
-
-        self._buffer_cases.clear()
-        self._buffer_runs.clear()
-        self._shard_idx += 1
-        return records
-
-
-def _write_jsonl(path: Path, records: Iterable[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as f:
-        for rec in records:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-
-def _read_jsonl(path: Path) -> list[dict]:
-    out: list[dict] = []
-    if not path.exists():
-        return out
-    with path.open("r") as f:
-        for line in f:
-            s = line.strip()
-            if s:
-                out.append(json.loads(s))
-    return out
-
-
-def _assign_random_split(
-    records: list[dict],
-    *,
-    split_key: str,
-    indices: list[int],
-    seed: int,
-    train_ratio: float,
-    val_ratio: float,
-    test_ratio: float,
-) -> None:
-    if not indices:
-        return
-
-    rng = np.random.default_rng(seed)
-    arr = np.asarray(indices, dtype=np.int64)
-    rng.shuffle(arr)
-
-    n = int(arr.size)
-    n_train = int(round(float(train_ratio) * n))
-    n_val = int(round(float(val_ratio) * n))
-    n_train = min(n_train, n)
-    n_val = min(n_val, n - n_train)
-
-    for i, ridx in enumerate(arr.tolist()):
-        if i < n_train:
-            split = "train"
-        elif i < n_train + n_val:
-            split = "val"
-        else:
-            split = "test"
-        records[ridx][split_key] = split
-
-
-def _merge_and_write_manifests(
-    *,
-    out_root: Path,
     world_size: int,
-    args: argparse.Namespace,
-) -> None:
-    rank_records: list[dict] = []
-    for rank in range(int(world_size)):
-        p = out_root / "manifests" / f"case_manifest_rank{rank:02d}.jsonl"
-        rank_records.extend(_read_jsonl(p))
+) -> list[tuple[int, float]]:
+    tau_values = [float(v) for v in tau_values]
+    n_tau = len(tau_values)
+    block_size = world_size * n_tau
+    plan: list[tuple[int, float]] = []
+    for global_case_id in range(total_cases):
+        slot = global_case_id % block_size
+        tau_pos = slot // world_size
+        slot_rank = slot % world_size
+        tau_value = tau_values[(tau_pos + slot_rank) % n_tau]
+        if slot_rank == rank:
+            plan.append((global_case_id, float(tau_value)))
+    return plan
 
-    if not rank_records:
-        raise RuntimeError("No case records found from worker ranks")
 
-    rank_records.sort(key=lambda x: int(x["case_id"]))
+def planned_shard_offset(
+    total_cases: int,
+    tau_values: list[float],
+    world_size: int,
+    rank: int,
+    cases_per_shard: int,
+) -> int:
+    offset = 0
+    for r in range(rank):
+        local_cases = len(balanced_local_plan(total_cases, tau_values, r, world_size))
+        offset += math.ceil(local_cases / cases_per_shard)
+    return offset
 
-    ok_indices = [i for i, rec in enumerate(rank_records) if str(rec.get("status", "ok")) == "ok"]
-    failed_indices = [i for i, rec in enumerate(rank_records) if str(rec.get("status", "ok")) != "ok"]
-    for idx in failed_indices:
-        for key in ("split_iid", "split_ood_family", "split_ood_range"):
-            rank_records[idx][key] = "failed"
 
-    _assign_random_split(
-        rank_records,
-        split_key="split_iid",
-        indices=ok_indices,
-        seed=int(args.split_seed),
-        train_ratio=float(args.train_ratio),
-        val_ratio=float(args.val_ratio),
-        test_ratio=float(args.test_ratio),
-    )
+def make_case_generator(seed: int) -> torch.Generator:
+    g = torch.Generator(device="cpu")
+    g.manual_seed(int(seed))
+    return g
 
-    holdout_fams = {s.strip() for s in str(args.ood_family_holdout).split(",") if s.strip()}
-    in_dist_idx: list[int] = []
-    for i in ok_indices:
-        rec = rank_records[i]
-        if str(rec["family"]) in holdout_fams:
-            rec["split_ood_family"] = "test"
-        else:
-            in_dist_idx.append(i)
 
-    ratio_den = max(float(args.train_ratio) + float(args.val_ratio), 1e-12)
-    _assign_random_split(
-        rank_records,
-        split_key="split_ood_family",
-        indices=in_dist_idx,
-        seed=int(args.split_seed) + 17,
-        train_ratio=float(args.train_ratio) / ratio_den,
-        val_ratio=float(args.val_ratio) / ratio_den,
-        test_ratio=0.0,
-    )
+def rand_uniform(g: torch.Generator, lo: float, hi: float) -> float:
+    return float(lo + (hi - lo) * torch.rand((), generator=g).item())
 
-    in_range_idx: list[int] = []
-    for i in ok_indices:
-        rec = rank_records[i]
-        n_ratio = float(rec.get("n_ratio", 1.0))
-        T_ratio = float(rec.get("T_ratio", 1.0))
-        log_dt_tau = float(rec.get("log10_dt_over_tau", 0.0))
 
-        is_ood = (
-            (n_ratio >= float(args.ood_ratio_threshold))
-            or (T_ratio >= float(args.ood_ratio_threshold))
-            or (log_dt_tau < float(args.ood_log10_dt_over_tau_min))
-            or (log_dt_tau > float(args.ood_log10_dt_over_tau_max))
-        )
+def sample_initial_regions(g: torch.Generator, n_floor: float, w_min: float) -> list[dict[str, Any]]:
+    rem = 1.0 - 4.0 * float(w_min)
+    widths = torch.rand((4,), generator=g)
+    widths = widths / widths.sum()
+    widths = float(w_min) + rem * widths
+    x0 = float(widths[0].item())
+    x1 = float((widths[0] + widths[1]).item())
+    x2 = float((widths[0] + widths[1] + widths[2]).item())
 
-        if is_ood:
-            rec["split_ood_range"] = "test"
-        else:
-            in_range_idx.append(i)
+    n_vals = [rand_uniform(g, n_floor, 1.0) for _ in range(4)]
+    T_vals = [0.5 + torch.rand((), generator=g).item() for _ in range(4)]
+    u_vals = [0.0, rand_uniform(g, -0.2, 0.2), rand_uniform(g, -0.2, 0.2), 0.0]
 
-    _assign_random_split(
-        rank_records,
-        split_key="split_ood_range",
-        indices=in_range_idx,
-        seed=int(args.split_seed) + 31,
-        train_ratio=float(args.train_ratio) / ratio_den,
-        val_ratio=float(args.val_ratio) / ratio_den,
-        test_ratio=0.0,
-    )
+    return [
+        {"x_range": [0.0, x0], "n": n_vals[0], "u": u_vals[0], "T": T_vals[0]},
+        {"x_range": [x0, x1], "n": n_vals[1], "u": u_vals[1], "T": T_vals[1]},
+        {"x_range": [x1, x2], "n": n_vals[2], "u": u_vals[2], "T": T_vals[2]},
+        {"x_range": [x2, 1.0], "n": n_vals[3], "u": u_vals[3], "T": T_vals[3]},
+    ]
 
-    case_manifest = out_root / "case_manifest.jsonl"
-    _write_jsonl(case_manifest, rank_records)
 
-    fam_count: dict[str, int] = {}
-    failed_fam_count: dict[str, int] = {}
-    for rec in rank_records:
-        fam = str(rec["family"])
-        if str(rec.get("status", "ok")) == "ok":
-            fam_count[fam] = fam_count.get(fam, 0) + 1
-        else:
-            failed_fam_count[fam] = failed_fam_count.get(fam, 0) + 1
-
-    split_count: dict[str, dict[str, int]] = {}
-    for key in ("split_iid", "split_ood_family", "split_ood_range"):
-        c = {"train": 0, "val": 0, "test": 0}
-        for rec in rank_records:
-            split_name = str(rec.get(key, ""))
-            if split_name in c:
-                c[split_name] += 1
-        split_count[key] = c
-
-    n_shards = len(list((out_root / "shards").glob("*.pt")))
-    n_failed = len(failed_indices)
-
-    dataset_manifest = {
-        "schema_version": 2,
-        "format": "kineticEQ_BGK1D1V_pt_v2",
-        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "generator": {
-            "script": "kineticEQ.CNN.BGK1D1V.gen_traindata_v2.generate_bgk1d_implicit_dataset",
-            "args": vars(args),
-        },
-        "num_cases": int(len(ok_indices)),
-        "num_records": int(len(rank_records)),
-        "num_ok_cases": int(len(ok_indices)),
-        "num_failed_cases": int(n_failed),
-        "num_shards": int(n_shards),
-        "world_size": int(world_size),
-        "families": fam_count,
-        "failed_families": failed_fam_count,
-        "split_counts": split_count,
-        "paths": {
-            "shards_dir": "shards",
-            "case_manifest": "case_manifest.jsonl",
-        },
+def region_stats(initial_regions: list[dict[str, Any]]) -> dict[str, float]:
+    n_vals = [float(r["n"]) for r in initial_regions]
+    T_vals = [float(r["T"]) for r in initial_regions]
+    u_vals = [float(r["u"]) for r in initial_regions]
+    n_min = min(n_vals)
+    n_max = max(n_vals)
+    T_min = min(T_vals)
+    T_max = max(T_vals)
+    return {
+        "n_min": float(n_min),
+        "n_max": float(n_max),
+        "n_ratio": float(n_max / max(n_min, 1e-30)),
+        "T_min": float(T_min),
+        "T_max": float(T_max),
+        "T_ratio": float(T_max / max(T_min, 1e-30)),
+        "u_min": float(min(u_vals)),
+        "u_max": float(max(u_vals)),
+        "u_rms": float(math.sqrt(sum(v * v for v in u_vals) / max(len(u_vals), 1))),
     }
 
-    dataset_manifest_path = out_root / "dataset_manifest.json"
-    dataset_manifest_path.write_text(json.dumps(dataset_manifest, indent=2, ensure_ascii=False))
 
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
-    p.add_argument("--out_dir", type=str, required=True)
-    p.add_argument("--cases", type=int, default=1200)
-    p.add_argument("--cases_per_shard", type=int, default=200)
-    p.add_argument("--overwrite", action="store_true")
-
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--split_seed", type=int, default=123)
-    p.add_argument("--train_ratio", type=float, default=0.8)
-    p.add_argument("--val_ratio", type=float, default=0.1)
-    p.add_argument("--test_ratio", type=float, default=0.1)
-
-    p.add_argument("--device", type=str, default="auto")
-
-    p.add_argument("--nx", type=int, default=512)
-    p.add_argument("--nv", type=int, default=256)
-    p.add_argument("--Lx", type=float, default=1.0)
-    p.add_argument("--v_max", type=float, default=10.0)
-    p.add_argument("--T_total", type=float, default=0.05)
-
-    p.add_argument("--dt_center", type=float, default=5e-4)
-    p.add_argument("--dt_center_prob", type=float, default=0.5)
-    p.add_argument("--dt_min", type=float, default=5e-5)
-    p.add_argument("--dt_max", type=float, default=5e-3)
-
-    p.add_argument("--tau_center", type=float, default=5e-7)
-    p.add_argument("--tau_center_prob", type=float, default=0.4)
-    p.add_argument("--tau_min", type=float, default=5e-9)
-    p.add_argument("--tau_max", type=float, default=5e-6)
-
-    p.add_argument("--picard_iter", type=int, default=10000)
-    p.add_argument("--picard_tol", type=float, default=1e-8)
-    p.add_argument("--abs_tol", type=float, default=1e-13)
-    p.add_argument("--conv_type", type=str, choices=["f", "w"], default="w")
-
-    p.add_argument("--family_weights", type=str, default=DEFAULT_FAMILY_WEIGHTS)
-    p.add_argument("--velocity_segments", type=int, default=16)
-    p.add_argument("--edge_width", type=float, default=0.02)
-    p.add_argument("--multi_region_min_width", type=float, default=0.10)
-
-    p.add_argument("--ood_family_holdout", type=str, default="isobaric_contact,double_hotspot_isobaric")
-    p.add_argument("--ood_ratio_threshold", type=float, default=6.0)
-    p.add_argument("--ood_log10_dt_over_tau_min", type=float, default=-2.0)
-    p.add_argument("--ood_log10_dt_over_tau_max", type=float, default=4.0)
-
-    p.add_argument("--log_interval", type=int, default=10)
-    return p.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-
-    split_sum = float(args.train_ratio) + float(args.val_ratio) + float(args.test_ratio)
-    if abs(split_sum - 1.0) > 1e-8:
-        raise ValueError(f"train/val/test ratio must sum to 1.0, got {split_sum}")
-
-    if float(args.dt_min) <= 0.0 or float(args.dt_max) <= 0.0:
-        raise ValueError("dt_min and dt_max must be positive")
-    if float(args.dt_min) > float(args.dt_max):
-        raise ValueError(f"dt_min must be <= dt_max, got {args.dt_min} > {args.dt_max}")
-    if float(args.tau_min) <= 0.0 or float(args.tau_max) <= 0.0:
-        raise ValueError("tau_min and tau_max must be positive")
-    if float(args.tau_min) > float(args.tau_max):
-        raise ValueError(f"tau_min must be <= tau_max, got {args.tau_min} > {args.tau_max}")
-
-    is_dist, rank, local_rank, world_size, device = _setup_dist(args.device)
-    out_root = Path(args.out_dir).resolve()
-
-    if rank == 0 and args.overwrite and out_root.exists():
-        shutil.rmtree(out_root)
-
-    _barrier(
-        "barrier-1",
-        is_dist=is_dist,
-        rank=rank,
-        local_rank=local_rank,
-        device=device,
+def make_model_cfg(args, tau_tilde: float, initial_regions: list[dict[str, Any]]):
+    return BGK1D.ModelConfig(
+        grid=BGK1D.Grid1D1V(nx=args.nx, nv=args.nv, Lx=args.Lx, v_max=args.v_max),
+        time=BGK1D.TimeConfig(dt=args.dt, T_total=args.T_total),
+        params=BGK1D.BGK1D1VParams(tau_tilde=float(tau_tilde)),
+        scheme_params=BGK1D.implicit.Params(
+            picard_iter=int(args.picard_iter),
+            picard_tol=float(args.picard_tol),
+            abs_tol=float(args.abs_tol),
+            conv_type=str(args.conv_type),
+        ),
+        initial=BGK1D.InitialCondition1D(
+            initial_regions=tuple(
+                {
+                    "x_range": (float(r["x_range"][0]), float(r["x_range"][1])),
+                    "n": float(r["n"]),
+                    "u": float(r["u"]),
+                    "T": float(r["T"]),
+                }
+                for r in initial_regions
+            )
+        ),
     )
 
-    (out_root / "shards").mkdir(parents=True, exist_ok=True)
-    (out_root / "manifests").mkdir(parents=True, exist_ok=True)
 
-    all_specs = _build_all_case_specs(args)
-    assigned_specs = _balanced_static_assign(all_specs, world_size)
-    my_specs = assigned_specs[rank]
-    print(f"[rank {rank}] assignment summary: {_assignment_summary(my_specs)}", flush=True)
+def run_case(case_id: int, tau_tilde: float, args, device: str) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+    case_seed = int(args.seed) + int(case_id)
+    g = make_case_generator(case_seed)
+    initial_regions = sample_initial_regions(g, float(args.n_floor), float(args.w_min))
+    model_cfg = make_model_cfg(args, tau_tilde=float(tau_tilde), initial_regions=initial_regions)
+    engine = Engine(
+        Config(
+            model="BGK1D1V",
+            scheme="implicit",
+            backend="cuda_kernel",
+            model_cfg=model_cfg,
+            device=device,
+            dtype="float64",
+            log_level="err",
+            use_tqdm="false",
+        )
+    )
 
-    writer = ShardWriter(
-        shards_dir=out_root / "shards",
+    n_steps = int(model_cfg.time.n_steps)
+    n_frames = n_steps + 1
+    nx = int(model_cfg.grid.nx)
+    W = torch.empty((n_frames, 3, nx), dtype=torch.float32)
+    picard_iter = torch.empty((n_frames,), dtype=torch.int32)
+    std_picard_residual = torch.empty((n_frames,), dtype=torch.float32)
+
+    t0 = time.time()
+    with torch.no_grad():
+        n0, u0, T0 = calculate_moments(engine.state, engine.state.f)
+    W[0, 0].copy_(n0.detach().cpu().to(torch.float32))
+    W[0, 1].copy_(u0.detach().cpu().to(torch.float32))
+    W[0, 2].copy_(T0.detach().cpu().to(torch.float32))
+    picard_iter[0] = 0
+    std_picard_residual[0] = 0.0
+
+    for step in range(n_steps):
+        engine.stepper(step)
+        bench = getattr(engine.stepper, "benchlog", None) or {}
+        with torch.no_grad():
+            n1, u1, T1 = calculate_moments(engine.state, engine.state.f)
+        W[step + 1, 0].copy_(n1.detach().cpu().to(torch.float32))
+        W[step + 1, 1].copy_(u1.detach().cpu().to(torch.float32))
+        W[step + 1, 2].copy_(T1.detach().cpu().to(torch.float32))
+        picard_iter[step + 1] = int(bench.get("picard_iter", -1))
+        std_picard_residual[step + 1] = float(bench.get("std_picard_residual", float("nan")))
+
+    rec = {
+        "case_id": int(case_id),
+        "seed": int(case_seed),
+        "frame_start": -1,
+        "n_frames": int(n_frames),
+        "n_steps": int(n_steps),
+        "nx": int(model_cfg.grid.nx),
+        "nv": int(model_cfg.grid.nv),
+        "Lx": float(model_cfg.grid.Lx),
+        "v_max": float(model_cfg.grid.v_max),
+        "dt": float(model_cfg.time.dt),
+        "T_total": float(model_cfg.time.T_total),
+        "tau_tilde": float(model_cfg.params.tau_tilde),
+        "log10_dt": float(math.log10(float(model_cfg.time.dt))),
+        "log10_tau": float(math.log10(float(model_cfg.params.tau_tilde))),
+        "log10_dt_over_tau": float(math.log10(float(model_cfg.time.dt) / float(model_cfg.params.tau_tilde))),
+        "picard_iter_limit": int(args.picard_iter),
+        "picard_tol": float(args.picard_tol),
+        "abs_tol": float(args.abs_tol),
+        "conv_type": str(args.conv_type),
+        "initial_regions": initial_regions,
+        "elapsed_sec": float(time.time() - t0),
+        "failed": False,
+        "error_message": "",
+        "shard_path": "",
+    }
+    rec.update(region_stats(initial_regions))
+    payload = {
+        "W": W,
+        "picard_iter": picard_iter,
+        "std_picard_residual": std_picard_residual,
+    }
+    return rec, payload
+
+
+def flush_shard(
+    out_dir: Path,
+    shard_global_id: int,
+    shard_cases: list[dict[str, Any]],
+    shard_payloads: list[dict[str, torch.Tensor]],
+) -> None:
+    if not shard_cases:
+        return
+    total_frames = sum(int(rec["n_frames"]) for rec in shard_cases)
+    nx = int(shard_payloads[0]["W"].shape[-1])
+    W = torch.empty((total_frames, 3, nx), dtype=torch.float32)
+    picard_iter = torch.empty((total_frames,), dtype=torch.int32)
+    std_picard_residual = torch.empty((total_frames,), dtype=torch.float32)
+    cursor = 0
+    shard_rel_path = f"shards/shard_{shard_global_id:05d}.pt"
+    for rec, payload in zip(shard_cases, shard_payloads):
+        n_frames = int(rec["n_frames"])
+        W[cursor:cursor + n_frames].copy_(payload["W"])
+        picard_iter[cursor:cursor + n_frames].copy_(payload["picard_iter"])
+        std_picard_residual[cursor:cursor + n_frames].copy_(payload["std_picard_residual"])
+        rec["frame_start"] = int(cursor)
+        rec["shard_path"] = shard_rel_path
+        cursor += n_frames
+    torch.save(
+        {
+            "format": "kineticEQ_BGK1D1V_pt_v2",
+            "W": W,
+            "picard_iter": picard_iter,
+            "std_picard_residual": std_picard_residual,
+            "case_ids": [int(rec["case_id"]) for rec in shard_cases],
+        },
+        out_dir / shard_rel_path,
+    )
+
+
+def assign_split_iid(records: list[dict[str, Any]], seed: int) -> None:
+    ok = [rec for rec in records if not bool(rec.get("failed", False))]
+    ok_sorted = sorted(ok, key=lambda x: int(x["case_id"]))
+    g = torch.Generator(device="cpu")
+    g.manual_seed(int(seed) + 2026)
+    perm = torch.randperm(len(ok_sorted), generator=g).tolist()
+    n = len(ok_sorted)
+    n_train = int(round(0.8 * n))
+    n_val = int(round(0.1 * n))
+    train_cut = n_train
+    val_cut = min(n, n_train + n_val)
+    label_by_case: dict[int, str] = {}
+    for pos, order_idx in enumerate(perm):
+        case_id = int(ok_sorted[order_idx]["case_id"])
+        if pos < train_cut:
+            label_by_case[case_id] = "train"
+        elif pos < val_cut:
+            label_by_case[case_id] = "val"
+        else:
+            label_by_case[case_id] = "test"
+    for rec in records:
+        rec["split_iid"] = label_by_case.get(int(rec["case_id"]), "test")
+
+
+def assign_split_ood_tau(records: list[dict[str, Any]]) -> None:
+    ok = [rec for rec in records if not bool(rec.get("failed", False))]
+    tau_values = sorted({float(rec["tau_tilde"]) for rec in ok})
+    if len(tau_values) == 0:
+        tau_to_label = {}
+    elif len(tau_values) == 1:
+        tau_to_label = {tau_values[0]: "train"}
+    elif len(tau_values) == 2:
+        tau_to_label = {tau_values[0]: "train", tau_values[1]: "test"}
+    else:
+        tau_to_label = {tau: "train" for tau in tau_values}
+        tau_to_label[tau_values[0]] = "test"
+        tau_to_label[tau_values[-1]] = "val"
+    for rec in records:
+        rec["split_ood_tau"] = tau_to_label.get(float(rec["tau_tilde"]), "train")
+
+
+def write_json(path: Path, obj: Any) -> None:
+    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2))
+
+
+def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def merge_partials(out_dir: Path, args, world_size: int) -> None:
+    part_dir = out_dir / "partials"
+    all_records: list[dict[str, Any]] = []
+    for rank in range(world_size):
+        part_path = part_dir / f"case_manifest.rank{rank:05d}.jsonl"
+        if not part_path.exists():
+            continue
+        with part_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if s:
+                    all_records.append(json.loads(s))
+    all_records.sort(key=lambda x: int(x["case_id"]))
+    assign_split_iid(all_records, int(args.seed))
+    assign_split_ood_tau(all_records)
+    write_jsonl(out_dir / "case_manifest.jsonl", all_records)
+
+    ok_records = [rec for rec in all_records if not bool(rec.get("failed", False))]
+    shard_paths = sorted({str(rec["shard_path"]) for rec in ok_records if str(rec.get("shard_path", ""))})
+    manifest = {
+        "format": "kineticEQ_BGK1D1V_pt_v2",
+        "version": 2,
+        "num_cases": int(len(ok_records)),
+        "num_cases_requested": int(args.cases),
+        "num_failed_cases": int(sum(bool(rec.get("failed", False)) for rec in all_records)),
+        "num_shards": int(len(shard_paths)),
+        "cases_per_shard": int(args.cases_per_shard),
+        "paths": {
+            "case_manifest": "case_manifest.jsonl",
+            "shard_dir": "shards",
+        },
+        "grid": {
+            "nx": int(args.nx),
+            "nv": int(args.nv),
+            "Lx": float(args.Lx),
+            "v_max": float(args.v_max),
+        },
+        "time": {
+            "dt": float(args.dt),
+            "T_total": float(args.T_total),
+        },
+        "scheme": {
+            "solver": "implicit",
+            "backend": "cuda_kernel",
+            "picard_iter": int(args.picard_iter),
+            "picard_tol": float(args.picard_tol),
+            "abs_tol": float(args.abs_tol),
+            "conv_type": str(args.conv_type),
+        },
+        "sampling": {
+            "n_floor": float(args.n_floor),
+            "w_min": float(args.w_min),
+            "T_rule": "0.5 + U(0,1)",
+            "u_rule": "u0=u3=0, u1=u2=(2U-1)*0.2",
+            "tau_tilde_list": [float(v) for v in args.tau_tilde_list],
+        },
+        "splits": {
+            "iid": {"train": 0.8, "val": 0.1, "test": 0.1},
+            "ood_tau_rule": "min_tau=test, max_tau=val, others=train",
+        },
+    }
+    write_json(out_dir / "dataset_manifest.json", manifest)
+
+
+def dist_barrier(local_rank: int) -> None:
+    if not dist.is_initialized():
+        return
+    if dist.get_backend() == "nccl":
+        dist.barrier(device_ids=[local_rank])
+    else:
+        dist.barrier()
+
+
+def main():
+    args = parse_args()
+    is_dist, rank, local_rank, world_size, device = setup_dist(args.device)
+    if not str(device).startswith("cuda"):
+        raise ValueError("gen_traindata_v2 requires CUDA because the implicit generator uses backend='cuda_kernel'")
+    out_dir = Path(args.out_dir).resolve()
+    (out_dir / "shards").mkdir(parents=True, exist_ok=True)
+    (out_dir / "partials").mkdir(parents=True, exist_ok=True)
+
+    local_plan = balanced_local_plan(
+        total_cases=int(args.cases),
+        tau_values=[float(v) for v in args.tau_tilde_list],
+        rank=rank,
+        world_size=world_size,
+    )
+    shard_id_base = planned_shard_offset(
+        total_cases=int(args.cases),
+        tau_values=[float(v) for v in args.tau_tilde_list],
+        world_size=world_size,
         rank=rank,
         cases_per_shard=int(args.cases_per_shard),
     )
 
-    local_records: list[dict] = []
-    t_rank0 = time.perf_counter()
-    ok_cases = 0
-    failed_cases = 0
+    local_records: list[dict[str, Any]] = []
+    shard_cases: list[dict[str, Any]] = []
+    shard_payloads: list[dict[str, torch.Tensor]] = []
+    local_shard_count = 0
 
-    for i, case in enumerate(my_specs, start=1):
-        case_t0 = time.perf_counter()
+    for local_idx, (case_id, tau_tilde) in enumerate(local_plan):
         try:
-            run = _run_case(case, device=device)
-        except Exception as exc:
-            failed_cases += 1
-            failed_elapsed = float(time.perf_counter() - case_t0)
-            local_records.append(_make_failed_record(case, rank=rank, error=exc, elapsed_sec=failed_elapsed))
+            rec, payload = run_case(case_id=int(case_id), tau_tilde=float(tau_tilde), args=args, device=device)
+            shard_cases.append(rec)
+            shard_payloads.append(payload)
+            local_records.append(rec)
+            if len(shard_cases) >= int(args.cases_per_shard):
+                flush_shard(
+                    out_dir=out_dir,
+                    shard_global_id=shard_id_base + local_shard_count,
+                    shard_cases=shard_cases,
+                    shard_payloads=shard_payloads,
+                )
+                local_shard_count += 1
+                shard_cases = []
+                shard_payloads = []
             print(
-                f"[rank {rank}] case failed "
-                f"(case_id={case.case_id}, family={case.family}, "
-                f"error_type={type(exc).__name__}, error_message={exc})",
+                f"rank={rank} local={local_idx + 1}/{len(local_plan)} case_id={case_id} tau={tau_tilde:.3e} elapsed={rec['elapsed_sec']:.3f}s",
                 flush=True,
             )
-            continue
-
-        ok_cases += 1
-        local_records.extend(writer.add_case(case, run))
-
-        if (i == 1) or (i % max(int(args.log_interval), 1) == 0) or (i == len(my_specs)):
+        except Exception as e:
+            local_records.append(
+                {
+                    "case_id": int(case_id),
+                    "seed": int(args.seed) + int(case_id),
+                    "frame_start": -1,
+                    "n_frames": 0,
+                    "n_steps": 0,
+                    "nx": int(args.nx),
+                    "nv": int(args.nv),
+                    "Lx": float(args.Lx),
+                    "v_max": float(args.v_max),
+                    "dt": float(args.dt),
+                    "T_total": float(args.T_total),
+                    "tau_tilde": float(tau_tilde),
+                    "log10_dt": float(math.log10(float(args.dt))),
+                    "log10_tau": float(math.log10(float(tau_tilde))),
+                    "log10_dt_over_tau": float(math.log10(float(args.dt) / float(tau_tilde))),
+                    "picard_iter_limit": int(args.picard_iter),
+                    "picard_tol": float(args.picard_tol),
+                    "abs_tol": float(args.abs_tol),
+                    "conv_type": str(args.conv_type),
+                    "initial_regions": [],
+                    "n_min": None,
+                    "n_max": None,
+                    "n_ratio": None,
+                    "T_min": None,
+                    "T_max": None,
+                    "T_ratio": None,
+                    "u_min": None,
+                    "u_max": None,
+                    "u_rms": None,
+                    "elapsed_sec": 0.0,
+                    "failed": True,
+                    "error_message": str(e),
+                    "shard_path": "",
+                }
+            )
             print(
-                f"[rank {rank}] {i}/{len(my_specs)} cases done "
-                f"(case_id={case.case_id}, family={case.family}, elapsed={run.elapsed_sec:.2f}s)",
+                f"rank={rank} case_id={case_id} tau={tau_tilde:.3e} failed={type(e).__name__}: {e}",
                 flush=True,
             )
 
-    local_records.extend(writer.flush())
+    if shard_cases:
+        flush_shard(
+            out_dir=out_dir,
+            shard_global_id=shard_id_base + local_shard_count,
+            shard_cases=shard_cases,
+            shard_payloads=shard_payloads,
+        )
 
-    local_manifest_path = out_root / "manifests" / f"case_manifest_rank{rank:02d}.jsonl"
-    _write_jsonl(local_manifest_path, local_records)
+    write_jsonl(out_dir / "partials" / f"case_manifest.rank{rank:05d}.jsonl", local_records)
 
-    progress = _progress_summary(assigned=len(my_specs), ok=ok_cases, failed=failed_cases)
-    _barrier(
-        "barrier-2",
-        is_dist=is_dist,
-        rank=rank,
-        local_rank=local_rank,
-        device=device,
-        summary=progress,
-    )
+    if is_dist:
+        dist_barrier(local_rank)
 
     if rank == 0:
-        print("[rank 0] starting manifest merge", flush=True)
-        try:
-            _merge_and_write_manifests(
-                out_root=out_root,
-                world_size=world_size,
-                args=args,
-            )
-        except Exception as exc:
-            print(f"[rank 0] manifest merge failed: {type(exc).__name__}: {exc}", flush=True)
-            raise
-        print("[rank 0] finished manifest merge", flush=True)
-        elapsed_all = time.perf_counter() - t_rank0
-        print(f"[rank 0] finished dataset generation in {elapsed_all:.1f}s", flush=True)
-        print(f"[rank 0] dataset_manifest: {(out_root / 'dataset_manifest.json').as_posix()}", flush=True)
-        print(f"[rank 0] case_manifest: {(out_root / 'case_manifest.jsonl').as_posix()}", flush=True)
+        merge_partials(out_dir=out_dir, args=args, world_size=world_size)
 
-    _barrier(
-        "barrier-3",
-        is_dist=is_dist,
-        rank=rank,
-        local_rank=local_rank,
-        device=device,
-        summary=progress,
-    )
-    if is_dist:
+    if is_dist and dist.is_initialized():
         dist.destroy_process_group()
 
 

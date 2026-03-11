@@ -1,6 +1,9 @@
+# kineticEQ/CNN/BGK1D1V/gen_traindata_v2/dataloader_pt.py
+
 from __future__ import annotations
 
 import json
+from bisect import bisect_right
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,95 +13,89 @@ import torch
 from torch.utils.data import Dataset
 
 
-@dataclass
+def _read_json(path: str | Path) -> dict[str, Any]:
+    return json.loads(Path(path).read_text())
+
+
+def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with Path(path).open("r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if s:
+                rows.append(json.loads(s))
+    return rows
+
+
+def _resolve_path(root: Path, value: str | Path) -> Path:
+    p = Path(value)
+    if p.is_absolute():
+        return p
+    return (root / p).resolve()
+
+
+@dataclass(frozen=True)
 class SampleIndex:
     case_idx: int
     t: int
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text())
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    with path.open("r") as f:
-        for line in f:
-            s = line.strip()
-            if s:
-                out.append(json.loads(s))
-    return out
-
-
 class BGK1D1VShardDeltaDataset(Dataset):
-    """
-    Sharded PT dataset (v2): 1 sample = (case_id, t)
-
-    X: (5, nx) = [n(t), u(t), T(t), log10(dt), log10(tau)]
-    Y: (3, nx)
-      - target="dw":  [Δn, Δu, ΔT]
-      - target="dnu": [Δn, Δ(nu), ΔT]
-    """
-
     def __init__(
         self,
         dataset_manifest_path: str | Path,
         split: str = "train",
-        *,
         split_key: str = "split_iid",
         target: str = "dnu",
         dtype: torch.dtype = torch.float32,
         cache_shards: int = 2,
     ):
         super().__init__()
-
-        split = str(split)
         if split not in ("train", "val", "test"):
-            raise ValueError(f"split must be train/val/test, got {split!r}")
-
-        target_norm = str(target).strip().lower()
-        if target_norm not in ("dw", "dnu"):
-            raise ValueError(f"target must be 'dw' or 'dnu', got {target!r}")
+            raise ValueError(f"split must be train/val/test, got {split}")
+        split_key = str(split_key).strip()
+        target = str(target).strip().lower()
+        if target not in ("dnu", "dw"):
+            raise ValueError(f"target must be 'dnu' or 'dw', got {target}")
+        if int(cache_shards) < 1:
+            raise ValueError("cache_shards must be >= 1")
 
         self.dataset_manifest_path = Path(dataset_manifest_path).resolve()
+        self.dataset_root = self.dataset_manifest_path.parent
         self.dataset_manifest = _read_json(self.dataset_manifest_path)
-        self.target = target_norm
-        self.dtype = dtype
-        self.split_key = str(split_key)
-        self.cache_shards = max(int(cache_shards), 1)
+        fmt = str(self.dataset_manifest.get("format", ""))
+        if fmt != "kineticEQ_BGK1D1V_pt_v2":
+            raise ValueError(f"unexpected dataset format: {fmt!r}")
 
-        if str(self.dataset_manifest.get("format", "")) != "kineticEQ_BGK1D1V_pt_v2":
-            raise ValueError(
-                "manifest format mismatch: expected 'kineticEQ_BGK1D1V_pt_v2', "
-                f"got {self.dataset_manifest.get('format')!r}"
-            )
+        case_manifest_rel = self.dataset_manifest.get("paths", {}).get("case_manifest", "case_manifest.jsonl")
+        case_manifest_path = _resolve_path(self.dataset_root, case_manifest_rel)
+        records_all = _read_jsonl(case_manifest_path)
 
-        data_root = self.dataset_manifest_path.parent
-        cm_rel = self.dataset_manifest.get("paths", {}).get("case_manifest", "case_manifest.jsonl")
-        self.case_manifest_path = (data_root / cm_rel).resolve()
-
-        records_all = _read_jsonl(self.case_manifest_path)
-        if not records_all:
-            raise RuntimeError(f"No records found in {self.case_manifest_path}")
-
-        if self.split_key not in records_all[0]:
-            raise KeyError(f"split key {self.split_key!r} not found in case manifest")
-
-        self.records = [r for r in records_all if str(r[self.split_key]) == split]
+        self.records = [
+            rec
+            for rec in records_all
+            if (not bool(rec.get("failed", False))) and str(rec.get(split_key, "")) == split
+        ]
         if not self.records:
-            raise RuntimeError(f"No records for split={split}, split_key={self.split_key}")
+            raise RuntimeError(f"No records found for split={split!r} split_key={split_key!r}")
 
-        self._root = data_root
+        self.split = split
+        self.split_key = split_key
+        self.target = target
+        self.dtype = dtype
+        self.cache_shards = int(cache_shards)
+        self._const_cache: dict[tuple[int, float, float, torch.dtype], tuple[torch.Tensor, torch.Tensor]] = {}
+        self._shard_cache: OrderedDict[Path, dict[str, Any]] = OrderedDict()
+
         self._offsets: list[int] = [0]
         total = 0
         for rec in self.records:
             n_steps = int(rec["n_steps"])
-            total += max(n_steps, 0)
+            if n_steps < 1:
+                raise ValueError(f"record case_id={rec.get('case_id')} has invalid n_steps={n_steps}")
+            total += n_steps
             self._offsets.append(total)
         self._total_len = total
-
-        self._const_cache: dict[tuple[int, float, float], tuple[torch.Tensor, torch.Tensor]] = {}
-        self._shard_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
     def __len__(self) -> int:
         return self._total_len
@@ -106,86 +103,109 @@ class BGK1D1VShardDeltaDataset(Dataset):
     def _locate(self, idx: int) -> SampleIndex:
         if idx < 0 or idx >= self._total_len:
             raise IndexError(idx)
-
-        lo, hi = 0, len(self._offsets) - 1
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if idx < self._offsets[mid + 1]:
-                hi = mid
-            else:
-                lo = mid + 1
-
-        case_idx = lo
+        case_idx = bisect_right(self._offsets, idx) - 1
         t = idx - self._offsets[case_idx]
         return SampleIndex(case_idx=case_idx, t=t)
 
-    def _load_shard(self, shard_rel: str) -> dict[str, Any]:
-        key = str(shard_rel)
-        if key in self._shard_cache:
-            payload = self._shard_cache.pop(key)
-            self._shard_cache[key] = payload
-            return payload
+    def _open_shard(self, shard_path: Path) -> dict[str, Any]:
+        shard_path = shard_path.resolve()
+        cached = self._shard_cache.get(shard_path)
+        if cached is not None:
+            self._shard_cache.move_to_end(shard_path)
+            return cached
 
-        shard_path = (self._root / key).resolve()
-        payload = torch.load(shard_path, map_location="cpu", weights_only=False)
-        self._shard_cache[key] = payload
-
+        obj = torch.load(shard_path, map_location="cpu", weights_only=False)
+        fmt = str(obj.get("format", ""))
+        if fmt != "kineticEQ_BGK1D1V_pt_v2":
+            raise ValueError(f"unexpected shard format in {shard_path}: {fmt!r}")
+        self._shard_cache[shard_path] = obj
+        self._shard_cache.move_to_end(shard_path)
         while len(self._shard_cache) > self.cache_shards:
             self._shard_cache.popitem(last=False)
+        return obj
 
-        return payload
+    def _const_channels(self, nx: int, logdt: float, logtau: float) -> tuple[torch.Tensor, torch.Tensor]:
+        key = (int(nx), float(logdt), float(logtau), self.dtype)
+        cached = self._const_cache.get(key)
+        if cached is not None:
+            return cached
+        out = (
+            torch.full((nx,), float(logdt), dtype=self.dtype),
+            torch.full((nx,), float(logtau), dtype=self.dtype),
+        )
+        self._const_cache[key] = out
+        return out
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int):
         s = self._locate(idx)
         rec = self.records[s.case_idx]
+        shard_path = _resolve_path(self.dataset_root, rec["shard_path"])
+        shard = self._open_shard(shard_path)
 
-        payload = self._load_shard(str(rec["shard_path"]))
-        W = payload["W"]
+        W = shard["W"]
+        if not torch.is_tensor(W) or W.ndim != 3:
+            raise ValueError(f"invalid W in shard {shard_path}")
 
         frame_start = int(rec["frame_start"])
-        t = int(s.t)
-        g0 = frame_start + t
+        g0 = frame_start + int(s.t)
         g1 = g0 + 1
 
-        w0 = W[g0]  # (3, nx)
-        w1 = W[g1]  # (3, nx)
-
-        n_t = w0[0].to(dtype=torch.float32)
-        u_t = w0[1].to(dtype=torch.float32)
-        T_t = w0[2].to(dtype=torch.float32)
-
-        n_tp1 = w1[0].to(dtype=torch.float32)
-        u_tp1 = w1[1].to(dtype=torch.float32)
-        T_tp1 = w1[2].to(dtype=torch.float32)
+        n_t = W[g0, 0]
+        u_t = W[g0, 1]
+        T_t = W[g0, 2]
+        n_tp1 = W[g1, 0]
+        u_tp1 = W[g1, 1]
+        T_tp1 = W[g1, 2]
 
         nx = int(rec["nx"])
         logdt = float(rec["log10_dt"])
         logtau = float(rec["log10_tau"])
+        logdt_x, logtau_x = self._const_channels(nx=nx, logdt=logdt, logtau=logtau)
 
-        ckey = (nx, logdt, logtau)
-        if ckey not in self._const_cache:
-            self._const_cache[ckey] = (
-                torch.full((nx,), logdt, dtype=torch.float32),
-                torch.full((nx,), logtau, dtype=torch.float32),
-            )
-        logdt_x, logtau_x = self._const_cache[ckey]
+        x = torch.stack(
+            [
+                n_t.to(dtype=self.dtype),
+                u_t.to(dtype=self.dtype),
+                T_t.to(dtype=self.dtype),
+                logdt_x,
+                logtau_x,
+            ],
+            dim=0,
+        )
 
-        x = torch.stack([n_t, u_t, T_t, logdt_x, logtau_x], dim=0).to(dtype=self.dtype)
-
-        dn = n_tp1 - n_t
-        dT = T_tp1 - T_t
+        dn = (n_tp1 - n_t).to(dtype=self.dtype)
+        dT = (T_tp1 - T_t).to(dtype=self.dtype)
 
         if self.target == "dw":
-            du = u_tp1 - u_t
-            y = torch.stack([dn, du, dT], dim=0).to(dtype=self.dtype)
+            du = (u_tp1 - u_t).to(dtype=self.dtype)
+            y = torch.stack([dn, du, dT], dim=0)
         else:
             m_t = n_t * u_t
             m_tp1 = n_tp1 * u_tp1
-            dm = m_tp1 - m_t
-            y = torch.stack([dn, dm, dT], dim=0).to(dtype=self.dtype)
+            dm = (m_tp1 - m_t).to(dtype=self.dtype)
+            y = torch.stack([dn, dm, dT], dim=0)
 
         return x, y
 
     def close(self) -> None:
         self._shard_cache.clear()
         self._const_cache.clear()
+
+    def get_case_record(self, case_idx: int) -> dict[str, Any]:
+        return dict(self.records[int(case_idx)])
+
+    def get_sample_meta(self, idx: int) -> dict[str, Any]:
+        s = self._locate(idx)
+        rec = self.records[s.case_idx]
+        return {
+            "idx": int(idx),
+            "case_idx": int(s.case_idx),
+            "case_id": int(rec["case_id"]),
+            "t": int(s.t),
+            "tau_tilde": float(rec["tau_tilde"]),
+            "dt": float(rec["dt"]),
+            "split": str(rec.get(self.split_key, "")),
+            "split_key": self.split_key,
+            "target": self.target,
+            "shard_path": str(rec["shard_path"]),
+        }
