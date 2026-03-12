@@ -34,7 +34,7 @@
 
     "hidden": 512,
     "n_blocks": 6,
-    "kernel": 5,
+    "kernel": 7,
 
     "grad_clip": 1.0,
     "log_interval": 50,
@@ -50,8 +50,8 @@
     "warm_eval_T_total": 0.05,
     "warm_eval_picard_iter": 100000,
     "warm_eval_picard_tol": 1e-4,
-    "warm_eval_abs_tol": 1e-6,
-    "conv_type": "w",
+    "warm_eval_abs_tol": 1e-8,
+    "conv_type": "f",
     "warm_eval_nx": 1024,
     "warm_eval_nv": 256
   },
