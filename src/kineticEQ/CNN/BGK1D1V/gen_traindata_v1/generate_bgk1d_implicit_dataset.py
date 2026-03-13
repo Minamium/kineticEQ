@@ -5,7 +5,7 @@ import json
 import torch
 import torch.distributed as dist
 from kineticEQ import Engine, Config, BGK1D
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calculate_moments
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.general.bgk1d_compute_moments import calculate_moments
 import numpy as np
 import time
 import argparse

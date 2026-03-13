@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 from kineticEQ import Engine
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calculate_moments
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.general.bgk1d_compute_moments import calculate_moments
 
 def snapshot_from_engine(engine: Engine) -> dict:
     st = engine.state

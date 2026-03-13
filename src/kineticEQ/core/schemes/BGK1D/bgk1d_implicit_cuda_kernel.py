@@ -4,18 +4,19 @@ from typing import Callable
 import torch, math
 from kineticEQ.api.config import Config
 from kineticEQ.core.states.state_1d import State1D1V
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_implicit_ws import ImplicitWorkspace, allocate_implicit_workspace
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_set_initial_condition import set_initial_condition
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_check_CFL import bgk1d_check_CFL
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.implicit.bgk1d_implicit_ws import ImplicitWorkspace, allocate_implicit_workspace
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.general.bgk1d_set_initial_condition import set_initial_condition
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.general.bgk1d_check_CFL import bgk1d_check_CFL
 from kineticEQ.cuda_kernel.compile import load_implicit_fused
 from kineticEQ.cuda_kernel.compile import load_gtsv
 from kineticEQ.cuda_kernel.compile import load_implicit_AA
 from kineticEQ.CNN.BGK1D1V.util.models import MomentCNN1D
 
 # CNN用ユーティリティ
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_momentCNN_util import (
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.implicit.bgk1d_momentCNN_util import (
     load_moments_cnn_model, predict_next_moments_delta
 )
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.implicit.bgk1d_conv_util import check_convergence
 
 import logging
 logger = logging.getLogger(__name__)
@@ -184,39 +185,22 @@ def step(
         
 
         # 正規化誤差による収束判定
+        # momentsを計算
         cuda_module.moments_n_nu_T(ws.fn_tmp, state.v, dv, ws.n_new, ws.nu_new, ws.T_new)
-        if conv_type == "f":
-            df  = torch.abs(ws.fn_tmp - ws.fz)
-            ref = torch.maximum(torch.abs(ws.fn_tmp), torch.abs(ws.fz))
-            den = abs_tol + picard_tol * ref
 
-            residual = torch.max(df / den)
-            residual_val = float(torch.max(df / torch.clamp(ref, min=abs_tol)).item())
-            std_residual_val = float(residual.item())
-
-        else:
-            df_n = torch.abs(ws.n_new - ws.n)
-            df_nu = torch.abs(ws.nu_new - ws.nu)
-            df_T = torch.abs(ws.T_new - ws.T)
-
-            ref_n = torch.maximum(torch.abs(ws.n_new), torch.abs(ws.n))
-            ref_nu = torch.maximum(torch.abs(ws.nu_new), torch.abs(ws.nu))
-            ref_T = torch.maximum(torch.abs(ws.T_new), torch.abs(ws.T))
-
-            den_n = abs_tol + picard_tol * ref_n
-            den_nu = abs_tol + picard_tol * ref_nu
-            den_T = abs_tol + picard_tol * ref_T
-
-            r_n = torch.max(df_n / den_n)
-            r_nu = torch.max(df_nu / den_nu)
-            r_T = torch.max(df_T / den_T)
-            residual = torch.maximum(r_n, torch.maximum(r_nu, r_T))
-
-            rel_n = torch.max(df_n / torch.clamp(ref_n, min=abs_tol))
-            rel_nu = torch.max(df_nu / torch.clamp(ref_nu, min=abs_tol))
-            rel_T = torch.max(df_T / torch.clamp(ref_T, min=abs_tol))
-            residual_val = float(torch.maximum(rel_n, torch.maximum(rel_nu, rel_T)).item())
-            std_residual_val = float(residual.item())
+        residual, residual_val, std_residual_val = check_convergence(
+            conv_type=conv_type,
+            f_new=ws.fn_tmp,
+            f_old=ws.fz,
+            n_new=ws.n_new,
+            n_old=ws.n,
+            nu_new=ws.nu_new,
+            nu_old=ws.nu,
+            T_new=ws.T_new,
+            T_old=ws.T,
+            abs_tol=abs_tol,
+            picard_tol=picard_tol,
+        )
  
         latest = ws.fn_tmp
 

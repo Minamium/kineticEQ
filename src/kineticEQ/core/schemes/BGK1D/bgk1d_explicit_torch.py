@@ -4,11 +4,11 @@ from typing import Callable
 import torch
 from kineticEQ.api.config import Config
 from kineticEQ.core.states.state_1d import State1D1V
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calculate_moments
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_maxwellian import maxwellian
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_streaming import _compute_streaming_upwind
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_set_initial_condition import set_initial_condition
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_check_CFL import bgk1d_check_CFL
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.general.bgk1d_compute_moments import calculate_moments
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.general.bgk1d_maxwellian import maxwellian
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.explicit.bgk1d_compute_streaming import _compute_streaming_upwind
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.general.bgk1d_set_initial_condition import set_initial_condition
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.general.bgk1d_check_CFL import bgk1d_check_CFL
 import logging
 logger = logging.getLogger(__name__)
 Stepper = Callable[[int], None]

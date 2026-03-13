@@ -1,7 +1,7 @@
 # kineticEQ/src/kineticEQ/plotting/bgk1d/plot_state.py
 import logging
 from pathlib import Path
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calculate_moments
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.general.bgk1d_compute_moments import calculate_moments
 logger = logging.getLogger(__name__)
 
 #状態可視化メソッド

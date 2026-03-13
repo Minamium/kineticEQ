@@ -4,8 +4,8 @@ from typing import Callable
 import torch
 from kineticEQ.api.config import Config
 from kineticEQ.core.states.state_1d import State1D1V
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_set_initial_condition import set_initial_condition
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_check_CFL import bgk1d_check_CFL
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.general.bgk1d_set_initial_condition import set_initial_condition
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.general.bgk1d_check_CFL import bgk1d_check_CFL
 from kineticEQ.cuda_kernel.compile import load_explicit_fused
 import logging
 logger = logging.getLogger(__name__)

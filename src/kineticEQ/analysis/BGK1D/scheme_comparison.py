@@ -10,7 +10,7 @@ import time
 import torch
 
 from kineticEQ import BGK1D, Config, Engine
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.bgk1d_compute_moments import calculate_moments
+from kineticEQ.core.schemes.BGK1D.bgk1d_utils.general.bgk1d_compute_moments import calculate_moments
 
 logger = logging.getLogger("kineticEQ")
 
