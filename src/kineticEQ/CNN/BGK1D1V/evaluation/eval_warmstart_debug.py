@@ -1,3 +1,4 @@
+# kineticEQ/CNN/BGK1D1V/evaluation/eval_warmstart_debug.py
 """Compatibility wrapper for the legacy standalone warm-eval debugger.
 
 The main evaluation path now lives in `evaluation.engine` and

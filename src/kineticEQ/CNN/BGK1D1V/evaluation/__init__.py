@@ -1,3 +1,4 @@
+# kineticEQ/CNN/BGK1D1V/evaluation/__init__.py
 """Shared evaluation core for train-time and standalone BGK1D1V runs.
 
 The modules in `legacy/` and `eval_warmstart_debug.py` are compatibility

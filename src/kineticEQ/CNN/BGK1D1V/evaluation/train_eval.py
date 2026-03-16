@@ -1,3 +1,4 @@
+# kineticEQ/CNN/BGK1D1V/evaluation/train_eval.py
 """Train-time frontend for cached warm-evaluation runs."""
 
 from __future__ import annotations

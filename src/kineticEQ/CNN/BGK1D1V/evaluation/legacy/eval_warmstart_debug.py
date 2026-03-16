@@ -1,3 +1,4 @@
+# kineticEQ/CNN/BGK1D1V/evaluation/legacy/eval_warmstart_debug.py
 """Legacy standalone/debug warm-evaluation implementation.
 
 This module is retained for compatibility while the main evaluation flow moves

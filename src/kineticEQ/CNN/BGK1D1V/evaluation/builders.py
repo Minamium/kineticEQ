@@ -1,3 +1,4 @@
+# kineticEQ/CNN/BGK1D1V/evaluation/builders.py
 """Config builders for phase-1 evaluation specs."""
 
 from __future__ import annotations

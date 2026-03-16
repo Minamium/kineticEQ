@@ -1,3 +1,4 @@
+# kineticEQ/CNN/BGK1D1V/evaluation/cache.py
 """Run-result cache helpers for the phase-1 evaluation engine."""
 
 from __future__ import annotations

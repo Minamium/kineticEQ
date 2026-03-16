@@ -1,3 +1,4 @@
+# kineticEQ/CNN/BGK1D1V/evaluation/results.py
 """Result dataclasses for evaluation runs and pairwise comparisons."""
 
 from __future__ import annotations

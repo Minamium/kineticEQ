@@ -1,3 +1,4 @@
+# kineticEQ/CNN/BGK1D1V/evaluation/spec.py
 """Declarative evaluation specifications for the BGK1D1V evaluation engine."""
 
 from __future__ import annotations
