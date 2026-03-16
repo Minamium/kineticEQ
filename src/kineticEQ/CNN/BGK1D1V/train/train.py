@@ -153,6 +153,12 @@ def parse_args():
 
     # ---- epoch-end warmstart eval (print only; uses LAST model) ----
     ap.add_argument("--warm_eval", action="store_true", help="run warmstart debug at each epoch end (print only)")
+    ap.add_argument(
+        "--warm_eval_start",
+        type=int,
+        default=0,
+        help="skip warm_eval through this epoch; e.g. 10 means first eval runs at epoch 11",
+    )
     ap.add_argument("--warm_eval_tau", type=float, default=5e-7)
     ap.add_argument("--warm_eval_dt", type=float, default=5e-5)
     ap.add_argument("--warm_eval_T_total", type=float, default=0.05)
@@ -258,6 +264,7 @@ def main():
     best_val = float("inf")
     log_path = save_dir / "log.jsonl"
     train_evaluator = None
+    warm_eval_start = max(int(args.warm_eval_start), 0)
     if bool(args.warm_eval):
         eval_cache_dir = save_dir / "eval_cache"
         eval_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -271,7 +278,12 @@ def main():
             cache_dir=str(eval_cache_dir),
             verbose=True,
         )
-        train_evaluator.prepare_baseline()
+        if warm_eval_start > 0:
+            print(
+                f"[warm-eval] deferred until epoch {warm_eval_start + 1:d} "
+                f"(skip epochs 1-{warm_eval_start:d})",
+                flush=True,
+            )
 
     for ep in range(1, int(args.epochs) + 1):
         # ---------------- train ----------------
@@ -536,10 +548,11 @@ def main():
                 "shock_q": float(args.shock_q),
                 "grad_clip": float(args.grad_clip),
                 "amp": bool(args.amp),
+                "warm_eval_start": warm_eval_start,
             }) + "\n")
 
         # ---------------- epoch-end warmstart debug (LATEST model via last.pt; save best_speed.pt) ----------------
-        if train_evaluator is not None:
+        if train_evaluator is not None and ep > warm_eval_start:
             speed_ep_best = 0.0
             speed_ep_by_alpha = {}
 
