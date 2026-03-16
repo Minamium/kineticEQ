@@ -405,8 +405,8 @@ def assign_split_iid(records: list[dict[str, Any]], seed: int) -> None:
     g.manual_seed(int(seed) + 2026)
     perm = torch.randperm(len(ok_sorted), generator=g).tolist()
     n = len(ok_sorted)
-    n_train = int(round(0.8 * n))
-    n_val = int(round(0.1 * n))
+    n_train = int(round(0.9 * n))
+    n_val = max(n - n_train, 0)
     train_cut = n_train
     val_cut = min(n, n_train + n_val)
     label_by_case: dict[int, str] = {}
@@ -414,12 +414,10 @@ def assign_split_iid(records: list[dict[str, Any]], seed: int) -> None:
         case_id = int(ok_sorted[order_idx]["case_id"])
         if pos < train_cut:
             label_by_case[case_id] = "train"
-        elif pos < val_cut:
-            label_by_case[case_id] = "val"
         else:
-            label_by_case[case_id] = "test"
+            label_by_case[case_id] = "val"
     for rec in records:
-        rec["split_iid"] = label_by_case.get(int(rec["case_id"]), "test")
+        rec["split_iid"] = label_by_case.get(int(rec["case_id"]), "val")
 
 
 def assign_split_ood_tau(records: list[dict[str, Any]]) -> None:
