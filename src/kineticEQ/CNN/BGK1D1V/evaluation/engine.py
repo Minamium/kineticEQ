@@ -44,10 +44,26 @@ class EvaluationEngine:
         cache_key = make_cache_key(case, target, eval_mode, profile)
 
         if eval_mode == 'baseline_only':
-            runner = lambda: run_baseline_only(cfg, n_steps, torch_device, profile=profile, case_name=case.name, target_name=target.name)
+            runner = lambda: run_baseline_only(
+                cfg,
+                n_steps,
+                torch_device,
+                profile=profile,
+                case_name=case.name,
+                target_name=target.name,
+                verbose=self.verbose,
+            )
             cache_enabled = bool(cache_policy.enabled and cache_policy.reuse_baseline) if cache_policy is not None else False
         elif eval_mode in ('warm_only', 'target_only'):
-            runner = lambda: run_target_only(cfg, n_steps, torch_device, profile=profile, case_name=case.name, target_name=target.name)
+            runner = lambda: run_target_only(
+                cfg,
+                n_steps,
+                torch_device,
+                profile=profile,
+                case_name=case.name,
+                target_name=target.name,
+                verbose=self.verbose,
+            )
             cache_enabled = bool(cache_policy.enabled and cache_policy.reuse_targets) if cache_policy is not None else False
         else:
             raise ValueError(f'unsupported resolve_run eval_mode: {eval_mode!r}')

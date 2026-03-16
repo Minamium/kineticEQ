@@ -18,13 +18,34 @@ def _now_sync(device: torch.device) -> float:
     return time.perf_counter()
 
 
+def _emit_progress(prefix: str, step: int, n_steps: int) -> None:
+    """Print a coarse progress update for long evaluation rollouts."""
+
+    print(f"[eval] {prefix} step {step}/{n_steps}", flush=True)
+
+
 @torch.no_grad()
-def _run_single(cfg: Config, n_steps: int, device: torch.device, *, mode: str, case_name: str, target_name: str, profile: bool = False) -> RunResult:
+def _run_single(
+    cfg: Config,
+    n_steps: int,
+    device: torch.device,
+    *,
+    mode: str,
+    case_name: str,
+    target_name: str,
+    profile: bool = False,
+    verbose: bool = False,
+) -> RunResult:
     engine = Engine(cfg)
 
     step_records: list[StepRecord] = []
+    if verbose:
+        print(f"[eval] start mode={mode} case={case_name} target={target_name} n_steps={int(n_steps)}", flush=True)
     t0_all = _now_sync(device)
+    log_stride = max(1, int(n_steps) // 10)
     for step in range(int(n_steps)):
+        if verbose and (step % log_stride == 0 or step == int(n_steps) - 1):
+            _emit_progress(f"mode={mode} target={target_name}", step, int(n_steps))
         t0 = _now_sync(device)
         engine.stepper(step)
         t1 = _now_sync(device)
@@ -54,6 +75,12 @@ def _run_single(cfg: Config, n_steps: int, device: torch.device, *, mode: str, c
         'device': str(device),
         'profile': bool(profile),
     }
+    if verbose:
+        print(
+            f"[eval] done mode={mode} case={case_name} target={target_name} "
+            f"wall={float(t1_all - t0_all):.3f}s",
+            flush=True,
+        )
     return RunResult(
         case_name=case_name,
         target_name=target_name,
@@ -65,15 +92,78 @@ def _run_single(cfg: Config, n_steps: int, device: torch.device, *, mode: str, c
     )
 
 
-def run_baseline_only(cfg_base: Config, n_steps: int, device: torch.device, profile: bool = False, *, case_name: str = 'case', target_name: str = 'baseline') -> RunResult:
-    return _run_single(cfg_base, n_steps, device, mode='baseline_only', case_name=case_name, target_name=target_name, profile=profile)
+def run_baseline_only(
+    cfg_base: Config,
+    n_steps: int,
+    device: torch.device,
+    profile: bool = False,
+    *,
+    case_name: str = 'case',
+    target_name: str = 'baseline',
+    verbose: bool = False,
+) -> RunResult:
+    return _run_single(
+        cfg_base,
+        n_steps,
+        device,
+        mode='baseline_only',
+        case_name=case_name,
+        target_name=target_name,
+        profile=profile,
+        verbose=verbose,
+    )
 
 
-def run_target_only(cfg_target: Config, n_steps: int, device: torch.device, profile: bool = False, *, case_name: str = 'case', target_name: str = 'target') -> RunResult:
-    return _run_single(cfg_target, n_steps, device, mode='warm_only', case_name=case_name, target_name=target_name, profile=profile)
+def run_target_only(
+    cfg_target: Config,
+    n_steps: int,
+    device: torch.device,
+    profile: bool = False,
+    *,
+    case_name: str = 'case',
+    target_name: str = 'target',
+    verbose: bool = False,
+) -> RunResult:
+    return _run_single(
+        cfg_target,
+        n_steps,
+        device,
+        mode='warm_only',
+        case_name=case_name,
+        target_name=target_name,
+        profile=profile,
+        verbose=verbose,
+    )
 
 
-def run_rollout_pair(cfg_base: Config, cfg_target: Config, n_steps: int, device: torch.device, profile: bool = False, *, case_name: str = 'case', baseline_name: str = 'baseline', target_name: str = 'target') -> tuple[RunResult, RunResult]:
-    base = run_baseline_only(cfg_base, n_steps, device, profile=profile, case_name=case_name, target_name=baseline_name)
-    target = run_target_only(cfg_target, n_steps, device, profile=profile, case_name=case_name, target_name=target_name)
+def run_rollout_pair(
+    cfg_base: Config,
+    cfg_target: Config,
+    n_steps: int,
+    device: torch.device,
+    profile: bool = False,
+    *,
+    case_name: str = 'case',
+    baseline_name: str = 'baseline',
+    target_name: str = 'target',
+    verbose: bool = False,
+) -> tuple[RunResult, RunResult]:
+    base = run_baseline_only(
+        cfg_base,
+        n_steps,
+        device,
+        profile=profile,
+        case_name=case_name,
+        target_name=baseline_name,
+        verbose=verbose,
+    )
+    target = run_target_only(
+        cfg_target,
+        n_steps,
+        device,
+        profile=profile,
+        case_name=case_name,
+        target_name=target_name,
+        verbose=verbose,
+    )
     return base, target
