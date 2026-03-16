@@ -15,8 +15,7 @@ from ..util.models import MomentCNN1D
 from ..gen_traindata_v1.dataloader_npz import BGK1D1VNPZDeltaDataset
 from ..gen_traindata_v2.dataloader_pt import BGK1D1VShardDeltaDataset
 
-# --- optional warmstart debug eval (epoch-end) ---
-from ..evaluation.eval_warmstart_debug import build_cfg, run_case_pair
+from ..evaluation.train_eval import TrainEvaluator, build_train_eval_spec_from_args
 
 
 # ---------------- losses ----------------
@@ -186,7 +185,7 @@ def main():
     print(f"shock_q: {args.shock_q}", flush=True)
     print(f"delta_type: {args.delta_type}", flush=True)
 
-    # 最良モデルのSPEEDを保存するための変数
+    # Picard-sum speedup against the cached baseline warm-eval.
     best_speed = 0.0
 
     torch.manual_seed(args.seed)
@@ -258,6 +257,21 @@ def main():
 
     best_val = float("inf")
     log_path = save_dir / "log.jsonl"
+    train_evaluator = None
+    if bool(args.warm_eval):
+        eval_cache_dir = save_dir / "eval_cache"
+        eval_cache_dir.mkdir(parents=True, exist_ok=True)
+        eval_spec = build_train_eval_spec_from_args(
+            args,
+            cache_dir=str(eval_cache_dir),
+        )
+        train_evaluator = TrainEvaluator(
+            eval_spec=eval_spec,
+            device=str(device),
+            cache_dir=str(eval_cache_dir),
+            verbose=False,
+        )
+        train_evaluator.prepare_baseline()
 
     for ep in range(1, int(args.epochs) + 1):
         # ---------------- train ----------------
@@ -525,81 +539,27 @@ def main():
             }) + "\n")
 
         # ---------------- epoch-end warmstart debug (LATEST model via last.pt; save best_speed.pt) ----------------
-        if bool(args.warm_eval):
+        if train_evaluator is not None:
             speed_ep_best = 0.0
             speed_ep_by_alpha = {}
 
             try:
                 model.eval()
-                device_eval = device
-
-                # Use the checkpoint just saved above (latest model)
                 last_ckpt = save_dir / "last.pt"
+                eval_summary = train_evaluator.evaluate_epoch(last_ckpt)
+                base_sum = int(eval_summary["picard_sum_base"])
+                warm_sum = int(eval_summary["picard_sum_warm"])
+                speed = float(eval_summary["speedup_picard_sum"])
 
-                _aa_kw = dict(
-                    aa_enable=bool(args.aa_enable),
-                    aa_m=int(args.aa_m),
-                    aa_beta=float(args.aa_beta),
-                    aa_stride=int(args.aa_stride),
-                    aa_start_iter=int(args.aa_start_iter),
-                    aa_reg=float(args.aa_reg),
-                    aa_alpha_max=float(args.aa_alpha_max),
-                )
-
-                cfg_base = build_cfg(
-                    tau=float(args.warm_eval_tau),
-                    dt=float(args.warm_eval_dt),
-                    T_total=float(args.warm_eval_T_total),
-                    nx=int(args.warm_eval_nx),
-                    nv=int(args.warm_eval_nv),
-                    Lx=1.0,
-                    v_max=10.0,
-                    device=str(device_eval),
-                    picard_iter=int(args.warm_eval_picard_iter),
-                    picard_tol=float(args.warm_eval_picard_tol),
-                    abs_tol=float(args.warm_eval_abs_tol),
-                    conv_type=str(args.conv_type),
-                    **_aa_kw,
-                    moments_cnn_modelpath=None,           # baseline
-                )
-
-                cfg_warm = build_cfg(
-                    tau=float(args.warm_eval_tau),
-                    dt=float(args.warm_eval_dt),
-                    T_total=float(args.warm_eval_T_total),
-                    nx=int(args.warm_eval_nx),
-                    nv=int(args.warm_eval_nv),
-                    Lx=1.0,
-                    v_max=10.0,
-                    device=str(device_eval),
-                    picard_iter=int(args.warm_eval_picard_iter),
-                    picard_tol=float(args.warm_eval_picard_tol),
-                    abs_tol=float(args.warm_eval_abs_tol),
-                    conv_type=str(args.conv_type),
-                    **_aa_kw,
-                    moments_cnn_modelpath=str(last_ckpt),  # warmstart enabled
-                )
-
-                n_steps = int(round(cfg_base.model_cfg.time.T_total / cfg_base.model_cfg.time.dt))
-
-                out = run_case_pair(
-                    cfg_base=cfg_base,
-                    cfg_warm=cfg_warm,
-                    n_steps=n_steps,
-                    device=device_eval,
-                )
-
-                base_sum = int(out["picard"]["picard_iter_sum_base"])
-                warm_sum = int(out["picard"]["picard_iter_sum_warm"])
-                speed = (base_sum / max(warm_sum, 1))
-
-                speed_ep_by_alpha["engine"] = float(speed)
-                speed_ep_best = float(speed)
+                speed_ep_by_alpha["engine"] = speed
+                speed_ep_best = speed
 
                 print(
                     f"[warm-eval ep{ep:03d}] "
                     f"tau={args.warm_eval_tau:.3e} "
-                    f"picard_sum base={base_sum} warm={warm_sum} (x{speed:.2f})",
+                    f"picard_sum base={base_sum} warm={warm_sum} (x{speed:.2f}) "
+                    f"t_base={float(eval_summary['walltime_base_sec']):.3f}s "
+                    f"t_warm={float(eval_summary['walltime_warm_sec']):.3f}s",
                     flush=True,
                 )
 
@@ -609,8 +569,11 @@ def main():
                         "warm_eval": True,
                         "picard_sum_base": base_sum,
                         "picard_sum_warm": warm_sum,
-                        "speed": float(speed),
-                        "best_speed": float(max(speed_ep_best, best_speed)),
+                        "speedup_picard_sum": float(speed),
+                        "walltime_base_sec": float(eval_summary["walltime_base_sec"]),
+                        "walltime_warm_sec": float(eval_summary["walltime_warm_sec"]),
+                        "speedup_walltime": eval_summary["speedup_walltime"],
+                        "best_speed_so_far": float(max(speed_ep_best, best_speed)),
                     }) + "\n")
 
             except Exception as e:
@@ -621,7 +584,7 @@ def main():
                 torch.save({
                     "epoch": ep,
                     "model": model.state_dict(),
-                    "best_speed": float(best_speed),
+                    "best_speed_picard_sum": float(best_speed),
                     "speed_by_alpha": speed_ep_by_alpha,
                     "args": vars(args),
                 }, save_dir / "best_speed.pt")

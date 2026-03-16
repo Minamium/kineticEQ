@@ -337,7 +337,10 @@ def _parse_run_log(run_dir: Path) -> dict[str, Any] | None:
         last_warm = warm_recs[-1]
         picard_base = last_warm.get("picard_sum_base")
         picard_warm = last_warm.get("picard_sum_warm")
-        best_speed = max(r.get("best_speed", 0.0) for r in warm_recs)
+        best_speed = max(
+            r.get("best_speed_so_far", r.get("best_speed", 0.0))
+            for r in warm_recs
+        )
 
     # fallback: read best_speed.pt
     if best_speed is None or best_speed == 0.0:
@@ -531,7 +534,7 @@ def _read_best_speed(run_dir: Path) -> float | None:
     try:
         import torch
         ckpt = torch.load(speed_path, map_location="cpu", weights_only=False)
-        return float(ckpt.get("best_speed", 0.0))
+        return float(ckpt.get("best_speed_picard_sum", ckpt.get("best_speed", 0.0)))
     except Exception:
         return None
 
