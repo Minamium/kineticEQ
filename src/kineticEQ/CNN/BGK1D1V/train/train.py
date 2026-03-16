@@ -269,7 +269,7 @@ def main():
             eval_spec=eval_spec,
             device=str(device),
             cache_dir=str(eval_cache_dir),
-            verbose=False,
+            verbose=True,
         )
         train_evaluator.prepare_baseline()
 
