@@ -2,7 +2,7 @@
   "_comment": "Single-run training defaults. Explicit CLI args override this file.",
   "base_args": {
     "device": "cuda",
-    "epochs": 50,
+    "epochs": 20,
     "batch": 128,
     "lr": 5e-4,
     "workers": 4,
@@ -16,13 +16,12 @@
 
     "loss_kind": "smoothl1",
     "delta_type": "dnu",
-    "conv_type": "w",
     "loss_eps": 1e-6,
     "nb": 10,
     "n_floor": 1e-8,
     "T_floor": 1e-8,
 
-    "shock_ratio": 0.08,
+    "shock_ratio": 0.32,
     "shock_q": 0.75,
     "shock_loss_kind": "softmax",
     "shock_loss_softmax_beta": 1.0,
@@ -37,7 +36,7 @@
     "aa_alpha_max": 100.0,
 
     "hidden": 512,
-    "n_blocks": 6,
+    "n_blocks": 12,
     "kernel": 7,
 
     "grad_clip": 1.0,
@@ -49,12 +48,13 @@
     "sched_min_lr": 1e-6,
 
     "warm_eval": true,
-    "warm_eval_start": 40,
+    "conv_type": "f",
+    "warm_eval_start": 10,
     "warm_eval_tau": 5e-7,
     "warm_eval_dt": 5e-4,
     "warm_eval_T_total": 0.05,
     "warm_eval_picard_iter": 100000,
-    "warm_eval_picard_tol": 1e-6,
+    "warm_eval_picard_tol": 1e-4,
     "warm_eval_abs_tol": 1e-8,
     "warm_eval_nx": 1024,
     "warm_eval_nv": 256
