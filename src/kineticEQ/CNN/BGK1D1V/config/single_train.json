@@ -2,7 +2,7 @@
   "_comment": "Single-run training defaults. Explicit CLI args override this file.",
   "base_args": {
     "device": "cuda",
-    "epochs": 20,
+    "epochs": 50,
     "batch": 128,
     "lr": 5e-4,
     "workers": 4,

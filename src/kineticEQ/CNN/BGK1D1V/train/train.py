@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 from tqdm.auto import tqdm
 
@@ -28,6 +30,291 @@ from ..util.losses import (
 # ---------------- utils ----------------
 def save_json(path: Path, obj):
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False))
+
+
+_RETRAIN_RUNTIME_OVERRIDE_KEYS = {
+    "config",
+    "retrain",
+    "save_dir",
+    "device",
+    "workers",
+    "prefetch_factor",
+    "cache_shards",
+    "log_interval",
+    "epochs",
+    "seed",
+    "warm_eval",
+    "warm_eval_start",
+    "warm_eval_tau",
+    "warm_eval_dt",
+    "warm_eval_T_total",
+    "warm_eval_picard_iter",
+    "warm_eval_picard_tol",
+    "warm_eval_abs_tol",
+    "warm_eval_nx",
+    "warm_eval_nv",
+    "warm_eval_debug_steps",
+    "warm_eval_n_floor",
+    "warm_eval_T_floor",
+}
+
+
+def _sha256_file(path: str | Path | None) -> str | None:
+    if not path:
+        return None
+    p = Path(path).expanduser().resolve()
+    if not p.exists() or not p.is_file():
+        return None
+
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _jsonable_value(x: Any) -> Any:
+    if isinstance(x, Path):
+        return str(x)
+    if isinstance(x, tuple):
+        return [_jsonable_value(v) for v in x]
+    if isinstance(x, list):
+        return [_jsonable_value(v) for v in x]
+    if isinstance(x, dict):
+        return {str(k): _jsonable_value(v) for k, v in x.items()}
+    return x
+
+
+def _normalized_compare_value(key: str, value: Any) -> Any:
+    if key == "manifest" and value:
+        try:
+            return str(Path(value).expanduser().resolve())
+        except Exception:
+            return str(value)
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, tuple):
+        return tuple(_normalized_compare_value(key, v) for v in value)
+    if isinstance(value, list):
+        return tuple(_normalized_compare_value(key, v) for v in value)
+    return value
+
+
+def _model_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "in_ch": 5,
+        "hidden": int(args.hidden),
+        "out_ch": 3,
+        "kernel": int(args.kernel),
+        "n_blocks": int(args.n_blocks),
+        "gn_groups": int(args.gn_groups),
+        "bottleneck": float(args.bottleneck),
+        "dilation_cycle": tuple(int(v) for v in args.dilation_cycle),
+        "use_gate_head": bool(args.use_gate_head),
+        "gate_bias_init": float(args.gate_bias_init),
+        "gate_scale": float(args.gate_scale),
+        "gate_per_channel": bool(args.gate_per_channel),
+    }
+
+
+def _build_checkpoint_meta(
+    args: argparse.Namespace,
+    *,
+    model_kwargs: dict[str, Any],
+    retrain_info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    meta = {
+        "checkpoint_format_version": 2,
+        "saved_at_unix": float(time.time()),
+        "manifest_path": str(Path(args.manifest).expanduser().resolve()) if args.manifest else None,
+        "manifest_sha256": _sha256_file(args.manifest),
+        "delta_type": str(args.delta_type),
+        "model_kwargs": _jsonable_value(model_kwargs),
+    }
+    if retrain_info:
+        meta["retrain"] = _jsonable_value(retrain_info)
+    return meta
+
+
+def _capture_rng_state() -> dict[str, Any]:
+    state: dict[str, Any] = {"rng_state_cpu": torch.get_rng_state()}
+    if torch.cuda.is_available():
+        state["rng_state_cuda"] = [s.cpu() for s in torch.cuda.get_rng_state_all()]
+    return state
+
+
+def _restore_rng_state(ckpt: dict[str, Any], device: torch.device) -> None:
+    cpu_state = ckpt.get("rng_state_cpu")
+    if isinstance(cpu_state, torch.Tensor):
+        torch.set_rng_state(cpu_state.cpu())
+
+    cuda_states = ckpt.get("rng_state_cuda")
+    if device.type != "cuda" or not isinstance(cuda_states, list):
+        return
+
+    try:
+        if len(cuda_states) == torch.cuda.device_count():
+            torch.cuda.set_rng_state_all([s.cpu() for s in cuda_states])
+    except Exception:
+        pass
+
+
+def _move_optimizer_state_to_device(opt: torch.optim.Optimizer, device: torch.device) -> None:
+    for state in opt.state.values():
+        for key, value in list(state.items()):
+            if isinstance(value, torch.Tensor):
+                state[key] = value.to(device=device, non_blocking=True)
+
+
+def _compare_manifest_identity(current_manifest: str | None, saved_manifest: str | None) -> tuple[bool, str | None]:
+    current_norm = _normalized_compare_value("manifest", current_manifest)
+    saved_norm = _normalized_compare_value("manifest", saved_manifest)
+    if current_norm == saved_norm:
+        return True, None
+
+    current_hash = _sha256_file(current_manifest)
+    saved_hash = _sha256_file(saved_manifest)
+    if current_hash is not None and saved_hash is not None and current_hash == saved_hash:
+        return True, None
+
+    detail = f"manifest: current={current_norm!r}, saved={saved_norm!r}"
+    if current_hash is not None or saved_hash is not None:
+        detail += f" (sha256 current={current_hash}, saved={saved_hash})"
+    return False, detail
+
+
+def _validate_retrain_args(
+    args: argparse.Namespace,
+    saved_args: dict[str, Any],
+    *,
+    ckpt_manifest: str | None,
+    ckpt_model_kwargs: dict[str, Any] | None = None,
+) -> None:
+    mismatches: list[str] = []
+
+    manifest_ok, manifest_detail = _compare_manifest_identity(
+        getattr(args, "manifest", None),
+        saved_args.get("manifest", ckpt_manifest),
+    )
+    if not manifest_ok and manifest_detail is not None:
+        mismatches.append(manifest_detail)
+
+    current_dict = vars(args)
+    keys = (set(saved_args.keys()) & set(current_dict.keys())) - _RETRAIN_RUNTIME_OVERRIDE_KEYS - {"manifest"}
+    for key in sorted(keys):
+        current_v = _normalized_compare_value(key, current_dict[key])
+        saved_v = _normalized_compare_value(key, saved_args[key])
+        if current_v != saved_v:
+            mismatches.append(f"{key}: current={current_v!r}, saved={saved_v!r}")
+
+    if isinstance(ckpt_model_kwargs, dict):
+        current_model_kwargs = _model_kwargs_from_args(args)
+        for key in sorted(set(ckpt_model_kwargs.keys()) & set(current_model_kwargs.keys())):
+            current_v = _normalized_compare_value(key, current_model_kwargs[key])
+            saved_v = _normalized_compare_value(key, ckpt_model_kwargs[key])
+            if current_v != saved_v:
+                mismatches.append(f"model_kwargs.{key}: current={current_v!r}, saved={saved_v!r}")
+
+    if mismatches:
+        detail = "\n  - ".join(mismatches)
+        raise ValueError(
+            "retrain checkpoint is incompatible with current training arguments:\n"
+            f"  - {detail}\n"
+            "Only runtime/output settings may differ for --retrain."
+        )
+
+
+def _load_retrain_checkpoint(
+    ckpt_path: str | Path,
+    args: argparse.Namespace,
+    device: torch.device,
+) -> tuple[dict[str, Any], int, float, float, dict[str, Any]]:
+    ckpt_file = Path(ckpt_path).expanduser().resolve()
+    if not ckpt_file.exists():
+        raise FileNotFoundError(f"retrain checkpoint not found: {ckpt_file}")
+
+    save_dir = Path(args.save_dir).expanduser().resolve()
+    if save_dir == ckpt_file.parent.resolve():
+        raise ValueError("--retrain requires a new --save_dir; source and destination directories match")
+
+    ckpt = torch.load(ckpt_file, map_location="cpu", weights_only=False)
+    if not isinstance(ckpt, dict) or "model" not in ckpt or "opt" not in ckpt:
+        raise ValueError(f"unsupported retrain checkpoint format: {ckpt_file}")
+
+    saved_args = ckpt.get("args")
+    if not isinstance(saved_args, dict):
+        raise ValueError(f"checkpoint has no saved args metadata: {ckpt_file}")
+
+    ckpt_model_kwargs = ckpt.get("model_kwargs")
+    if not isinstance(ckpt_model_kwargs, dict):
+        meta = ckpt.get("meta")
+        if isinstance(meta, dict) and isinstance(meta.get("model_kwargs"), dict):
+            ckpt_model_kwargs = meta.get("model_kwargs")
+
+    _validate_retrain_args(
+        args,
+        saved_args,
+        ckpt_manifest=ckpt.get("manifest"),
+        ckpt_model_kwargs=ckpt_model_kwargs,
+    )
+
+    start_epoch = int(ckpt.get("epoch", 0)) + 1
+    best_val = float(ckpt.get("best_val", float("inf")))
+    best_speed = float(ckpt.get("best_speed", ckpt.get("best_speed_picard_sum", 0.0)) or 0.0)
+    retrain_info = {
+        "source_checkpoint": str(ckpt_file),
+        "source_epoch": int(ckpt.get("epoch", 0)),
+        "source_save_dir": str(ckpt_file.parent.resolve()),
+    }
+
+    print(
+        f"[retrain] source={ckpt_file} start_epoch={start_epoch} "
+        f"additional_epochs={int(args.epochs)} save_dir={save_dir}",
+        flush=True,
+    )
+    _restore_rng_state(ckpt, device)
+    return ckpt, start_epoch, best_val, best_speed, retrain_info
+
+
+def _build_checkpoint_payload(
+    *,
+    epoch: int,
+    model: torch.nn.Module,
+    opt: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau | None,
+    scaler: torch.amp.GradScaler,
+    best_val: float,
+    best_speed: float,
+    train_loss: float,
+    val_loss: float,
+    val_base_loss: float,
+    val_shock_loss: float,
+    args: argparse.Namespace,
+    model_kwargs: dict[str, Any],
+    retrain_info: dict[str, Any] | None,
+) -> dict[str, Any]:
+    payload = {
+        "epoch": int(epoch),
+        "model": model.state_dict(),
+        "model_kwargs": _jsonable_value(model_kwargs),
+        "opt": opt.state_dict(),
+        "best_val": float(best_val),
+        "best_speed": float(best_speed),
+        "best_speed_picard_sum": float(best_speed),
+        "train_loss": float(train_loss),
+        "val_loss": float(val_loss),
+        "val_base_loss": float(val_base_loss),
+        "val_shock_loss": float(val_shock_loss),
+        "manifest": args.manifest,
+        "args": _jsonable_value(vars(args)),
+        "meta": _build_checkpoint_meta(args, model_kwargs=model_kwargs, retrain_info=retrain_info),
+        **_capture_rng_state(),
+    }
+    if scheduler is not None:
+        payload["scheduler"] = scheduler.state_dict()
+    if scaler.is_enabled():
+        payload["scaler"] = scaler.state_dict()
+    return payload
 
 
 def _load_config_defaults(parser: argparse.ArgumentParser, config_path: str) -> dict:
@@ -121,6 +408,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="optional single-train JSON config; explicit CLI args override file values",
+    )
+    ap.add_argument(
+        "--retrain",
+        type=str,
+        default=None,
+        help="resume training from a saved last.pt checkpoint into a new save_dir",
     )
     ap.add_argument("--manifest", type=str, default=None)
     ap.add_argument("--split_key", type=str, default="split_iid", help="split key for v2 manifest")
@@ -257,21 +550,14 @@ def main():
 
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
-    save_json(save_dir / "config.json", vars(args))
+    if args.retrain and any((save_dir / name).exists() for name in ("log.jsonl", "last.pt", "best.pt", "best_speed.pt")):
+        raise FileExistsError(f"--retrain requires a fresh save_dir; found existing artifacts in {save_dir}")
+
+    model_kwargs = _model_kwargs_from_args(args)
+    retrain_info: dict[str, Any] | None = None
 
     model = MomentCNN1D(
-        in_ch=5,
-        hidden=int(args.hidden),
-        out_ch=3,
-        kernel=int(args.kernel),
-        n_blocks=int(args.n_blocks),
-        gn_groups=int(args.gn_groups),
-        bottleneck=float(args.bottleneck),
-        dilation_cycle=tuple(args.dilation_cycle),
-        use_gate_head=bool(args.use_gate_head),
-        gate_bias_init=float(args.gate_bias_init),
-        gate_scale=float(args.gate_scale),
-        gate_per_channel=bool(args.gate_per_channel),
+        **model_kwargs,
     ).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr))
 
@@ -311,9 +597,41 @@ def main():
     )
 
     best_val = float("inf")
+    start_epoch = 1
     log_path = save_dir / "log.jsonl"
     train_evaluator = None
     warm_eval_start = max(int(args.warm_eval_start), 0)
+    if args.retrain:
+        ckpt, start_epoch, best_val, best_speed, retrain_info = _load_retrain_checkpoint(
+            args.retrain,
+            args,
+            device,
+        )
+        model.load_state_dict(ckpt["model"], strict=True)
+        opt.load_state_dict(ckpt["opt"])
+        _move_optimizer_state_to_device(opt, device)
+
+        sched_state = ckpt.get("scheduler")
+        if scheduler is not None and isinstance(sched_state, dict):
+            scheduler.load_state_dict(sched_state)
+        elif scheduler is not None and sched_state is None:
+            print("[retrain] checkpoint has no scheduler state; scheduler restarted from current args", flush=True)
+
+        scaler_state = ckpt.get("scaler")
+        if scaler.is_enabled() and isinstance(scaler_state, dict):
+            scaler.load_state_dict(scaler_state)
+        elif scaler.is_enabled() and scaler_state is None:
+            print("[retrain] checkpoint has no AMP scaler state; scaler restarted", flush=True)
+
+    config_obj = dict(vars(args))
+    if retrain_info is not None:
+        config_obj["_retrain"] = {
+            **retrain_info,
+            "resume_start_epoch": int(start_epoch),
+            "additional_epochs": int(args.epochs),
+        }
+    save_json(save_dir / "config.json", _jsonable_value(config_obj))
+
     if bool(args.warm_eval):
         eval_cache_dir = save_dir / "eval_cache"
         eval_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -334,7 +652,8 @@ def main():
                 flush=True,
             )
 
-    for ep in range(1, int(args.epochs) + 1):
+    end_epoch = start_epoch + int(args.epochs)
+    for ep in range(start_epoch, end_epoch):
         # ---------------- train ----------------
         model.train()
         t0 = time.time()
@@ -540,18 +859,22 @@ def main():
             flush=True,
         )
 
-        ckpt = {
-            "epoch": ep,
-            "model": model.state_dict(),
-            "opt": opt.state_dict(),
-            "best_val": best_val,
-            "train_loss": train_loss,
-            "val_loss": val_loss,
-            "val_base_loss": val_base_loss,
-            "val_shock_loss": val_shock_loss,
-            "manifest": args.manifest,
-            "args": vars(args),
-        }
+        ckpt = _build_checkpoint_payload(
+            epoch=ep,
+            model=model,
+            opt=opt,
+            scheduler=scheduler,
+            scaler=scaler,
+            best_val=best_val,
+            best_speed=best_speed,
+            train_loss=train_loss,
+            val_loss=val_loss,
+            val_base_loss=val_base_loss,
+            val_shock_loss=val_shock_loss,
+            args=args,
+            model_kwargs=model_kwargs,
+            retrain_info=retrain_info,
+        )
         torch.save(ckpt, save_dir / "last.pt")
         if is_best:
             torch.save(ckpt, save_dir / "best.pt")
@@ -643,12 +966,33 @@ def main():
 
             if speed_ep_best > best_speed:
                 best_speed = speed_ep_best
+                torch.save(
+                    _build_checkpoint_payload(
+                        epoch=ep,
+                        model=model,
+                        opt=opt,
+                        scheduler=scheduler,
+                        scaler=scaler,
+                        best_val=best_val,
+                        best_speed=best_speed,
+                        train_loss=train_loss,
+                        val_loss=val_loss,
+                        val_base_loss=val_base_loss,
+                        val_shock_loss=val_shock_loss,
+                        args=args,
+                        model_kwargs=model_kwargs,
+                        retrain_info=retrain_info,
+                    ),
+                    save_dir / "last.pt",
+                )
                 torch.save({
                     "epoch": ep,
                     "model": model.state_dict(),
+                    "model_kwargs": _jsonable_value(model_kwargs),
                     "best_speed_picard_sum": float(best_speed),
                     "speed_by_alpha": speed_ep_by_alpha,
-                    "args": vars(args),
+                    "args": _jsonable_value(vars(args)),
+                    "meta": _build_checkpoint_meta(args, model_kwargs=model_kwargs, retrain_info=retrain_info),
                 }, save_dir / "best_speed.pt")
 
     train_ds.close()
