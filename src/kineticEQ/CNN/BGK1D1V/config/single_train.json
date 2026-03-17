@@ -37,7 +37,7 @@
 
     "hidden": 512,
     "n_blocks": 12,
-    "kernel": 7,
+    "kernel": 9,
 
     "grad_clip": 1.0,
     "log_interval": 50,
@@ -48,8 +48,8 @@
     "sched_min_lr": 1e-6,
 
     "warm_eval": true,
-    "conv_type": "w",
-    "warm_eval_start": 20,
+    "conv_type": "f",
+    "warm_eval_start": 25,
     "warm_eval_tau": 5e-7,
     "warm_eval_dt": 5e-4,
     "warm_eval_T_total": 0.05,
