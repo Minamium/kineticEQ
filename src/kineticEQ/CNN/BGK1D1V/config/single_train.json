@@ -1,0 +1,62 @@
+{
+  "_comment": "Single-run training defaults. Explicit CLI args override this file.",
+  "base_args": {
+    "device": "cuda",
+    "epochs": 50,
+    "batch": 128,
+    "lr": 5e-4,
+    "workers": 4,
+    "prefetch_factor": 8,
+    "cache_shards": 16,
+    "amp": false,
+    "seed": 42,
+
+    "manifest": "train_data/traindata_nx1024_nv256_dt5e-4_tauclass3/dataset_manifest.json",
+    "save_dir": "cnn_models/bgk1d1v_single",
+
+    "loss_kind": "smoothl1",
+    "delta_type": "dnu",
+    "conv_type": "w",
+    "loss_eps": 1e-6,
+    "nb": 10,
+    "n_floor": 1e-8,
+    "T_floor": 1e-8,
+
+    "shock_ratio": 0.08,
+    "shock_q": 0.75,
+    "shock_loss_kind": "softmax",
+    "shock_loss_softmax_beta": 1.0,
+    "shock_loss_eps": 1e-6,
+
+    "aa_enable": false,
+    "aa_m": 4,
+    "aa_start_iter": 5,
+    "aa_stride": 25,
+    "aa_beta": 0.8,
+    "aa_reg": 1e-10,
+    "aa_alpha_max": 100.0,
+
+    "hidden": 512,
+    "n_blocks": 6,
+    "kernel": 7,
+
+    "grad_clip": 1.0,
+    "log_interval": 50,
+
+    "sched_plateau": true,
+    "sched_patience": 3,
+    "sched_factor": 0.5,
+    "sched_min_lr": 1e-6,
+
+    "warm_eval": true,
+    "warm_eval_start": 40,
+    "warm_eval_tau": 5e-7,
+    "warm_eval_dt": 5e-4,
+    "warm_eval_T_total": 0.05,
+    "warm_eval_picard_iter": 100000,
+    "warm_eval_picard_tol": 1e-6,
+    "warm_eval_abs_tol": 1e-8,
+    "warm_eval_nx": 1024,
+    "warm_eval_nv": 256
+  }
+}

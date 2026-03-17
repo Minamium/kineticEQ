@@ -1,0 +1,55 @@
+{
+  "_comment": "Config-driven evaluation example for eval_run.py. Edit moments_cnn_modelpath and out/cache paths at launch time if needed.",
+  "name": "bgk1d1v_single_eval",
+  "case": {
+    "name": "tau5.000e-07_dt5.000e-04_nx1024_nv256",
+    "tau": 5e-7,
+    "dt": 5e-4,
+    "T_total": 0.05,
+    "nx": 1024,
+    "nv": 256,
+    "Lx": 1.0,
+    "v_max": 10.0,
+    "initial_condition": [
+      {"x_range": [0.0, 0.5], "n": 1.0, "u": 0.0, "T": 1.0},
+      {"x_range": [0.5, 1.0], "n": 0.125, "u": 0.0, "T": 0.8}
+    ],
+    "tags": ["model_test"]
+  },
+  "baseline": {
+    "name": "baseline",
+    "overrides": {
+      "picard_iter": 100000,
+      "picard_tol": 1e-6,
+      "abs_tol": 1e-8,
+      "conv_type": "w"
+    },
+    "tags": ["baseline"]
+  },
+  "target": {
+    "name": "warm",
+    "overrides": {
+      "picard_iter": 100000,
+      "picard_tol": 1e-6,
+      "abs_tol": 1e-8,
+      "conv_type": "w",
+      "moments_cnn_modelpath": "cnn_models/bgk1d1v_single/best.pt"
+    },
+    "tags": ["warm"]
+  },
+  "cache_policy": {
+    "enabled": true,
+    "reuse_baseline": true,
+    "reuse_targets": false,
+    "cache_dir": "eval_runs/cache"
+  },
+  "eval_mode": "rollout_pair",
+  "profile": false,
+  "sweep": {
+    "parameters": {
+      "target.conv_type": ["w", "f"],
+      "target.picard_tol": [1e-3, 8e-4, 5e-4, 2.5e-4, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8]
+    },
+    "mode": "grid"
+  }
+}

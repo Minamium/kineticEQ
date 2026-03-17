@@ -30,6 +30,36 @@ def save_json(path: Path, obj):
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False))
 
 
+def _load_config_defaults(parser: argparse.ArgumentParser, config_path: str) -> dict:
+    path = Path(config_path).expanduser().resolve()
+    obj = json.loads(path.read_text())
+    if not isinstance(obj, dict):
+        raise ValueError(f"config must be a JSON object: {path}")
+
+    # Reuse the same base_args envelope as multi_train.json when present.
+    cfg = obj.get("base_args", obj)
+    if not isinstance(cfg, dict):
+        raise ValueError(f"config.base_args must be a JSON object: {path}")
+
+    known = {action.dest for action in parser._actions}
+    defaults = {}
+    unknown = []
+    for key, value in cfg.items():
+        if str(key).startswith("_"):
+            continue
+        if key not in known:
+            unknown.append(str(key))
+            continue
+        defaults[str(key)] = value
+
+    if unknown:
+        unknown_s = ", ".join(sorted(unknown))
+        raise ValueError(f"unknown config keys in {path}: {unknown_s}")
+
+    defaults["config"] = str(path)
+    return defaults
+
+
 def _read_manifest_format(manifest: str) -> str | None:
     try:
         obj = json.loads(Path(manifest).read_text())
@@ -84,9 +114,15 @@ def make_loader(
     return ds, dl
 
 # ---------------- args ----------------
-def parse_args():
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--manifest", type=str, required=True)
+    ap.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="optional single-train JSON config; explicit CLI args override file values",
+    )
+    ap.add_argument("--manifest", type=str, default=None)
     ap.add_argument("--split_key", type=str, default="split_iid", help="split key for v2 manifest")
     ap.add_argument("--cache_shards", type=int, default=2, help="LRU shard cache size for v2 loader")
     ap.add_argument("--device", type=str, default="cuda")
@@ -179,13 +215,26 @@ def parse_args():
     ap.add_argument("--aa_start_iter", type=int, default=2, help="first Picard iter to allow AA")
     ap.add_argument("--aa_reg", type=float, default=1e-10, help="AA Gram regularization")
     ap.add_argument("--aa_alpha_max", type=float, default=50.0, help="AA alpha clamp")
-    return ap.parse_args()
+    return ap
+
+
+def parse_args():
+    parser = build_parser()
+    bootstrap_args, _ = parser.parse_known_args()
+    if bootstrap_args.config:
+        parser.set_defaults(**_load_config_defaults(parser, bootstrap_args.config))
+    args = parser.parse_args()
+    if not args.manifest:
+        parser.error("--manifest is required unless provided by --config")
+    return args
 
 
 # ---------------- main ----------------
 def main():
     args = parse_args()
 
+    if args.config:
+        print(f"config file: {args.config}", flush=True)
     print(f"loss function: {args.loss_kind}", flush=True)
     print(f"shock_ratio: {args.shock_ratio}", flush=True)
     print(f"shock_q: {args.shock_q}", flush=True)
