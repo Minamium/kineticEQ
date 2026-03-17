@@ -46,6 +46,7 @@ class Scheme(str, Enum):
 class Backend(str, Enum):
     TORCH = "torch"
     CUDA_KERNEL = "cuda_kernel"
+    CPU_KERNEL = "cpu_kernel"
 
 # 型指定による計算精度
 class DType(str, Enum):
@@ -88,7 +89,8 @@ class Config:
                                           "hl": Scheme.HOLO}))
         object.__setattr__(self, "backend", parse_enum(Backend, self.backend,
                                  aliases={"pytorch": Backend.TORCH,
-                                          "cuda_backend": Backend.CUDA_KERNEL}))
+                                          "cuda_backend": Backend.CUDA_KERNEL,
+                                          "cpu_backend": Backend.CPU_KERNEL}))
         object.__setattr__(self, "dtype", parse_enum(DType, self.dtype,
                                 aliases={"fp32": DType.FLOAT32,
                                          "fp64": DType.FLOAT64}))

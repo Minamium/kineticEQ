@@ -8,7 +8,7 @@
     "workers": 4,
     "prefetch_factor": 8,
     "cache_shards": 16,
-    "amp": false,
+    "amp": true,
     "seed": 42,
 
     "manifest": "train_data/traindata_nx1024_nv256_dt5e-4_tauclass3/dataset_manifest.json",
