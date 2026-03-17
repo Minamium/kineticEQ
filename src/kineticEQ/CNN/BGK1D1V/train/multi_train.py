@@ -321,26 +321,40 @@ def _parse_run_log(run_dir: Path) -> dict[str, Any] | None:
     if not epoch_recs:
         return None
 
-    best_val = min(r.get("best_val", float("inf")) for r in epoch_recs)
     last_ep = epoch_recs[-1]
 
     # find the epoch record with best val_loss
     best_ep_rec = min(epoch_recs, key=lambda r: r.get("val_loss", float("inf")))
+    best_val = best_ep_rec.get("val_loss")
 
     total_train_sec = sum(r.get("train_time_sec", 0.0) for r in epoch_recs)
 
-    # warm_eval stats (last available)
-    picard_base = None
-    picard_warm = None
+    # warm_eval stats: keep both "best speed" and "latest" snapshots separate.
+    last_warm_ep = None
+    last_picard_base = None
+    last_picard_warm = None
+    best_speed_ep = None
+    best_speed_picard_base = None
+    best_speed_picard_warm = None
     best_speed = None
     if warm_recs:
         last_warm = warm_recs[-1]
-        picard_base = last_warm.get("picard_sum_base")
-        picard_warm = last_warm.get("picard_sum_warm")
-        best_speed = max(
-            r.get("best_speed_so_far", r.get("best_speed", 0.0))
-            for r in warm_recs
+        last_warm_ep = last_warm.get("epoch")
+        last_picard_base = last_warm.get("picard_sum_base")
+        last_picard_warm = last_warm.get("picard_sum_warm")
+
+        best_warm_rec = max(
+            warm_recs,
+            key=lambda r: float(
+                r.get("speedup_picard_sum", r.get("best_speed_so_far", r.get("best_speed", 0.0)))
+            ),
         )
+        best_speed = float(
+            best_warm_rec.get("speedup_picard_sum", best_warm_rec.get("best_speed_so_far", best_warm_rec.get("best_speed", 0.0)))
+        )
+        best_speed_ep = best_warm_rec.get("epoch")
+        best_speed_picard_base = best_warm_rec.get("picard_sum_base")
+        best_speed_picard_warm = best_warm_rec.get("picard_sum_warm")
 
     # fallback: read best_speed.pt
     if best_speed is None or best_speed == 0.0:
@@ -348,20 +362,25 @@ def _parse_run_log(run_dir: Path) -> dict[str, Any] | None:
 
     return {
         "best_val": best_val,
+        "best_val_ep": best_ep_rec.get("epoch"),
         "best_speed": best_speed,
+        "best_speed_ep": best_speed_ep,
         "final_epoch": last_ep.get("epoch"),
         "final_lr": last_ep.get("lr"),
         "total_train_sec": total_train_sec,
-        "picard_base": picard_base,
-        "picard_warm": picard_warm,
-        "train_loss_last": last_ep.get("train_loss"),
-        "val_loss_last": last_ep.get("val_loss"),
-        "val_rn_mae": best_ep_rec.get("val_rn_abs_mean"),
-        "val_ru_mae": best_ep_rec.get("val_ru_abs_mean"),
-        "val_rT_mae": best_ep_rec.get("val_rT_abs_mean"),
-        "val_rn_max": best_ep_rec.get("val_rn_abs_max"),
-        "val_ru_max": best_ep_rec.get("val_ru_abs_max"),
-        "val_rT_max": best_ep_rec.get("val_rT_abs_max"),
+        "best_speed_picard_base": best_speed_picard_base,
+        "best_speed_picard_warm": best_speed_picard_warm,
+        "last_warm_ep": last_warm_ep,
+        "last_picard_base": last_picard_base,
+        "last_picard_warm": last_picard_warm,
+        "latest_train_loss": last_ep.get("train_loss"),
+        "latest_val_loss": last_ep.get("val_loss"),
+        "best_val_rn_mae": best_ep_rec.get("val_rn_abs_mean"),
+        "best_val_ru_mae": best_ep_rec.get("val_ru_abs_mean"),
+        "best_val_rT_mae": best_ep_rec.get("val_rT_abs_mean"),
+        "best_val_rn_max": best_ep_rec.get("val_rn_abs_max"),
+        "best_val_ru_max": best_ep_rec.get("val_ru_abs_max"),
+        "best_val_rT_max": best_ep_rec.get("val_rT_abs_max"),
     }
 
 
@@ -398,30 +417,43 @@ def aggregate_results(save_root: Path, manifest: list[dict] | None = None, *,
         if stats is None:
             row["status"] = "no_log"
             row.update({k: None for k in [
-                "best_val", "best_speed", "final_epoch", "total_train_sec",
-                "picard_base", "picard_warm", "iter_ratio",
-                "val_rn_mae", "val_ru_mae", "val_rT_mae", "val_rT_max",
-                "train_loss_last", "val_loss_last", "final_lr",
+                "best_val", "best_val_ep",
+                "best_speed", "best_speed_ep", "best_speed_iter_ratio",
+                "best_speed_picard_base", "best_speed_picard_warm",
+                "last_warm_ep", "last_iter_ratio",
+                "last_picard_base", "last_picard_warm",
+                "final_epoch", "total_train_sec",
+                "best_val_rn_mae", "best_val_ru_mae", "best_val_rT_mae", "best_val_rT_max",
+                "latest_train_loss", "latest_val_loss", "final_lr",
             ]})
         else:
-            pb = stats["picard_base"]
-            pw = stats["picard_warm"]
-            iter_ratio = (pb / max(pw, 1)) if pb is not None and pw is not None else None
+            best_pb = stats["best_speed_picard_base"]
+            best_pw = stats["best_speed_picard_warm"]
+            last_pb = stats["last_picard_base"]
+            last_pw = stats["last_picard_warm"]
+            best_iter_ratio = (best_pb / max(best_pw, 1)) if best_pb is not None and best_pw is not None else None
+            last_iter_ratio = (last_pb / max(last_pw, 1)) if last_pb is not None and last_pw is not None else None
             row.update({
                 "status": "ok",
                 "best_val": stats["best_val"],
+                "best_val_ep": stats["best_val_ep"],
                 "best_speed": stats["best_speed"],
+                "best_speed_ep": stats["best_speed_ep"],
                 "final_epoch": stats["final_epoch"],
                 "total_train_sec": stats["total_train_sec"],
-                "picard_base": pb,
-                "picard_warm": pw,
-                "iter_ratio": iter_ratio,
-                "val_rn_mae": stats["val_rn_mae"],
-                "val_ru_mae": stats["val_ru_mae"],
-                "val_rT_mae": stats["val_rT_mae"],
-                "val_rT_max": stats["val_rT_max"],
-                "train_loss_last": stats["train_loss_last"],
-                "val_loss_last": stats["val_loss_last"],
+                "best_speed_picard_base": best_pb,
+                "best_speed_picard_warm": best_pw,
+                "best_speed_iter_ratio": best_iter_ratio,
+                "last_warm_ep": stats["last_warm_ep"],
+                "last_picard_base": last_pb,
+                "last_picard_warm": last_pw,
+                "last_iter_ratio": last_iter_ratio,
+                "best_val_rn_mae": stats["best_val_rn_mae"],
+                "best_val_ru_mae": stats["best_val_ru_mae"],
+                "best_val_rT_mae": stats["best_val_rT_mae"],
+                "best_val_rT_max": stats["best_val_rT_max"],
+                "latest_train_loss": stats["latest_train_loss"],
+                "latest_val_loss": stats["latest_val_loss"],
                 "final_lr": stats["final_lr"],
             })
 
@@ -443,10 +475,14 @@ def aggregate_results(save_root: Path, manifest: list[dict] | None = None, *,
     # --- write TSV ---
     tsv_cols = (
         ["rank", "run_name"] + sweep_keys +
-        ["best_val", "best_speed", "iter_ratio",
-         "picard_base", "picard_warm",
-         "ep", "total_time_s", "train_loss", "val_loss",
-         "val_rn_mae", "val_ru_mae", "val_rT_mae", "val_rT_max",
+        ["best_val", "best_val_ep",
+         "best_speed", "best_speed_ep", "best_speed_iter_ratio",
+         "best_speed_picard_base", "best_speed_picard_warm",
+         "last_warm_ep", "last_iter_ratio",
+         "last_picard_base", "last_picard_warm",
+         "final_ep", "total_train_time_s",
+         "latest_train_loss", "latest_val_loss",
+         "best_val_rn_mae", "best_val_ru_mae", "best_val_rT_mae", "best_val_rT_max",
          "lr", "status"]
     )
     def _fmt(val, fmt_str=None):
@@ -467,18 +503,24 @@ def aggregate_results(save_root: Path, manifest: list[dict] | None = None, *,
                 r["run_name"],
                 *[_fmt(r.get(k)) for k in sweep_keys],
                 _fmt(r.get("best_val"), "{:.6e}"),
+                _fmt(r.get("best_val_ep")),
                 _fmt(r.get("best_speed"), "{:.3f}"),
-                _fmt(r.get("iter_ratio"), "{:.2f}"),
-                _fmt(r.get("picard_base")),
-                _fmt(r.get("picard_warm")),
+                _fmt(r.get("best_speed_ep")),
+                _fmt(r.get("best_speed_iter_ratio"), "{:.2f}"),
+                _fmt(r.get("best_speed_picard_base")),
+                _fmt(r.get("best_speed_picard_warm")),
+                _fmt(r.get("last_warm_ep")),
+                _fmt(r.get("last_iter_ratio"), "{:.2f}"),
+                _fmt(r.get("last_picard_base")),
+                _fmt(r.get("last_picard_warm")),
                 _fmt(r.get("final_epoch")),
                 _fmt(r.get("total_train_sec"), "{:.1f}"),
-                _fmt(r.get("train_loss_last"), "{:.6e}"),
-                _fmt(r.get("val_loss_last"), "{:.6e}"),
-                _fmt(r.get("val_rn_mae"), "{:.4e}"),
-                _fmt(r.get("val_ru_mae"), "{:.4e}"),
-                _fmt(r.get("val_rT_mae"), "{:.4e}"),
-                _fmt(r.get("val_rT_max"), "{:.4e}"),
+                _fmt(r.get("latest_train_loss"), "{:.6e}"),
+                _fmt(r.get("latest_val_loss"), "{:.6e}"),
+                _fmt(r.get("best_val_rn_mae"), "{:.4e}"),
+                _fmt(r.get("best_val_ru_mae"), "{:.4e}"),
+                _fmt(r.get("best_val_rT_mae"), "{:.4e}"),
+                _fmt(r.get("best_val_rT_max"), "{:.4e}"),
                 _fmt(r.get("final_lr"), "{:.2e}"),
                 r.get("status", ""),
             ]
@@ -503,23 +545,25 @@ def aggregate_results(save_root: Path, manifest: list[dict] | None = None, *,
     ok_results = [r for r in results if r["status"] == "ok"]
     if ok_results:
         hdr = (f"{'#':>3}  {'AA':>2}  {'sr':>5}  {'sq':>5}  {'slb':>5}"
-               f"  {'best_val':>11}  {'speed':>6}  {'iter_r':>6}"
-               f"  {'ep':>3}  {'time_s':>7}  {'rT_mae':>9}  {'rT_max':>9}")
+               f"  {'best_val':>11}  {'bv_ep':>5}"
+               f"  {'speed':>6}  {'sp_ep':>5}  {'sp_it':>6}"
+               f"  {'time_s':>7}  {'rT_mae':>9}  {'rT_max':>9}")
         print(f"\nTop {top_n} by best_speed:")
         print(hdr)
         print("-" * len(hdr))
         for i, r in enumerate(ok_results[:top_n]):
             aa_str = "Y" if r.get("aa_enable") else "N"
             sp_str = f"{r['best_speed']:.2f}" if r.get("best_speed") is not None else "N/A"
-            ir_str = f"{r['iter_ratio']:.1f}" if r.get("iter_ratio") is not None else "N/A"
-            rt_mae = f"{r['val_rT_mae']:.3e}" if r.get("val_rT_mae") is not None else "N/A"
-            rt_max = f"{r['val_rT_max']:.3e}" if r.get("val_rT_max") is not None else "N/A"
+            ir_str = f"{r['best_speed_iter_ratio']:.1f}" if r.get("best_speed_iter_ratio") is not None else "N/A"
+            rt_mae = f"{r['best_val_rT_mae']:.3e}" if r.get("best_val_rT_mae") is not None else "N/A"
+            rt_max = f"{r['best_val_rT_max']:.3e}" if r.get("best_val_rT_max") is not None else "N/A"
             sr_v = r.get("shock_ratio", "")
             sq_v = r.get("shock_q", "")
             slb_v = r.get("shock_loss_softmax_beta", "")
             print(f"{i+1:3d}  {aa_str:>2}  {sr_v:>5}  {sq_v:>5}  {slb_v:>5}"
-                  f"  {r['best_val']:11.5e}  {sp_str:>6}  {ir_str:>6}"
-                  f"  {r.get('final_epoch',''):>3}  {r.get('total_train_sec',0):7.0f}"
+                  f"  {r['best_val']:11.5e}  {r.get('best_val_ep',''):>5}"
+                  f"  {sp_str:>6}  {r.get('best_speed_ep',''):>5}  {ir_str:>6}"
+                  f"  {r.get('total_train_sec',0):7.0f}"
                   f"  {rt_mae:>9}  {rt_max:>9}")
 
     print(f"\nFiles written:")

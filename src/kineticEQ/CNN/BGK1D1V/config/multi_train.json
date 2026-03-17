@@ -18,10 +18,10 @@
     "n_floor": 1e-8,
     "T_floor": 1e-8,
 
-    "shock_ratio": 0.08,
-    "shock_q": 0.85,
+    "shock_ratio": 0.32,
+    "shock_q": 0.75,
     "shock_loss_kind": "softmax",
-    "shock_loss_softmax_beta": 0.05,
+    "shock_loss_softmax_beta": 1.0,
     "shock_loss_eps": 1e-6,
 
     "aa_enable": false,
@@ -58,9 +58,9 @@
   },
 
   "sweep": {
-    "shock_ratio": [0.08, 0.16, 0.32, 0.64],
-    "shock_q": [0.75,0.8,0.85],
-    "shock_loss_softmax_beta": [0.5, 1.0, 2.0]
+    "hidden": [256, 512],
+    "n_blocks": [6, 12],
+    "kernel": [5, 7, 9]
   },
 
   "save_root": "sweep_runs/default"
