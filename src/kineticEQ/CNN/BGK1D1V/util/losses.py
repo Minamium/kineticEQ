@@ -4,6 +4,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from .input_state import split_input_state
+
 # ---------------- normalized residuals on next moments ----------------
 def compute_stdW_residuals(
     pred: torch.Tensor,
@@ -15,6 +17,7 @@ def compute_stdW_residuals(
     T_floor: float = 1e-12,
     eps: float = 1e-12,
     delta_type: str = "dnu",
+    input_state_type: str = "nut",
 ):
     """
     Return channel-wise normalized residuals r_n, r_u, r_T with boundary masked.
@@ -24,9 +27,7 @@ def compute_stdW_residuals(
     y = y.float()
     x = x.float()
 
-    n0 = x[:, 0:1, :]
-    u0 = x[:, 1:2, :]
-    T0 = x[:, 2:3, :]
+    n0, u0, nu0, T0 = split_input_state(x, input_state_type=input_state_type, n_floor=n_floor)
 
     dn_p, dm_p, dT_p = pred[:, 0:1, :], pred[:, 1:2, :], pred[:, 2:3, :]
     dn_t, dm_t, dT_t = y[:, 0:1, :],    y[:, 1:2, :],    y[:, 2:3, :]
@@ -41,8 +42,8 @@ def compute_stdW_residuals(
         u1_p = (u0 + dm_p)
         u1_t = (u0 + dm_t)
     elif delta_type == "dnu":
-        u1_p = (n0 * u0 + dm_p) / n1_p_safe
-        u1_t = (n0 * u0 + dm_t) / n1_t_safe
+        u1_p = (nu0 + dm_p) / n1_p_safe
+        u1_t = (nu0 + dm_t) / n1_t_safe
     else:
         raise ValueError(f"unknown delta_type={delta_type}")
 
@@ -79,16 +80,15 @@ def build_shock_mask_from_x(
     nb: int = 10,
     shock_q: float = 0.90,   # 0.90 -> top10% as shock
     eps: float = 1e-12,
+    input_state_type: str = "nut",
 ) -> torch.Tensor:
     """
-    x: (B,5,nx) のうち n,u,T を使って shock 指標 s=|Δn|+|Δu|+|ΔT| を作り、
+    x: (B,5,nx) のうち n,u,T を復元して shock 指標 s=|Δn|+|Δu|+|ΔT| を作り、
     上位(1-shock_q)を1とする mask を返す。境界 nb は 0。
     returns: mask (B,1,nx) float (0/1)
     """
     B, _, nx = x.shape
-    n = x[:, 0:1, :].float()
-    u = x[:, 1:2, :].float()
-    T = x[:, 2:3, :].float()
+    n, u, _, T = split_input_state(x, input_state_type=input_state_type)
 
     dn = (n[..., 1:] - n[..., :-1]).abs()
     du = (u[..., 1:] - u[..., :-1]).abs()

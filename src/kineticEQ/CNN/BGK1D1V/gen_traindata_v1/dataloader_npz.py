@@ -10,6 +10,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from ..util.input_state import input_state_type_from_delta_type, normalize_input_state_type
+
 
 def _load_manifest(path: str | Path) -> Dict[str, Any]:
     p = Path(path)
@@ -49,6 +51,7 @@ class BGK1D1VNPZDeltaDataset(Dataset):
         mmap: bool = True,
         cache_npz: bool = True,
         target: str = "dnu",
+        input_state_type: str | None = None,
     ):
         super().__init__()
         if split not in ("train", "val", "test"):
@@ -63,6 +66,9 @@ class BGK1D1VNPZDeltaDataset(Dataset):
         self.mmap = mmap
         self.cache_npz = cache_npz
         self.target = target_norm
+        self.input_state_type = normalize_input_state_type(
+            input_state_type_from_delta_type(target_norm) if input_state_type is None else input_state_type
+        )
         self._const = {}
 
         split_case_ids = set(self.manifest["splits"][split])
@@ -152,7 +158,8 @@ class BGK1D1VNPZDeltaDataset(Dataset):
         logdt_x, logtau_x = self._const[key]
 
 
-        x = torch.stack([n_t, u_t, T_t, logdt_x, logtau_x], dim=0).to(dtype=self.dtype)
+        second = u_t if self.input_state_type == "nut" else (n_t * u_t)
+        x = torch.stack([n_t, second, T_t, logdt_x, logtau_x], dim=0).to(dtype=self.dtype)
 
         # W(t+1)
         n_tp1 = torch.from_numpy(n[t + 1])

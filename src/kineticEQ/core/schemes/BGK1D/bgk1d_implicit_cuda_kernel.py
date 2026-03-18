@@ -125,6 +125,7 @@ def step(
         T1p = T0.clone()
 
         dtp = (model_meta or {}).get("delta_type", "dnu")
+        input_state_type = (model_meta or {}).get("input_state_type", "nut")
         n1_int, u1_int, T1_int, _, _, _ = predict_next_moments_delta(
             model,
             n0,
@@ -133,6 +134,7 @@ def step(
             math.log10(dt),
             math.log10(tau_tilde),
             delta_type=dtp,
+            input_state_type=input_state_type,
         )
 
         n1p[1:-1].copy_(torch.clamp(n1_int, min=n_floor))

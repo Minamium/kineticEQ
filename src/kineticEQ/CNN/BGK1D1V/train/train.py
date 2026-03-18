@@ -26,6 +26,7 @@ from ..util.losses import (
     build_shock_mask_from_x,
     std_w_loss_from_residuals_shock,
 )
+from ..util.input_state import input_state_type_from_delta_type
 
 # ---------------- utils ----------------
 def save_json(path: Path, obj):
@@ -129,6 +130,7 @@ def _build_checkpoint_meta(
         "manifest_path": str(Path(args.manifest).expanduser().resolve()) if args.manifest else None,
         "manifest_sha256": _sha256_file(args.manifest),
         "delta_type": str(args.delta_type),
+        "input_state_type": str(args.input_state_type),
         "model_kwargs": _jsonable_value(model_kwargs),
     }
     if retrain_info:
@@ -525,6 +527,7 @@ def parse_args():
 # ---------------- main ----------------
 def main():
     args = parse_args()
+    args.input_state_type = input_state_type_from_delta_type(args.delta_type)
 
     if args.config:
         print(f"config file: {args.config}", flush=True)
@@ -532,6 +535,7 @@ def main():
     print(f"shock_ratio: {args.shock_ratio}", flush=True)
     print(f"shock_q: {args.shock_q}", flush=True)
     print(f"delta_type: {args.delta_type}", flush=True)
+    print(f"input_state_type: {args.input_state_type}", flush=True)
 
     # Picard-sum speedup against the cached baseline warm-eval.
     best_speed = 0.0
@@ -689,11 +693,13 @@ def main():
                     n_floor=float(args.n_floor),
                     T_floor=float(args.T_floor),
                     eps=float(args.loss_eps),
-                    delta_type=args.delta_type
+                    delta_type=args.delta_type,
+                    input_state_type=str(args.input_state_type),
                 )
 
                 shock_mask = build_shock_mask_from_x(
-                    x, nb=int(args.nb), shock_q=float(args.shock_q)
+                    x, nb=int(args.nb), shock_q=float(args.shock_q),
+                    input_state_type=str(args.input_state_type),
                 )
 
                 loss, base_loss, shock_loss = std_w_loss_from_residuals_shock(
@@ -796,10 +802,12 @@ def main():
                         n_floor=float(args.n_floor),
                         T_floor=float(args.T_floor),
                         eps=float(args.loss_eps),
-                        delta_type=args.delta_type
+                        delta_type=args.delta_type,
+                        input_state_type=str(args.input_state_type),
                     )
                     shock_mask = build_shock_mask_from_x(
-                        x, nb=int(args.nb), shock_q=float(args.shock_q)
+                        x, nb=int(args.nb), shock_q=float(args.shock_q),
+                        input_state_type=str(args.input_state_type),
                     )
                     loss, val_base_loss, val_shock_loss = std_w_loss_from_residuals_shock(
                         rn, ru, rT, valid, shock_mask,

@@ -343,6 +343,7 @@ def run_case_baseline_input(
             math.log10(dt_val),
             math.log10(tau_val),
             delta_type=dtp,
+            input_state_type=model_meta_tf.get("input_state_type", "nut"),
         )
 
         # inject W for THIS step (t=s -> s+1)

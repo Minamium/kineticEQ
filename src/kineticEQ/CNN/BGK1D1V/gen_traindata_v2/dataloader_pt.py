@@ -12,6 +12,8 @@ from typing import Any
 import torch
 from torch.utils.data import Dataset
 
+from ..util.input_state import input_state_type_from_delta_type, normalize_input_state_type
+
 
 def _read_json(path: str | Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text())
@@ -47,6 +49,7 @@ class BGK1D1VShardDeltaDataset(Dataset):
         split: str = "train",
         split_key: str = "split_iid",
         target: str = "dnu",
+        input_state_type: str | None = None,
         dtype: torch.dtype = torch.float32,
         cache_shards: int = 2,
     ):
@@ -82,6 +85,9 @@ class BGK1D1VShardDeltaDataset(Dataset):
         self.split = split
         self.split_key = split_key
         self.target = target
+        self.input_state_type = normalize_input_state_type(
+            input_state_type_from_delta_type(target) if input_state_type is None else input_state_type
+        )
         self.dtype = dtype
         self.cache_shards = int(cache_shards)
         self._const_cache: dict[tuple[int, float, float, torch.dtype], tuple[torch.Tensor, torch.Tensor]] = {}
@@ -162,10 +168,11 @@ class BGK1D1VShardDeltaDataset(Dataset):
         logtau = float(rec["log10_tau"])
         logdt_x, logtau_x = self._const_channels(nx=nx, logdt=logdt, logtau=logtau)
 
+        second = u_t if self.input_state_type == "nut" else (n_t * u_t)
         x = torch.stack(
             [
                 n_t.to(dtype=self.dtype),
-                u_t.to(dtype=self.dtype),
+                second.to(dtype=self.dtype),
                 T_t.to(dtype=self.dtype),
                 logdt_x,
                 logtau_x,
@@ -207,5 +214,6 @@ class BGK1D1VShardDeltaDataset(Dataset):
             "split": str(rec.get(self.split_key, "")),
             "split_key": self.split_key,
             "target": self.target,
+            "input_state_type": self.input_state_type,
             "shard_path": str(rec["shard_path"]),
         }

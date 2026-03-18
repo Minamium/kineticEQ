@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 import torch
 from kineticEQ.CNN.BGK1D1V.util.models import MomentCNN1D
+from kineticEQ.CNN.BGK1D1V.util.input_state import build_model_input, normalize_input_state_type
 
 
 def _to_dict(x: Any) -> dict | None:
@@ -84,6 +85,9 @@ def _load_ckpt_state(ckpt_path: str) -> tuple[dict, dict]:
             dtp = args.get("delta_type", None) or args.get("target", None)
             if isinstance(dtp, str):
                 meta["delta_type"] = dtp
+            input_state_type = args.get("input_state_type", None)
+            if isinstance(input_state_type, str):
+                meta["input_state_type"] = input_state_type
 
         # some runs may save target in config-like field
         cfg = _to_dict(obj.get("meta", None))
@@ -91,6 +95,9 @@ def _load_ckpt_state(ckpt_path: str) -> tuple[dict, dict]:
             dtp = cfg.get("delta_type", None) or cfg.get("target", None)
             if isinstance(dtp, str) and "delta_type" not in meta:
                 meta["delta_type"] = dtp
+            input_state_type = cfg.get("input_state_type", None)
+            if isinstance(input_state_type, str) and "input_state_type" not in meta:
+                meta["input_state_type"] = input_state_type
 
             if "model_kwargs" not in meta:
                 cfg_model_kwargs = _to_dict(cfg.get("model_kwargs", None))
@@ -124,6 +131,12 @@ def _load_ckpt_state(ckpt_path: str) -> tuple[dict, dict]:
             meta.pop("delta_type", None)
         else:
             meta["delta_type"] = dtp
+
+    input_state_type = meta.get("input_state_type", None)
+    if isinstance(input_state_type, str):
+        meta["input_state_type"] = normalize_input_state_type(input_state_type)
+    else:
+        meta["input_state_type"] = "nut"
 
     return state, meta
 
@@ -304,6 +317,7 @@ def predict_next_moments_delta(
     logdt: float, logtau: float,
     *,
     delta_type: str = "dw",
+    input_state_type: str = "nut",
     n_floor: float = 1e-12,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor,
@@ -319,13 +333,14 @@ def predict_next_moments_delta(
       - du for dw
       - d(nu) for dnu
     """
-    nx = n0.numel()
-    x = torch.empty((1, 5, nx), device=n0.device, dtype=torch.float32)
-    x[0, 0] = n0.to(torch.float32)
-    x[0, 1] = u0.to(torch.float32)
-    x[0, 2] = T0.to(torch.float32)
-    x[0, 3].fill_(float(logdt))
-    x[0, 4].fill_(float(logtau))
+    x = build_model_input(
+        n0,
+        u0,
+        T0,
+        logdt,
+        logtau,
+        input_state_type=input_state_type,
+    )
 
     dy = model(x)[0]  # (3, nx) float32
     dn = dy[0].to(n0.dtype)
@@ -349,4 +364,3 @@ def predict_next_moments_delta(
         return n1[1:-1], u1[1:-1], T1[1:-1], dn, dm, dT
     else:
         raise ValueError(f"unknown delta_type={delta_type!r}")
-
