@@ -19,12 +19,12 @@ def test_smoke_cpu(model, scheme, backend):
         )
     else:
         model_cfg = BGK1D.ModelConfig(
-            grid=BGK1D.Grid1D1V(nx=65, nv=33, Lx=1.0, v_max=10.0),
-            time=BGK1D.TimeConfig(dt=5e-5, T_total=1e-4),
-            params=BGK1D.BGK1D1VParams(tau_tilde=5e-2),
+            grid=BGK1D.Grid1D1V(nx=128, nv=64, Lx=1.0, v_max=10.0),
+            time=BGK1D.TimeConfig(dt=5e-4, T_total=0.05),
+            params=BGK1D.BGK1D1VParams(tau_tilde=5e-5),
             scheme_params=BGK1D.implicit.Params(
-                picard_iter=32,
-                picard_tol=1e-3,
+                picard_iter=100,
+                picard_tol=1e-6,
                 abs_tol=1e-13,
             ),
         )
