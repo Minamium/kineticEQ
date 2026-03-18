@@ -13,7 +13,7 @@
     
     "loss_kind": "smoothl1",
     "delta_type": "dnu",
-    "input_temporal_mode": "none",
+    "input_temporal_mode": "prev_delta",
     "loss_eps": 1e-6,
     "nb": 10,
     "n_floor": 1e-8,
