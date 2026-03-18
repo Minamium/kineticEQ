@@ -50,6 +50,7 @@ def emit_log(log_level: str, message_level: str, message: str, rank: int) -> Non
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out_dir", type=str, default="dataset_pt_v2")
+    ap.add_argument("--resume", action="store_true")
     ap.add_argument("--cases", type=int, default=1000)
     ap.add_argument("--cases_per_shard", type=int, default=100)
     ap.add_argument("--nx", type=int, default=512)
@@ -117,6 +118,20 @@ def setup_dist(device_arg: str) -> tuple[bool, int, int, int, str]:
         device = "cpu"
     dist.init_process_group(backend=backend, init_method="env://")
     return True, rank, local_rank, world, device
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if s:
+                rows.append(json.loads(s))
+    return rows
 
 
 def balanced_local_plan(
@@ -330,6 +345,8 @@ def run_case(
 
     rec = {
         "case_id": int(case_id),
+        "rank": int(rank),
+        "local_idx": int(local_idx),
         "seed": int(case_seed),
         "frame_start": -1,
         "n_frames": int(n_frames),
@@ -384,6 +401,7 @@ def flush_shard(
         picard_iter[cursor:cursor + n_frames].copy_(payload["picard_iter"])
         std_picard_residual[cursor:cursor + n_frames].copy_(payload["std_picard_residual"])
         rec["frame_start"] = int(cursor)
+        rec["shard_global_id"] = int(shard_global_id)
         rec["shard_path"] = shard_rel_path
         cursor += n_frames
     torch.save(
@@ -447,6 +465,12 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def write_jsonl_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    write_jsonl(tmp_path, rows)
+    tmp_path.replace(path)
+
+
 def build_generation_config(args, world_size: int) -> dict[str, Any]:
     return {
         "format": "kineticEQ_BGK1D1V_pt_v2_partial_config",
@@ -494,6 +518,72 @@ def write_partial_generation_config(out_dir: Path, rank: int, args, world_size: 
     write_json(out_dir / "partials" / f"generation_config.rank{rank:05d}.json", cfg)
 
 
+def partial_manifest_path(out_dir: Path, rank: int) -> Path:
+    return out_dir / "partials" / f"case_manifest.rank{rank:05d}.jsonl"
+
+
+def is_materialized_success(rec: dict[str, Any], out_dir: Path) -> bool:
+    if bool(rec.get("failed", False)):
+        return False
+    shard_rel = str(rec.get("shard_path", ""))
+    if not shard_rel:
+        return False
+    return (out_dir / shard_rel).exists()
+
+
+def load_local_record_map(path: Path) -> dict[int, dict[str, Any]]:
+    if not path.exists():
+        return {}
+    rows = read_jsonl(path)
+    record_map: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        case_id = int(row["case_id"])
+        if case_id in record_map:
+            raise ValueError(f"duplicate case_id in partial manifest {path}: {case_id}")
+        record_map[case_id] = row
+    return record_map
+
+
+def persist_local_record_map(path: Path, record_map: dict[int, dict[str, Any]]) -> None:
+    rows = [record_map[case_id] for case_id in sorted(record_map)]
+    write_jsonl_atomic(path, rows)
+
+
+def existing_shard_count(record_map: dict[int, dict[str, Any]], out_dir: Path) -> int:
+    shard_paths = {
+        str(rec["shard_path"])
+        for rec in record_map.values()
+        if is_materialized_success(rec, out_dir)
+    }
+    return int(len(shard_paths))
+
+
+def validate_resume_config(out_dir: Path, rank: int, args, world_size: int) -> None:
+    cfg_path = out_dir / "partials" / f"generation_config.rank{rank:05d}.json"
+    if not cfg_path.exists():
+        return
+    current_cfg = build_generation_config(args=args, world_size=world_size)
+    current_cfg["rank"] = int(rank)
+    existing_cfg = read_json(cfg_path)
+    if json.dumps(existing_cfg, sort_keys=True, ensure_ascii=False) != json.dumps(current_cfg, sort_keys=True, ensure_ascii=False):
+        raise ValueError(
+            "resume requested but existing generation config does not match current arguments: "
+            f"{cfg_path}"
+        )
+
+
+def ensure_fresh_out_dir(out_dir: Path) -> None:
+    shard_dir = out_dir / "shards"
+    partial_dir = out_dir / "partials"
+    has_existing_shards = shard_dir.exists() and any(shard_dir.iterdir())
+    has_existing_partials = partial_dir.exists() and any(partial_dir.iterdir())
+    if has_existing_shards or has_existing_partials:
+        raise ValueError(
+            f"out_dir already contains generation state: {out_dir}. "
+            "Use --resume to continue or remove the directory for a fresh run."
+        )
+
+
 def main():
     args = parse_args()
     is_dist, rank, local_rank, world_size, device = setup_dist(args.device)
@@ -502,7 +592,15 @@ def main():
     out_dir = Path(args.out_dir).resolve()
     (out_dir / "shards").mkdir(parents=True, exist_ok=True)
     (out_dir / "partials").mkdir(parents=True, exist_ok=True)
+    partial_path = partial_manifest_path(out_dir=out_dir, rank=rank)
+    if args.resume:
+        validate_resume_config(out_dir=out_dir, rank=rank, args=args, world_size=world_size)
+        record_map = load_local_record_map(partial_path)
+    else:
+        ensure_fresh_out_dir(out_dir)
+        record_map = {}
     write_partial_generation_config(out_dir=out_dir, rank=rank, args=args, world_size=world_size)
+    persist_local_record_map(partial_path, record_map)
 
     local_plan = balanced_local_plan(
         total_cases=int(args.cases),
@@ -528,12 +626,33 @@ def main():
         cases_per_shard=int(args.cases_per_shard),
     )
 
-    local_records: list[dict[str, Any]] = []
     shard_cases: list[dict[str, Any]] = []
     shard_payloads: list[dict[str, torch.Tensor]] = []
-    local_shard_count = 0
+    local_shard_count = existing_shard_count(record_map=record_map, out_dir=out_dir)
+    done_case_ids = {
+        case_id
+        for case_id, rec in record_map.items()
+        if is_materialized_success(rec, out_dir)
+    }
+    emit_log(
+        args.log_level,
+        "info",
+        (
+            f"resume_state enabled={bool(args.resume)} existing_records={len(record_map)} "
+            f"done_cases={len(done_case_ids)} next_shard_global_id={shard_id_base + local_shard_count}"
+        ),
+        rank,
+    )
 
     for local_idx, (case_id, tau_tilde) in enumerate(local_plan):
+        if int(case_id) in done_case_ids:
+            emit_log(
+                args.log_level,
+                "debug",
+                f"resume_skip local={local_idx + 1}/{len(local_plan)} case_id={case_id} tau={tau_tilde:.3e}",
+                rank,
+            )
+            continue
         try:
             rec, payload = run_case(
                 case_id=int(case_id),
@@ -546,7 +665,6 @@ def main():
             )
             shard_cases.append(rec)
             shard_payloads.append(payload)
-            local_records.append(rec)
             if len(shard_cases) >= int(args.cases_per_shard):
                 flush_shard(
                     out_dir=out_dir,
@@ -554,6 +672,10 @@ def main():
                     shard_cases=shard_cases,
                     shard_payloads=shard_payloads,
                 )
+                for shard_rec in shard_cases:
+                    record_map[int(shard_rec["case_id"])] = dict(shard_rec)
+                    done_case_ids.add(int(shard_rec["case_id"]))
+                persist_local_record_map(partial_path, record_map)
                 local_shard_count += 1
                 shard_cases = []
                 shard_payloads = []
@@ -564,43 +686,45 @@ def main():
                 rank,
             )
         except Exception as e:
-            local_records.append(
-                {
-                    "case_id": int(case_id),
-                    "seed": int(args.seed) + int(case_id),
-                    "frame_start": -1,
-                    "n_frames": 0,
-                    "n_steps": 0,
-                    "nx": int(args.nx),
-                    "nv": int(args.nv),
-                    "Lx": float(args.Lx),
-                    "v_max": float(args.v_max),
-                    "dt": float(args.dt),
-                    "T_total": float(args.T_total),
-                    "tau_tilde": float(tau_tilde),
-                    "log10_dt": float(math.log10(float(args.dt))),
-                    "log10_tau": float(math.log10(float(tau_tilde))),
-                    "log10_dt_over_tau": float(math.log10(float(args.dt) / float(tau_tilde))),
-                    "picard_iter_limit": int(args.picard_iter),
-                    "picard_tol": float(args.picard_tol),
-                    "abs_tol": float(args.abs_tol),
-                    "conv_type": str(args.conv_type),
-                    "initial_regions": [],
-                    "n_min": None,
-                    "n_max": None,
-                    "n_ratio": None,
-                    "T_min": None,
-                    "T_max": None,
-                    "T_ratio": None,
-                    "u_min": None,
-                    "u_max": None,
-                    "u_rms": None,
-                    "elapsed_sec": 0.0,
-                    "failed": True,
-                    "error_message": str(e),
-                    "shard_path": "",
-                }
-            )
+            failed_rec = {
+                "case_id": int(case_id),
+                "rank": int(rank),
+                "local_idx": int(local_idx),
+                "seed": int(args.seed) + int(case_id),
+                "frame_start": -1,
+                "n_frames": 0,
+                "n_steps": 0,
+                "nx": int(args.nx),
+                "nv": int(args.nv),
+                "Lx": float(args.Lx),
+                "v_max": float(args.v_max),
+                "dt": float(args.dt),
+                "T_total": float(args.T_total),
+                "tau_tilde": float(tau_tilde),
+                "log10_dt": float(math.log10(float(args.dt))),
+                "log10_tau": float(math.log10(float(tau_tilde))),
+                "log10_dt_over_tau": float(math.log10(float(args.dt) / float(tau_tilde))),
+                "picard_iter_limit": int(args.picard_iter),
+                "picard_tol": float(args.picard_tol),
+                "abs_tol": float(args.abs_tol),
+                "conv_type": str(args.conv_type),
+                "initial_regions": [],
+                "n_min": None,
+                "n_max": None,
+                "n_ratio": None,
+                "T_min": None,
+                "T_max": None,
+                "T_ratio": None,
+                "u_min": None,
+                "u_max": None,
+                "u_rms": None,
+                "elapsed_sec": 0.0,
+                "failed": True,
+                "error_message": str(e),
+                "shard_path": "",
+            }
+            record_map[int(case_id)] = failed_rec
+            persist_local_record_map(partial_path, record_map)
             emit_log(
                 args.log_level,
                 "error",
@@ -615,13 +739,15 @@ def main():
             shard_cases=shard_cases,
             shard_payloads=shard_payloads,
         )
-
-    write_jsonl(out_dir / "partials" / f"case_manifest.rank{rank:05d}.jsonl", local_records)
+        for shard_rec in shard_cases:
+            record_map[int(shard_rec["case_id"])] = dict(shard_rec)
+            done_case_ids.add(int(shard_rec["case_id"]))
+        persist_local_record_map(partial_path, record_map)
     emit_log(
         args.log_level,
         "info",
         (
-            f"local_generation_done local_cases={len(local_records)} "
+            f"local_generation_done local_cases={len(record_map)} "
             f"partial_manifest=partials/case_manifest.rank{rank:05d}.jsonl "
             f"partial_config=partials/generation_config.rank{rank:05d}.json"
         ),
