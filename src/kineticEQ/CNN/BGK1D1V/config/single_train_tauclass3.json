@@ -1,8 +1,8 @@
 {
-  "_comment": "Default sweep config for multi_train.py. Edit base_args and sweep as needed.",
-
+  "_comment": "Single-run training defaults. Explicit CLI args override this file.",
   "base_args": {
-    "epochs": 75,
+    "device": "cuda",
+    "epochs": 50,
     "batch": 128,
     "lr": 5e-4,
     "workers": 4,
@@ -10,7 +10,10 @@
     "cache_shards": 16,
     "amp": false,
     "seed": 42,
-    
+
+    "manifest": "train_data/traindata_nx1024_nv256_dt5e-4_tauclass3/dataset_manifest.json",
+    "save_dir": "cnn_models/bgk1d1v_single",
+
     "loss_kind": "smoothl1",
     "delta_type": "dnu",
     "input_temporal_mode": "none",
@@ -35,7 +38,7 @@
 
     "hidden": 512,
     "n_blocks": 12,
-    "kernel": 7,
+    "kernel": 9,
 
     "grad_clip": 1.0,
     "log_interval": 50,
@@ -46,23 +49,15 @@
     "sched_min_lr": 1e-6,
 
     "warm_eval": true,
-    "warm_eval_start": 50,
+    "conv_type": "f",
+    "warm_eval_start": 25,
     "warm_eval_tau": 5e-7,
     "warm_eval_dt": 5e-4,
     "warm_eval_T_total": 0.05,
     "warm_eval_picard_iter": 100000,
-    "warm_eval_picard_tol": 1e-6,
+    "warm_eval_picard_tol": 1e-4,
     "warm_eval_abs_tol": 1e-8,
-    "conv_type": "w",
     "warm_eval_nx": 1024,
     "warm_eval_nv": 256
-  },
-
-  "sweep": {
-    "shock_ratio": [0.16, 0.32, 0.64, 0.0],
-    "shock_q": [0.7, 0.75, 0.8],
-    "shock_loss_softmax_beta": [0.5, 1.0, 2.0]
-  },
-
-  "save_root": "sweep_runs/default"
+  }
 }

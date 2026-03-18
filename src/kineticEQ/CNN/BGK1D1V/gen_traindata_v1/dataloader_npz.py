@@ -10,7 +10,12 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from ..util.input_state import input_state_type_from_delta_type, normalize_input_state_type
+from ..util.input_state import (
+    build_model_input,
+    input_state_type_from_delta_type,
+    normalize_input_state_type,
+    normalize_input_temporal_mode,
+)
 
 
 def _load_manifest(path: str | Path) -> Dict[str, Any]:
@@ -36,7 +41,9 @@ class BGK1D1VNPZDeltaDataset(Dataset):
     """
     1 sample = (case_id, time t) with full spatial field (nx).
 
-    X: (5, nx) = [n(t), u(t), T(t), log10(dt), log10(tau)]
+    X:
+      - input_temporal_mode="none": (5, nx)
+      - input_temporal_mode="prev_delta": (12, nx)
 
     Y (delta): (3, nx)
       target="dw":   [Δn, Δu, ΔT]  (legacy)
@@ -52,6 +59,7 @@ class BGK1D1VNPZDeltaDataset(Dataset):
         cache_npz: bool = True,
         target: str = "dnu",
         input_state_type: str | None = None,
+        input_temporal_mode: str = "none",
     ):
         super().__init__()
         if split not in ("train", "val", "test"):
@@ -69,6 +77,7 @@ class BGK1D1VNPZDeltaDataset(Dataset):
         self.input_state_type = normalize_input_state_type(
             input_state_type_from_delta_type(target_norm) if input_state_type is None else input_state_type
         )
+        self.input_temporal_mode = normalize_input_temporal_mode(input_temporal_mode)
         self._const = {}
 
         split_case_ids = set(self.manifest["splits"][split])
@@ -144,22 +153,32 @@ class BGK1D1VNPZDeltaDataset(Dataset):
         u_t = torch.from_numpy(u[t])
         T_t = torch.from_numpy(T[t])
 
-        # dt, tau (case constants) -> broadcast to (nx,)
-        nx = int(rec["nx"])
         logdt = float(np.log10(float(rec["dt"])))
         logtau = float(np.log10(float(rec["tau_tilde"])))
 
-        key = (nx, logdt, logtau)  # 順番は何でもよいが一貫させる
-        if key not in self._const:
-            self._const[key] = (
-                torch.full((nx,), logdt, dtype=torch.float32),
-                torch.full((nx,), logtau, dtype=torch.float32),
-            )
-        logdt_x, logtau_x = self._const[key]
+        has_prev = int(t) > 0
+        if has_prev:
+            prev_n = torch.from_numpy(n[t - 1])
+            prev_u = torch.from_numpy(u[t - 1])
+            prev_T = torch.from_numpy(T[t - 1])
+        else:
+            prev_n = None
+            prev_u = None
+            prev_T = None
 
-
-        second = u_t if self.input_state_type == "nut" else (n_t * u_t)
-        x = torch.stack([n_t, second, T_t, logdt_x, logtau_x], dim=0).to(dtype=self.dtype)
+        x = build_model_input(
+            n_t,
+            u_t,
+            T_t,
+            logdt,
+            logtau,
+            input_state_type=self.input_state_type,
+            input_temporal_mode=self.input_temporal_mode,
+            prev_n=prev_n,
+            prev_u=prev_u,
+            prev_T=prev_T,
+            has_prev=has_prev,
+        )[0].to(dtype=self.dtype)
 
         # W(t+1)
         n_tp1 = torch.from_numpy(n[t + 1])

@@ -26,7 +26,12 @@ from ..util.losses import (
     build_shock_mask_from_x,
     std_w_loss_from_residuals_shock,
 )
-from ..util.input_state import input_state_type_from_delta_type
+from ..util.input_state import (
+    input_channel_count,
+    input_feature_names,
+    input_state_type_from_delta_type,
+    normalize_input_temporal_mode,
+)
 
 # ---------------- utils ----------------
 def save_json(path: Path, obj):
@@ -103,7 +108,7 @@ def _normalized_compare_value(key: str, value: Any) -> Any:
 
 def _model_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "in_ch": 5,
+        "in_ch": int(input_channel_count(input_temporal_mode=str(args.input_temporal_mode))),
         "hidden": int(args.hidden),
         "out_ch": 3,
         "kernel": int(args.kernel),
@@ -125,12 +130,18 @@ def _build_checkpoint_meta(
     retrain_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     meta = {
-        "checkpoint_format_version": 2,
+        "checkpoint_format_version": 3,
         "saved_at_unix": float(time.time()),
         "manifest_path": str(Path(args.manifest).expanduser().resolve()) if args.manifest else None,
         "manifest_sha256": _sha256_file(args.manifest),
         "delta_type": str(args.delta_type),
         "input_state_type": str(args.input_state_type),
+        "input_temporal_mode": str(args.input_temporal_mode),
+        "input_channels": int(model_kwargs["in_ch"]),
+        "input_feature_names": input_feature_names(
+            input_state_type=str(args.input_state_type),
+            input_temporal_mode=str(args.input_temporal_mode),
+        ),
         "model_kwargs": _jsonable_value(model_kwargs),
     }
     if retrain_info:
@@ -370,6 +381,7 @@ def make_loader(
     *,
     split_key: str,
     cache_shards: int,
+    input_temporal_mode: str,
 ):
     manifest_format = _read_manifest_format(manifest)
 
@@ -379,6 +391,7 @@ def make_loader(
             split=split,
             split_key=split_key,
             target=target,
+            input_temporal_mode=input_temporal_mode,
             cache_shards=int(cache_shards),
         )
     else:
@@ -388,6 +401,7 @@ def make_loader(
             mmap=True,
             cache_npz=True,
             target=target,
+            input_temporal_mode=input_temporal_mode,
         )
 
     dl = DataLoader(
@@ -433,6 +447,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # learning target
     ap.add_argument("--delta_type", type=str, default="dnu", choices=["dnu", "dw"])
+    ap.add_argument(
+        "--input_temporal_mode",
+        type=str,
+        default="none",
+        choices=["none", "prev_delta"],
+        help="temporal input features: none -> current W only, prev_delta -> add W_{t-1}, W_t-W_{t-1}, has_prev",
+    )
     ap.add_argument(
         "--conv_type",
         type=str,
@@ -528,6 +549,7 @@ def parse_args():
 def main():
     args = parse_args()
     args.input_state_type = input_state_type_from_delta_type(args.delta_type)
+    args.input_temporal_mode = normalize_input_temporal_mode(args.input_temporal_mode)
 
     if args.config:
         print(f"config file: {args.config}", flush=True)
@@ -536,6 +558,7 @@ def main():
     print(f"shock_q: {args.shock_q}", flush=True)
     print(f"delta_type: {args.delta_type}", flush=True)
     print(f"input_state_type: {args.input_state_type}", flush=True)
+    print(f"input_temporal_mode: {args.input_temporal_mode}", flush=True)
 
     # Picard-sum speedup against the cached baseline warm-eval.
     best_speed = 0.0
@@ -586,6 +609,7 @@ def main():
         shuffle=(not args.no_shuffle),
         split_key=str(args.split_key),
         cache_shards=int(args.cache_shards),
+        input_temporal_mode=str(args.input_temporal_mode),
     )
     val_ds, val_dl = make_loader(
         args.manifest,
@@ -598,6 +622,7 @@ def main():
         shuffle=False,
         split_key=str(args.split_key),
         cache_shards=int(args.cache_shards),
+        input_temporal_mode=str(args.input_temporal_mode),
     )
 
     best_val = float("inf")

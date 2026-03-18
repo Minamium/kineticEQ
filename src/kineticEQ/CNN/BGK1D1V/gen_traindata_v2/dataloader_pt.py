@@ -12,7 +12,12 @@ from typing import Any
 import torch
 from torch.utils.data import Dataset
 
-from ..util.input_state import input_state_type_from_delta_type, normalize_input_state_type
+from ..util.input_state import (
+    build_model_input,
+    input_state_type_from_delta_type,
+    normalize_input_state_type,
+    normalize_input_temporal_mode,
+)
 
 
 def _read_json(path: str | Path) -> dict[str, Any]:
@@ -50,6 +55,7 @@ class BGK1D1VShardDeltaDataset(Dataset):
         split_key: str = "split_iid",
         target: str = "dnu",
         input_state_type: str | None = None,
+        input_temporal_mode: str = "none",
         dtype: torch.dtype = torch.float32,
         cache_shards: int = 2,
     ):
@@ -88,6 +94,7 @@ class BGK1D1VShardDeltaDataset(Dataset):
         self.input_state_type = normalize_input_state_type(
             input_state_type_from_delta_type(target) if input_state_type is None else input_state_type
         )
+        self.input_temporal_mode = normalize_input_temporal_mode(input_temporal_mode)
         self.dtype = dtype
         self.cache_shards = int(cache_shards)
         self._const_cache: dict[tuple[int, float, float, torch.dtype], tuple[torch.Tensor, torch.Tensor]] = {}
@@ -159,26 +166,37 @@ class BGK1D1VShardDeltaDataset(Dataset):
         n_t = W[g0, 0]
         u_t = W[g0, 1]
         T_t = W[g0, 2]
+
+        has_prev = int(s.t) > 0
+        if has_prev:
+            g_prev = g0 - 1
+            prev_n = W[g_prev, 0]
+            prev_u = W[g_prev, 1]
+            prev_T = W[g_prev, 2]
+        else:
+            prev_n = None
+            prev_u = None
+            prev_T = None
+
         n_tp1 = W[g1, 0]
         u_tp1 = W[g1, 1]
         T_tp1 = W[g1, 2]
 
-        nx = int(rec["nx"])
         logdt = float(rec["log10_dt"])
         logtau = float(rec["log10_tau"])
-        logdt_x, logtau_x = self._const_channels(nx=nx, logdt=logdt, logtau=logtau)
-
-        second = u_t if self.input_state_type == "nut" else (n_t * u_t)
-        x = torch.stack(
-            [
-                n_t.to(dtype=self.dtype),
-                second.to(dtype=self.dtype),
-                T_t.to(dtype=self.dtype),
-                logdt_x,
-                logtau_x,
-            ],
-            dim=0,
-        )
+        x = build_model_input(
+            n_t,
+            u_t,
+            T_t,
+            logdt,
+            logtau,
+            input_state_type=self.input_state_type,
+            input_temporal_mode=self.input_temporal_mode,
+            prev_n=prev_n,
+            prev_u=prev_u,
+            prev_T=prev_T,
+            has_prev=has_prev,
+        )[0].to(dtype=self.dtype)
 
         dn = (n_tp1 - n_t).to(dtype=self.dtype)
         dT = (T_tp1 - T_t).to(dtype=self.dtype)
@@ -215,5 +233,7 @@ class BGK1D1VShardDeltaDataset(Dataset):
             "split_key": self.split_key,
             "target": self.target,
             "input_state_type": self.input_state_type,
+            "input_temporal_mode": self.input_temporal_mode,
+            "has_prev": int(s.t) > 0,
             "shard_path": str(rec["shard_path"]),
         }

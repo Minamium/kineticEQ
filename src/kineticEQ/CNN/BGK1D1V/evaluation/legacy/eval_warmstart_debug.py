@@ -310,6 +310,9 @@ def run_case_baseline_input(
     t_inf_est_step = np.empty((n_steps,), dtype=np.float64)
 
     t0_all = _now_sync(device)
+    prev_n_tf = None
+    prev_u_tf = None
+    prev_T_tf = None
 
     for s in range(n_steps):
 
@@ -344,7 +347,15 @@ def run_case_baseline_input(
             math.log10(tau_val),
             delta_type=dtp,
             input_state_type=model_meta_tf.get("input_state_type", "nut"),
+            input_temporal_mode=model_meta_tf.get("input_temporal_mode", "none"),
+            prev_n=prev_n_tf,
+            prev_u=prev_u_tf,
+            prev_T=prev_T_tf,
+            has_prev=(prev_n_tf is not None),
         )
+        prev_n_tf = n0.clone()
+        prev_u_tf = u0.clone()
+        prev_T_tf = T0.clone()
 
         # inject W for THIS step (t=s -> s+1)
         # _init_W is consumed once inside implicit stepper

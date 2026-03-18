@@ -83,7 +83,7 @@ def build_shock_mask_from_x(
     input_state_type: str = "nut",
 ) -> torch.Tensor:
     """
-    x: (B,5,nx) のうち n,u,T を復元して shock 指標 s=|Δn|+|Δu|+|ΔT| を作り、
+    x: (B,C,nx) の先頭3チャネルから n,u,T を復元して shock 指標 s=|Δn|+|Δu|+|ΔT| を作り、
     上位(1-shock_q)を1とする mask を返す。境界 nb は 0。
     returns: mask (B,1,nx) float (0/1)
     """

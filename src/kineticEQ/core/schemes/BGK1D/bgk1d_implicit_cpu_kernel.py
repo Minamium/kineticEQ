@@ -74,6 +74,20 @@ def step(
 
     ws.fz.copy_(state.f)
     cpu_module.moments_n_nu_T(ws.fz, state.v, dv, ws.n, ws.nu, ws.T)
+    n0_hist = ws.n.clone()
+    n0_hist_safe = torch.clamp(n0_hist, min=n_floor)
+    u0_hist = ws.nu / n0_hist_safe
+    T0_hist = ws.T.clone()
+    prev_hist = getattr(ws, "_warm_prev_W", None)
+    if isinstance(prev_hist, tuple) and len(prev_hist) == 3:
+        prev_n0, prev_u0, prev_T0 = prev_hist
+        has_prev_hist = True
+    else:
+        prev_n0 = None
+        prev_u0 = None
+        prev_T0 = None
+        has_prev_hist = False
+    ws._warm_prev_W = (n0_hist, u0_hist.clone(), T0_hist)
 
     external_W_injected = False
     init_W = getattr(ws, "_init_W", None)
@@ -109,6 +123,7 @@ def step(
 
         dtp = (model_meta or {}).get("delta_type", "dnu")
         input_state_type = (model_meta or {}).get("input_state_type", "nut")
+        input_temporal_mode = (model_meta or {}).get("input_temporal_mode", "none")
         n1_int, u1_int, T1_int, _, _, _ = predict_next_moments_delta(
             model,
             n0,
@@ -118,6 +133,11 @@ def step(
             math.log10(tau_tilde),
             delta_type=dtp,
             input_state_type=input_state_type,
+            input_temporal_mode=input_temporal_mode,
+            prev_n=prev_n0,
+            prev_u=prev_u0,
+            prev_T=prev_T0,
+            has_prev=has_prev_hist,
         )
 
         n1p[1:-1].copy_(torch.clamp(n1_int, min=n_floor))

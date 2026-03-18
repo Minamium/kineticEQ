@@ -10,7 +10,13 @@ from typing import Any, Mapping
 
 import torch
 from kineticEQ.CNN.BGK1D1V.util.models import MomentCNN1D
-from kineticEQ.CNN.BGK1D1V.util.input_state import build_model_input, normalize_input_state_type
+from kineticEQ.CNN.BGK1D1V.util.input_state import (
+    build_model_input,
+    input_channel_count,
+    input_feature_names,
+    normalize_input_state_type,
+    normalize_input_temporal_mode,
+)
 
 
 def _to_dict(x: Any) -> dict | None:
@@ -88,6 +94,9 @@ def _load_ckpt_state(ckpt_path: str) -> tuple[dict, dict]:
             input_state_type = args.get("input_state_type", None)
             if isinstance(input_state_type, str):
                 meta["input_state_type"] = input_state_type
+            input_temporal_mode = args.get("input_temporal_mode", None)
+            if isinstance(input_temporal_mode, str):
+                meta["input_temporal_mode"] = input_temporal_mode
 
         # some runs may save target in config-like field
         cfg = _to_dict(obj.get("meta", None))
@@ -98,6 +107,9 @@ def _load_ckpt_state(ckpt_path: str) -> tuple[dict, dict]:
             input_state_type = cfg.get("input_state_type", None)
             if isinstance(input_state_type, str) and "input_state_type" not in meta:
                 meta["input_state_type"] = input_state_type
+            input_temporal_mode = cfg.get("input_temporal_mode", None)
+            if isinstance(input_temporal_mode, str) and "input_temporal_mode" not in meta:
+                meta["input_temporal_mode"] = input_temporal_mode
 
             if "model_kwargs" not in meta:
                 cfg_model_kwargs = _to_dict(cfg.get("model_kwargs", None))
@@ -138,7 +150,21 @@ def _load_ckpt_state(ckpt_path: str) -> tuple[dict, dict]:
     else:
         meta["input_state_type"] = "nut"
 
+    input_temporal_mode = meta.get("input_temporal_mode", None)
+    if isinstance(input_temporal_mode, str):
+        meta["input_temporal_mode"] = normalize_input_temporal_mode(input_temporal_mode)
+    else:
+        meta["input_temporal_mode"] = "none"
+
     return state, meta
+
+
+def _infer_temporal_mode_from_in_ch(in_ch: int) -> str:
+    if int(in_ch) == input_channel_count(input_temporal_mode="none"):
+        return "none"
+    if int(in_ch) == input_channel_count(input_temporal_mode="prev_delta"):
+        return "prev_delta"
+    raise ValueError(f"cannot infer input_temporal_mode from in_ch={in_ch}")
 
 
 def _infer_arch_from_state(state: dict) -> dict[str, Any]:
@@ -300,12 +326,36 @@ def load_moments_cnn_model(model_path: str, device: torch.device) -> tuple[Momen
     """
     sd, meta = _load_ckpt_state(model_path)
     model_kwargs = _restore_model_kwargs(sd, meta)
+    actual_in_ch = int(sd["stem.0.weight"].shape[1])
+
+    temporal_mode = meta.get("input_temporal_mode", None)
+    if isinstance(temporal_mode, str):
+        temporal_mode = normalize_input_temporal_mode(temporal_mode)
+    else:
+        temporal_mode = _infer_temporal_mode_from_in_ch(actual_in_ch)
+    expected_in_ch = int(input_channel_count(input_temporal_mode=temporal_mode))
+    if int(model_kwargs["in_ch"]) != expected_in_ch:
+        raise ValueError(
+            f"checkpoint input spec mismatch: input_temporal_mode={temporal_mode!r} "
+            f"expects in_ch={expected_in_ch}, restored in_ch={model_kwargs['in_ch']}"
+        )
+    if actual_in_ch != expected_in_ch:
+        raise ValueError(
+            f"state_dict/input spec mismatch: input_temporal_mode={temporal_mode!r} "
+            f"expects in_ch={expected_in_ch}, state_dict has in_ch={actual_in_ch}"
+        )
 
     model = MomentCNN1D(**model_kwargs)
     model.load_state_dict(sd, strict=True)
     model.to(device).eval()
 
     out_meta = dict(meta)
+    out_meta["input_temporal_mode"] = temporal_mode
+    out_meta["input_channels"] = expected_in_ch
+    out_meta["input_feature_names"] = input_feature_names(
+        input_state_type=str(out_meta.get("input_state_type", "nut")),
+        input_temporal_mode=temporal_mode,
+    )
     out_meta["model_kwargs_restored"] = dict(model_kwargs)
     return model, out_meta
 
@@ -318,6 +368,11 @@ def predict_next_moments_delta(
     *,
     delta_type: str = "dw",
     input_state_type: str = "nut",
+    input_temporal_mode: str = "none",
+    prev_n: torch.Tensor | None = None,
+    prev_u: torch.Tensor | None = None,
+    prev_T: torch.Tensor | None = None,
+    has_prev: bool = False,
     n_floor: float = 1e-12,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor,
@@ -340,6 +395,11 @@ def predict_next_moments_delta(
         logdt,
         logtau,
         input_state_type=input_state_type,
+        input_temporal_mode=input_temporal_mode,
+        prev_n=prev_n,
+        prev_u=prev_u,
+        prev_T=prev_T,
+        has_prev=has_prev,
     )
 
     dy = model(x)[0]  # (3, nx) float32

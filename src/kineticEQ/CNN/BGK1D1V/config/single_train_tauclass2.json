@@ -16,6 +16,7 @@
 
     "loss_kind": "smoothl1",
     "delta_type": "dnu",
+    "input_temporal_mode": "none",
     "loss_eps": 1e-6,
     "nb": 10,
     "n_floor": 1e-8,
@@ -49,8 +50,8 @@
 
     "warm_eval": true,
     "conv_type": "f",
-    "warm_eval_start": 25,
-    "warm_eval_tau": 5e-7,
+    "warm_eval_start": 10,
+    "warm_eval_tau": 5e-6,
     "warm_eval_dt": 5e-4,
     "warm_eval_T_total": 0.05,
     "warm_eval_picard_iter": 100000,
