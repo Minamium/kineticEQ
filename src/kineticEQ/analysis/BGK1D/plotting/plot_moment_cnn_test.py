@@ -38,6 +38,9 @@ class CaseRecord:
     linf_n: float
     linf_u: float
     linf_T: float
+    l2rel_n: float
+    l2rel_u: float
+    l2rel_T: float
 
     mean_step_time_base: float
     mean_step_time_warm: float
@@ -166,6 +169,16 @@ def _extract_record(path: Path, case_index: int = 0) -> CaseRecord:
     linf_u = float(np.max(np.abs(u_warm - u_base)))
     linf_T = float(np.max(np.abs(T_warm - T_base)))
 
+    def _l2rel(a: np.ndarray, b: np.ndarray) -> float:
+        denom = float(np.sqrt(np.sum(b * b)))
+        if denom == 0.0:
+            return float("inf") if np.any(a != b) else 0.0
+        return float(np.sqrt(np.sum((a - b) ** 2)) / denom)
+
+    l2rel_n = _l2rel(n_warm, n_base)
+    l2rel_u = _l2rel(u_warm, u_base)
+    l2rel_T = _l2rel(T_warm, T_base)
+
     return CaseRecord(
         path=path,
         dt=dt,
@@ -187,6 +200,9 @@ def _extract_record(path: Path, case_index: int = 0) -> CaseRecord:
         linf_n=linf_n,
         linf_u=linf_u,
         linf_T=linf_T,
+        l2rel_n=l2rel_n,
+        l2rel_u=l2rel_u,
+        l2rel_T=l2rel_T,
         mean_step_time_base=mean_step_time_base,
         mean_step_time_warm=mean_step_time_warm,
         mean_infer_time_est=mean_infer_time_est,
@@ -359,6 +375,7 @@ def plot_moment_cnn_test(
     legend_position: str = "below_split",  # + "in"
     layout: str = "default",
     linf_mode: str = "separate",
+    error_metric: str = "linf",
     show_infer_time: bool = True,  # (global default, kept)
     fontsize: float | None = None,
     plot_1_fontsize: float | None = None,
@@ -425,6 +442,8 @@ def plot_moment_cnn_test(
         raise ValueError("layout must be 'default' or 'paper'")
     if linf_mode not in ("separate", "max"):
         raise ValueError("linf_mode must be 'separate' or 'max'")
+    if error_metric not in ("linf", "l2rel", "both"):
+        raise ValueError("error_metric must be 'linf', 'l2rel', or 'both'")
     if grid_mode not in ("both", "major", "off"):
         raise ValueError("grid_mode must be 'both', 'major', or 'off'")
 
@@ -771,24 +790,169 @@ def plot_moment_cnn_test(
                     vals.append(float(np.max(np.abs(a[:nx] - ref_a[:nx]))))
                 return np.asarray(vals, dtype=np.float64)
 
+            def _l2rel_ref(attr: str, ref_attr: str) -> np.ndarray:
+                ref_a = getattr(ref_rec, ref_attr)
+                denom = float(np.sqrt(np.sum(ref_a * ref_a)))
+                vals = []
+                for r in recs:
+                    a = getattr(r, attr)
+                    nx = min(a.size, ref_a.size)
+                    diff = a[:nx] - ref_a[:nx]
+                    numer = float(np.sqrt(np.sum(diff * diff)))
+                    vals.append(numer / denom if denom > 0.0 else (float("inf") if numer > 0.0 else 0.0))
+                return np.asarray(vals, dtype=np.float64)
+
             linf_n = _linf_ref("n_warm", "n_base")
             linf_u = _linf_ref("u_warm", "u_base")
             linf_T = _linf_ref("T_warm", "T_base")
+
+            l2rel_n = _l2rel_ref("n_warm", "n_base")
+            l2rel_u = _l2rel_ref("u_warm", "u_base")
+            l2rel_T = _l2rel_ref("T_warm", "T_base")
 
             ref_mask = np.array([r is not ref_rec for r in recs])
             linf_n_base = _linf_ref("n_base", "n_base")[ref_mask]
             linf_u_base = _linf_ref("u_base", "u_base")[ref_mask]
             linf_T_base = _linf_ref("T_base", "T_base")[ref_mask]
+            l2rel_n_base = _l2rel_ref("n_base", "n_base")[ref_mask]
+            l2rel_u_base = _l2rel_ref("u_base", "u_base")[ref_mask]
+            l2rel_T_base = _l2rel_ref("T_base", "T_base")[ref_mask]
             tols_base = tols[ref_mask]
         else:
             linf_n = np.asarray([r.linf_n for r in recs], dtype=np.float64)
             linf_u = np.asarray([r.linf_u for r in recs], dtype=np.float64)
             linf_T = np.asarray([r.linf_T for r in recs], dtype=np.float64)
+            l2rel_n = np.asarray([r.l2rel_n for r in recs], dtype=np.float64)
+            l2rel_u = np.asarray([r.l2rel_u for r in recs], dtype=np.float64)
+            l2rel_T = np.asarray([r.l2rel_T for r in recs], dtype=np.float64)
 
         mean_t_base = np.asarray([r.mean_step_time_base for r in recs], dtype=np.float64)
         mean_t_warm = np.asarray([r.mean_step_time_warm for r in recs], dtype=np.float64)
 
         ref_title45 = f" [ref tol={ref_tol_s}]" if ref_rec is not None else ""
+
+        # ---- shared helper: plot error-metric lines on a right y-axis ----
+        def _plot_err_rhs(
+            ax_r: plt.Axes, ms_val: float,
+            fs_l_val: float | None, fs_tk_val: float | None,
+        ) -> None:
+            _do_linf = error_metric in ("linf", "both")
+            _do_l2 = error_metric in ("l2rel", "both")
+            _dual = error_metric == "both"
+
+            _linf_w_arr = [linf_n, linf_u, linf_T]
+            _l2_w_arr = [l2rel_n, l2rel_u, l2rel_T]
+
+            if linf_mode == "max":
+                # -- L-inf max --
+                if _do_linf:
+                    _vw = np.maximum.reduce(_linf_w_arr)
+                    _c = "black" if monochrome else _OKABE_ITO[0]
+                    if ref_rec is not None:
+                        _vb = np.maximum.reduce([linf_n_base, linf_u_base, linf_T_base])
+                        ax_r.plot(tols, _vw, marker="o", ms=ms_val, color=_c,
+                                  label=_lab("linf_warm_max_ref",
+                                             "L\u221e max (warm), ref", legend_labels))
+                        ax_r.plot(tols_base, _vb, marker="x", ms=ms_val,
+                                  linestyle=_BASE_LS, color=_c,
+                                  label=_lab("linf_base_max_ref",
+                                             "L\u221e max (base), ref", legend_labels))
+                    else:
+                        ax_r.plot(tols, _vw, marker="o", ms=ms_val, color=_c,
+                                  label=_lab("linf_max",
+                                             "Final Difference L\u221e max", legend_labels))
+                # -- L2-rel max --
+                if _do_l2:
+                    _vw = np.maximum.reduce(_l2_w_arr)
+                    _ci = 3 if _dual else 0
+                    _c = "black" if monochrome else _OKABE_ITO[_ci % len(_OKABE_ITO)]
+                    _ls_w = ":" if _dual else "-"
+                    if ref_rec is not None:
+                        _vb = np.maximum.reduce([l2rel_n_base, l2rel_u_base, l2rel_T_base])
+                        ax_r.plot(tols, _vw, marker="^", ms=ms_val,
+                                  linestyle=_ls_w, color=_c,
+                                  label=_lab("l2rel_warm_max_ref",
+                                             r"$E_{L_2}^{\mathrm{rel}}$ max (warm), ref",
+                                             legend_labels))
+                        _ls_b = "-." if _dual else _BASE_LS
+                        ax_r.plot(tols_base, _vb, marker="+", ms=ms_val,
+                                  linestyle=_ls_b, color=_c,
+                                  label=_lab("l2rel_base_max_ref",
+                                             r"$E_{L_2}^{\mathrm{rel}}$ max (base), ref",
+                                             legend_labels))
+                    else:
+                        ax_r.plot(tols, _vw, marker="^", ms=ms_val,
+                                  linestyle=_ls_w, color=_c,
+                                  label=_lab("l2rel_max",
+                                             r"$E_{L_2}^{\mathrm{rel}}$ max",
+                                             legend_labels))
+            else:  # separate
+                if _do_linf:
+                    for i, mn in enumerate(("n", "u", "T")):
+                        _c = "black" if monochrome else _OKABE_ITO[i]
+                        if ref_rec is not None:
+                            ax_r.plot(tols, _linf_w_arr[i], marker="o", ms=ms_val,
+                                      color=_c,
+                                      label=_lab(f"linf_warm_{mn}_ref",
+                                                 f"L\u221e warm ({mn}), ref",
+                                                 legend_labels))
+                            _lb = [linf_n_base, linf_u_base, linf_T_base]
+                            ax_r.plot(tols_base, _lb[i], marker="x", ms=ms_val,
+                                      linestyle=_BASE_LS, color=_c,
+                                      label=_lab(f"linf_base_{mn}_ref",
+                                                 f"L\u221e base ({mn}), ref",
+                                                 legend_labels))
+                        else:
+                            ax_r.plot(tols, _linf_w_arr[i], marker="o", ms=ms_val,
+                                      color=_c,
+                                      label=_lab(f"linf_{mn}",
+                                                 f"Final Difference L\u221e ({mn})",
+                                                 legend_labels))
+                if _do_l2:
+                    _ls_w = ":" if _dual else "-"
+                    for i, mn in enumerate(("n", "u", "T")):
+                        _ci = (i + 3) if _dual else i
+                        _c = "black" if monochrome else _OKABE_ITO[_ci % len(_OKABE_ITO)]
+                        if ref_rec is not None:
+                            ax_r.plot(
+                                tols, _l2_w_arr[i], marker="^", ms=ms_val,
+                                linestyle=_ls_w, color=_c,
+                                label=_lab(
+                                    f"l2rel_warm_{mn}_ref",
+                                    rf"$E_{{L_2}}^{{\mathrm{{rel}}}}$ warm ({mn}), ref",
+                                    legend_labels))
+                            _lb = [l2rel_n_base, l2rel_u_base, l2rel_T_base]
+                            _ls_b = "-." if _dual else _BASE_LS
+                            ax_r.plot(
+                                tols_base, _lb[i], marker="+", ms=ms_val,
+                                linestyle=_ls_b, color=_c,
+                                label=_lab(
+                                    f"l2rel_base_{mn}_ref",
+                                    rf"$E_{{L_2}}^{{\mathrm{{rel}}}}$ base ({mn}), ref",
+                                    legend_labels))
+                        else:
+                            ax_r.plot(
+                                tols, _l2_w_arr[i], marker="^", ms=ms_val,
+                                linestyle=_ls_w, color=_c,
+                                label=_lab(
+                                    f"l2rel_{mn}",
+                                    rf"$E_{{L_2}}^{{\mathrm{{rel}}}}$ ({mn})",
+                                    legend_labels))
+
+            # ylabel
+            if error_metric == "linf":
+                ax_r.set_ylabel("Final Difference (L\u221e)", fontsize=fs_l_val)
+            elif error_metric == "l2rel":
+                ax_r.set_ylabel(
+                    r"Relative $L_2$ Error ($E_{L_2}^{\mathrm{rel}}$)",
+                    fontsize=fs_l_val)
+            else:
+                ax_r.set_ylabel(
+                    r"Error (L$_\infty$ / $E_{L_2}^{\mathrm{rel}}$)",
+                    fontsize=fs_l_val)
+            if linf_log_scale:
+                ax_r.set_yscale("log")
+            ax_r.tick_params(labelsize=fs_tk_val)
 
     # ---------------- Plot 4 ----------------
     if plot_4_enable:
@@ -813,55 +977,7 @@ def plot_moment_cnn_test(
         ax4.tick_params(labelsize=fs_tk)
         _apply_grid(ax4, grid_mode=grid_mode, alpha=float(grid_alpha))
 
-        if linf_mode == "max":
-            linf_w_max = np.maximum.reduce([linf_n, linf_u, linf_T])
-            if ref_rec is not None:
-                linf_b_max = np.maximum.reduce([linf_n_base, linf_u_base, linf_T_base])
-                ax4_r.plot(
-                    tols, linf_w_max, marker="o", ms=ms,
-                    color="black" if monochrome else _OKABE_ITO[0],
-                    label=_lab("linf_warm_max_ref", "L∞ max (warm), ref", legend_labels),
-                )
-                ax4_r.plot(
-                    tols_base, linf_b_max, marker="x", ms=ms, linestyle=_BASE_LS,
-                    color="black" if monochrome else _OKABE_ITO[0],
-                    label=_lab("linf_base_max_ref", "L∞ max (base), ref", legend_labels),
-                )
-            else:
-                ax4_r.plot(
-                    tols, linf_w_max, marker="o", ms=ms,
-                    color="black" if monochrome else _OKABE_ITO[0],
-                    label=_lab("linf_max", "Final Difference L∞ max", legend_labels),
-                )
-        else:
-            if ref_rec is not None:
-                ax4_r.plot(tols, linf_n, marker="o", ms=ms, color="black" if monochrome else _OKABE_ITO[0],
-                           label=_lab("linf_warm_n_ref", "L∞ warm (n), ref", legend_labels))
-                ax4_r.plot(tols, linf_u, marker="o", ms=ms, color="black" if monochrome else _OKABE_ITO[1],
-                           label=_lab("linf_warm_u_ref", "L∞ warm (u), ref", legend_labels))
-                ax4_r.plot(tols, linf_T, marker="o", ms=ms, color="black" if monochrome else _OKABE_ITO[2],
-                           label=_lab("linf_warm_T_ref", "L∞ warm (T), ref", legend_labels))
-                ax4_r.plot(tols_base, linf_n_base, marker="x", ms=ms, linestyle=_BASE_LS,
-                           color="black" if monochrome else _OKABE_ITO[0],
-                           label=_lab("linf_base_n_ref", "L∞ base (n), ref", legend_labels))
-                ax4_r.plot(tols_base, linf_u_base, marker="x", ms=ms, linestyle=_BASE_LS,
-                           color="black" if monochrome else _OKABE_ITO[1],
-                           label=_lab("linf_base_u_ref", "L∞ base (u), ref", legend_labels))
-                ax4_r.plot(tols_base, linf_T_base, marker="x", ms=ms, linestyle=_BASE_LS,
-                           color="black" if monochrome else _OKABE_ITO[2],
-                           label=_lab("linf_base_T_ref", "L∞ base (T), ref", legend_labels))
-            else:
-                ax4_r.plot(tols, linf_n, marker="o", ms=ms, color="black" if monochrome else _OKABE_ITO[0],
-                           label=_lab("linf_n", "Final Difference L∞ (n)", legend_labels))
-                ax4_r.plot(tols, linf_u, marker="o", ms=ms, color="black" if monochrome else _OKABE_ITO[1],
-                           label=_lab("linf_u", "Final Difference L∞ (u)", legend_labels))
-                ax4_r.plot(tols, linf_T, marker="o", ms=ms, color="black" if monochrome else _OKABE_ITO[2],
-                           label=_lab("linf_T", "Final Difference L∞ (T)", legend_labels))
-
-        ax4_r.set_ylabel("Final Difference (L∞)", fontsize=fs_l)
-        if linf_log_scale:
-            ax4_r.set_yscale("log")
-        ax4_r.tick_params(labelsize=fs_tk)
+        _plot_err_rhs(ax4_r, ms, fs_l, fs_tk)
 
         lp = "below" if legend_position == "below_split" else legend_position
         H1, L1 = ax4.get_legend_handles_labels()
@@ -910,49 +1026,7 @@ def plot_moment_cnn_test(
         ax5.tick_params(labelsize=fs_tk)
         _apply_grid(ax5, grid_mode=grid_mode, alpha=float(grid_alpha))
 
-        if linf_mode == "max":
-            linf_w_max5 = np.maximum.reduce([linf_n, linf_u, linf_T])
-            if ref_rec is not None:
-                linf_b_max5 = np.maximum.reduce([linf_n_base, linf_u_base, linf_T_base])
-                ax5_r.plot(tols, linf_w_max5, marker="o", ms=ms,
-                           color="black" if monochrome else _OKABE_ITO[0],
-                           label=_lab("linf_warm_max_ref", "L∞ max (warm), ref", legend_labels))
-                ax5_r.plot(tols_base, linf_b_max5, marker="x", ms=ms, linestyle=_BASE_LS,
-                           color="black" if monochrome else _OKABE_ITO[0],
-                           label=_lab("linf_base_max_ref", "L∞ max (base), ref", legend_labels))
-            else:
-                ax5_r.plot(tols, linf_w_max5, marker="o", ms=ms,
-                           color="black" if monochrome else _OKABE_ITO[0],
-                           label=_lab("linf_max", "Final Difference L∞ max", legend_labels))
-        else:
-            if ref_rec is not None:
-                ax5_r.plot(tols, linf_n, marker="o", ms=ms, color="black" if monochrome else _OKABE_ITO[0],
-                           label=_lab("linf_warm_n_ref", "L∞ warm (n), ref", legend_labels))
-                ax5_r.plot(tols, linf_u, marker="o", ms=ms, color="black" if monochrome else _OKABE_ITO[1],
-                           label=_lab("linf_warm_u_ref", "L∞ warm (u), ref", legend_labels))
-                ax5_r.plot(tols, linf_T, marker="o", ms=ms, color="black" if monochrome else _OKABE_ITO[2],
-                           label=_lab("linf_warm_T_ref", "L∞ warm (T), ref", legend_labels))
-                ax5_r.plot(tols_base, linf_n_base, marker="x", ms=ms, linestyle=_BASE_LS,
-                           color="black" if monochrome else _OKABE_ITO[0],
-                           label=_lab("linf_base_n_ref", "L∞ base (n), ref", legend_labels))
-                ax5_r.plot(tols_base, linf_u_base, marker="x", ms=ms, linestyle=_BASE_LS,
-                           color="black" if monochrome else _OKABE_ITO[1],
-                           label=_lab("linf_base_u_ref", "L∞ base (u), ref", legend_labels))
-                ax5_r.plot(tols_base, linf_T_base, marker="x", ms=ms, linestyle=_BASE_LS,
-                           color="black" if monochrome else _OKABE_ITO[2],
-                           label=_lab("linf_base_T_ref", "L∞ base (T), ref", legend_labels))
-            else:
-                ax5_r.plot(tols, linf_n, marker="o", ms=ms, color="black" if monochrome else _OKABE_ITO[0],
-                           label=_lab("linf_n", "Final Difference L∞ (n)", legend_labels))
-                ax5_r.plot(tols, linf_u, marker="o", ms=ms, color="black" if monochrome else _OKABE_ITO[1],
-                           label=_lab("linf_u", "Final Difference L∞ (u)", legend_labels))
-                ax5_r.plot(tols, linf_T, marker="o", ms=ms, color="black" if monochrome else _OKABE_ITO[2],
-                           label=_lab("linf_T", "Final Difference L∞ (T)", legend_labels))
-
-        ax5_r.set_ylabel("Final Difference (L∞)", fontsize=fs_l)
-        if linf_log_scale:
-            ax5_r.set_yscale("log")
-        ax5_r.tick_params(labelsize=fs_tk)
+        _plot_err_rhs(ax5_r, ms, fs_l, fs_tk)
 
         lp = "below" if legend_position == "below_split" else legend_position
         H1, L1 = ax5.get_legend_handles_labels()
@@ -1034,6 +1108,8 @@ def _parse_args_cli() -> argparse.Namespace:
     p.add_argument("--legend_in_loc", type=str, default="best")
     p.add_argument("--layout", type=str, default="default", choices=["default", "paper"])
     p.add_argument("--linf_mode", type=str, default="separate", choices=["separate", "max"])
+    p.add_argument("--error_metric", type=str, default="linf",
+                   choices=["linf", "l2rel", "both"])
     p.add_argument("--no_infer_time", dest="show_infer_time", action="store_false", default=True)
 
     p.add_argument("--legend_ncol", type=int, default=None)
@@ -1121,6 +1197,7 @@ def main() -> None:
         legend_in_loc=str(args.legend_in_loc),
         layout=str(args.layout),
         linf_mode=str(args.linf_mode),
+        error_metric=str(args.error_metric),
         show_infer_time=bool(args.show_infer_time),
         legend_ncol=args.legend_ncol,
         legend_max_cols=int(args.legend_max_cols),
