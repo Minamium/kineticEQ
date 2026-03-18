@@ -19,6 +19,28 @@ from kineticEQ.CNN.BGK1D1V.util.input_state import (
 )
 
 
+def _normalize_warm_delta_weight_mode(value: str | None) -> str:
+    if value is None:
+        return "none"
+    mode = str(value).strip().lower()
+    aliases = {
+        "none": "none",
+        "off": "none",
+        "false": "none",
+        "0": "none",
+        "w_grad": "w_grad",
+        "wgrad": "w_grad",
+        "w_grad_soft": "w_grad",
+        "grad": "w_grad",
+        "on": "w_grad",
+        "true": "w_grad",
+        "1": "w_grad",
+    }
+    if mode in aliases:
+        return aliases[mode]
+    raise ValueError(f"unknown warm_delta_weight_mode={value!r}")
+
+
 def _to_dict(x: Any) -> dict | None:
     if isinstance(x, Mapping):
         return dict(x)
@@ -165,6 +187,50 @@ def _infer_temporal_mode_from_in_ch(in_ch: int) -> str:
     if int(in_ch) == input_channel_count(input_temporal_mode="prev_delta"):
         return "prev_delta"
     raise ValueError(f"cannot infer input_temporal_mode from in_ch={in_ch}")
+
+
+def _abs_centered_grad_1d(x: torch.Tensor) -> torch.Tensor:
+    grad = torch.zeros_like(x)
+    if x.numel() <= 1:
+        return grad
+    grad[0] = torch.abs(x[1] - x[0])
+    grad[-1] = torch.abs(x[-1] - x[-2])
+    if x.numel() > 2:
+        grad[1:-1] = 0.5 * torch.abs(x[2:] - x[:-2])
+    return grad
+
+
+def _normalize_grad_component(grad: torch.Tensor, eps: float) -> torch.Tensor:
+    if grad.numel() > 2:
+        scale = torch.amax(grad[1:-1])
+    elif grad.numel() > 0:
+        scale = torch.amax(grad)
+    else:
+        scale = torch.tensor(0.0, device=grad.device, dtype=grad.dtype)
+    scale = torch.clamp(scale, min=float(eps))
+    return grad / scale
+
+
+def _build_w_grad_gate(
+    n0: torch.Tensor,
+    u0: torch.Tensor,
+    T0: torch.Tensor,
+    *,
+    alpha_floor: float,
+    center: float,
+    sharpness: float,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    gn = _normalize_grad_component(_abs_centered_grad_1d(n0), eps)
+    gu = _normalize_grad_component(_abs_centered_grad_1d(u0), eps)
+    gT = _normalize_grad_component(_abs_centered_grad_1d(T0), eps)
+
+    g = (gn + gu + gT) / 3.0
+    alpha_floor = min(max(float(alpha_floor), 0.0), 1.0)
+    center = float(center)
+    sharpness = max(float(sharpness), 0.0)
+    alpha = torch.sigmoid(sharpness * (g - center))
+    return alpha_floor + (1.0 - alpha_floor) * alpha
 
 
 def _infer_arch_from_state(state: dict) -> dict[str, Any]:
@@ -374,6 +440,10 @@ def predict_next_moments_delta(
     prev_T: torch.Tensor | None = None,
     has_prev: bool = False,
     n_floor: float = 1e-12,
+    warm_delta_weight_mode: str = "none",
+    warm_delta_weight_floor: float = 0.2,
+    warm_delta_weight_center: float = 0.5,
+    warm_delta_weight_sharpness: float = 10.0,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor,
     torch.Tensor, torch.Tensor, torch.Tensor
@@ -403,6 +473,18 @@ def predict_next_moments_delta(
     )
 
     dy = model(x)[0]  # (3, nx) float32
+    weight_mode = _normalize_warm_delta_weight_mode(warm_delta_weight_mode)
+    if weight_mode == "w_grad":
+        alpha = _build_w_grad_gate(
+            n0,
+            u0,
+            T0,
+            alpha_floor=warm_delta_weight_floor,
+            center=warm_delta_weight_center,
+            sharpness=warm_delta_weight_sharpness,
+        ).to(dtype=dy.dtype)
+        dy = dy * alpha.unsqueeze(0)
+
     dn = dy[0].to(n0.dtype)
     dT = dy[2].to(T0.dtype)
     dmid = dy[1].to(n0.dtype)

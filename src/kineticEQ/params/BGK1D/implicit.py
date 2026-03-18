@@ -24,3 +24,11 @@ class Params:
     # None: auto(=pathがあれば有効), False: 明示無効, True: 明示有効(ただしpath必須)
     warm_enable: bool | None = None
     moments_cnn_modelpath: str | None = None
+
+    # --- Inference-time postprocessing for CNN warmstart deltas ---
+    # "none": 元の推論をそのまま使用
+    # "w_grad": current W=(n,u,T) の空間勾配から soft gate を作り、flat 領域の ΔW を減衰
+    warm_delta_weight_mode: str = "none"
+    warm_delta_weight_floor: float = 0.2
+    warm_delta_weight_center: float = 0.5
+    warm_delta_weight_sharpness: float = 10.0
