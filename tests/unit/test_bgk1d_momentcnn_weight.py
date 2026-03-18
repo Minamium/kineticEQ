@@ -35,9 +35,9 @@ def test_predict_next_moments_delta_preserves_original_mode():
 
 def test_predict_next_moments_delta_w_grad_damps_flat_region_more_than_shock():
     model = ConstantDeltaModel()
-    n0 = torch.tensor([1.0, 1.0, 1.0, 3.0, 3.0, 3.0, 3.0], dtype=torch.float64)
-    u0 = torch.zeros(7, dtype=torch.float64)
-    T0 = torch.tensor([1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0], dtype=torch.float64)
+    n0 = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0], dtype=torch.float64)
+    u0 = torch.zeros(11, dtype=torch.float64)
+    T0 = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0], dtype=torch.float64)
 
     _, _, _, dn, _, _ = predict_next_moments_delta(
         model,
@@ -51,9 +51,11 @@ def test_predict_next_moments_delta_w_grad_damps_flat_region_more_than_shock():
         warm_delta_weight_floor=0.2,
         warm_delta_weight_center=0.5,
         warm_delta_weight_sharpness=10.0,
+        warm_delta_weight_sigma=1.5,
     )
 
-    assert float(dn[1]) < 0.3
+    assert float(dn[1]) > 0.2
     assert float(dn[3]) > float(dn[1])
-    assert float(dn[4]) > float(dn[1])
+    assert float(dn[4]) > float(dn[3])
+    assert float(dn[5]) > float(dn[3])
     assert float(torch.max(dn)) <= 1.0

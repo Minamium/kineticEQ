@@ -27,8 +27,10 @@ class Params:
 
     # --- Inference-time postprocessing for CNN warmstart deltas ---
     # "none": 元の推論をそのまま使用
-    # "w_grad": current W=(n,u,T) の空間勾配から soft gate を作り、flat 領域の ΔW を減衰
+    # "w_grad": current W=(n,u,T) の空間勾配をガウシアンで広げた envelope から
+    #           soft gate を作り、勾配近傍を広めに残して flat 領域の ΔW を減衰
     warm_delta_weight_mode: str = "none"
     warm_delta_weight_floor: float = 0.2
     warm_delta_weight_center: float = 0.5
     warm_delta_weight_sharpness: float = 10.0
+    warm_delta_weight_sigma: float = 3.0

@@ -6,9 +6,11 @@ from __future__ import annotations
 import logging
 logger = logging.getLogger(__name__)
 
+import math
 from typing import Any, Mapping
 
 import torch
+import torch.nn.functional as F
 from kineticEQ.CNN.BGK1D1V.util.models import MomentCNN1D
 from kineticEQ.CNN.BGK1D1V.util.input_state import (
     build_model_input,
@@ -211,6 +213,21 @@ def _normalize_grad_component(grad: torch.Tensor, eps: float) -> torch.Tensor:
     return grad / scale
 
 
+def _gaussian_blur_1d(x: torch.Tensor, sigma: float) -> torch.Tensor:
+    sigma = float(sigma)
+    if x.numel() <= 1 or sigma <= 0.0:
+        return x
+
+    radius = max(int(math.ceil(3.0 * sigma)), 1)
+    offsets = torch.arange(-radius, radius + 1, device=x.device, dtype=x.dtype)
+    kernel = torch.exp(-0.5 * (offsets / sigma) ** 2)
+    kernel = kernel / torch.clamp(torch.sum(kernel), min=torch.finfo(x.dtype).eps)
+
+    padded = F.pad(x.view(1, 1, -1), (radius, radius), mode="replicate")
+    blurred = F.conv1d(padded, kernel.view(1, 1, -1))
+    return blurred.view_as(x)
+
+
 def _build_w_grad_gate(
     n0: torch.Tensor,
     u0: torch.Tensor,
@@ -219,13 +236,16 @@ def _build_w_grad_gate(
     alpha_floor: float,
     center: float,
     sharpness: float,
+    sigma: float,
     eps: float = 1e-12,
 ) -> torch.Tensor:
     gn = _normalize_grad_component(_abs_centered_grad_1d(n0), eps)
     gu = _normalize_grad_component(_abs_centered_grad_1d(u0), eps)
     gT = _normalize_grad_component(_abs_centered_grad_1d(T0), eps)
 
-    g = (gn + gu + gT) / 3.0
+    g_raw = (gn + gu + gT) / 3.0
+    g = _gaussian_blur_1d(g_raw, sigma=sigma)
+    g = _normalize_grad_component(g, eps)
     alpha_floor = min(max(float(alpha_floor), 0.0), 1.0)
     center = float(center)
     sharpness = max(float(sharpness), 0.0)
@@ -444,6 +464,7 @@ def predict_next_moments_delta(
     warm_delta_weight_floor: float = 0.2,
     warm_delta_weight_center: float = 0.5,
     warm_delta_weight_sharpness: float = 10.0,
+    warm_delta_weight_sigma: float = 3.0,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor,
     torch.Tensor, torch.Tensor, torch.Tensor
@@ -482,6 +503,7 @@ def predict_next_moments_delta(
             alpha_floor=warm_delta_weight_floor,
             center=warm_delta_weight_center,
             sharpness=warm_delta_weight_sharpness,
+            sigma=warm_delta_weight_sigma,
         ).to(dtype=dy.dtype)
         dy = dy * alpha.unsqueeze(0)
 
