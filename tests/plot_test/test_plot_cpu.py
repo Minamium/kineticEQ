@@ -15,17 +15,17 @@ def test_smoke_cpu(model, scheme, backend):
         model_cfg = BGK1D.ModelConfig(
             grid=BGK1D.Grid1D1V(nx=128, nv=64, Lx=1.0, v_max=10.0),
             time=BGK1D.TimeConfig(dt=5e-6, T_total=0.05),
-            params=BGK1D.BGK1D1VParams(tau_tilde=5e-5),
+            params=BGK1D.BGK1D1VParams(tau_tilde=5e-6),
         )
     else:
         model_cfg = BGK1D.ModelConfig(
             grid=BGK1D.Grid1D1V(nx=128, nv=64, Lx=1.0, v_max=10.0),
             time=BGK1D.TimeConfig(dt=5e-4, T_total=0.05),
-            params=BGK1D.BGK1D1VParams(tau_tilde=5e-5),
+            params=BGK1D.BGK1D1VParams(tau_tilde=5e-6),
             scheme_params=BGK1D.implicit.Params(
-                picard_iter=100,
+                picard_iter=10_000,
                 picard_tol=1e-6,
-                abs_tol=1e-13,
+                abs_tol=1e-12,
             ),
         )
 
