@@ -58,9 +58,10 @@
   },
 
   "sweep": {
-    "hidden": [256, 512],
-    "n_blocks": [6, 12],
-    "kernel": [5, 7, 9]
+    "hidden": [512],
+    "n_blocks": [12],
+    "kernel": [7, 9],
+    "lr": [1e-3, 5e-4, 1e-4]
   },
 
   "save_root": "sweep_runs/default"
