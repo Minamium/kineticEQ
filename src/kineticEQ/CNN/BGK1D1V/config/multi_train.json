@@ -2,7 +2,7 @@
   "_comment": "Default sweep config for multi_train.py. Edit base_args and sweep as needed.",
 
   "base_args": {
-    "epochs": 50,
+    "epochs": 75,
     "batch": 128,
     "lr": 5e-4,
     "workers": 4,
@@ -33,7 +33,7 @@
     "aa_alpha_max": 100.0,
 
     "hidden": 512,
-    "n_blocks": 6,
+    "n_blocks": 12,
     "kernel": 7,
 
     "grad_clip": 1.0,
@@ -45,7 +45,7 @@
     "sched_min_lr": 1e-6,
 
     "warm_eval": true,
-    "warm_eval_start": 40,
+    "warm_eval_start": 50,
     "warm_eval_tau": 5e-7,
     "warm_eval_dt": 5e-4,
     "warm_eval_T_total": 0.05,
@@ -58,10 +58,9 @@
   },
 
   "sweep": {
-    "hidden": [512],
-    "n_blocks": [12],
-    "kernel": [7, 9],
-    "lr": [1e-3, 5e-4, 1e-4]
+    "shock_ratio": [0.16, 0.32, 0.64, 0.0],
+    "shock_q": [0.7, 0.75, 0.8],
+    "shock_loss_softmax_beta": [0.5, 1.0, 2.0]
   },
 
   "save_root": "sweep_runs/default"
