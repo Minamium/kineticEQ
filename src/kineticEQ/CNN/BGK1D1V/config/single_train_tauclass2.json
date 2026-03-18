@@ -11,7 +11,7 @@
     "amp": false,
     "seed": 42,
 
-    "manifest": "train_data/traindata_nx1024_nv256_dt5e-4_tauclass3/dataset_manifest.json",
+    "manifest": "train_data/traindata_nx1024_nv256_dt5e-4_tauclass2/dataset_manifest.json",
     "save_dir": "cnn_models/bgk1d1v_single",
 
     "loss_kind": "smoothl1",
