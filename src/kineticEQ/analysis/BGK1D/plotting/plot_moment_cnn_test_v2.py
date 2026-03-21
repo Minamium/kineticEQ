@@ -580,6 +580,7 @@ def plot_moment_cnn_test_v2(
     plot_5_figsize: tuple[float, float] = (12, 6),
     mode: str = "B",
     walltime_skip_first: int = 0,
+    max_steps: int | None = None,
     ref_strictest: bool = False,
     linf_log_scale: bool = False,
     legend_position: str = "below_split",  # + "in"
@@ -680,6 +681,25 @@ def plot_moment_cnn_test_v2(
 
     records = sorted([_extract_record(p, case_index=int(case_index)) for p in paths],
                      key=lambda r: float(r.picard_tol))
+
+    # ---- truncate per-step arrays if max_steps is given ----
+    if max_steps is not None:
+        _ms_int = int(max_steps)
+        for rec in records:
+            ns = min(_ms_int, rec.n_steps)
+            rec.it_base = rec.it_base[:ns]
+            rec.it_warm = rec.it_warm[:ns]
+            rec.t_base = rec.t_base[:ns]
+            rec.t_warm = rec.t_warm[:ns]
+            rec.n_steps = ns
+            it_b = rec.it_base
+            it_w = rec.it_warm
+            rec.speedup_iter_sum = (
+                float(np.sum(it_b) / np.sum(it_w))
+                if np.sum(it_w) > 0 else 1.0
+            )
+            rec.mean_step_time_base = float(np.mean(rec.t_base)) if ns > 0 else 0.0
+            rec.mean_step_time_warm = float(np.mean(rec.t_warm)) if ns > 0 else 0.0
 
     ref_rec: CaseRecord | None = records[0] if ref_strictest and records else None
     ref_tol_s = _tol_label(ref_rec.picard_tol) if ref_rec is not None else ""
@@ -1318,8 +1338,10 @@ def plot_moment_cnn_test_v2(
             fig6, ax6 = plt.subplots(figsize=plot_6_figsize)
             c_main = "black" if monochrome else _OKABE_ITO[0]
 
+            E_pct_warm = E_max_warm * 100.0  # convert to %
+
             ax6.plot(
-                E_max_warm[order], discrete_spd[order],
+                E_pct_warm[order], discrete_spd[order],
                 marker="o", ms=ms, linewidth=1.5, color=c_main,
                 label=_lab("eff_speedup",
                            "Effective Walltime Speedup", legend_labels),
@@ -1335,16 +1357,14 @@ def plot_moment_cnn_test_v2(
                 if valid_d[j]:
                     ax6.annotate(
                         f"tol={tols_nr[j]:.0e}",
-                        (E_max_warm[j], discrete_spd[j]),
+                        (E_pct_warm[j], discrete_spd[j]),
                         textcoords="offset points", xytext=(6, 4),
                         fontsize=ann_fs, color="gray",
                     )
 
-            ax6.set_xscale("log")
             ax6.invert_xaxis()
             ax6.set_xlabel(
-                r"Accuracy Threshold $\varepsilon$"
-                r" ($\max\, E_{L_2}^{\mathrm{rel}}$)",
+                r"Relative Error  $\max\, E_{L_2}^{\mathrm{rel}}$  [%]",
                 fontsize=fs_l,
             )
             ax6.set_ylabel(
@@ -1431,6 +1451,7 @@ def _parse_args_cli() -> argparse.Namespace:
     p.add_argument("--show", action="store_true")
     p.add_argument("--case_index", type=int, default=0)
     p.add_argument("--mode", type=str, default="B", choices=["B", "warm_only"])
+    p.add_argument("--max_steps", type=int, default=None)
     p.add_argument("--ref_strictest", action="store_true")
     p.add_argument("--linf_log_scale", action="store_true")
     p.add_argument("--legend_position", type=str, default="below_split",
@@ -1530,6 +1551,7 @@ def main() -> None:
         plot_5_figsize=(float(args.plot_5_figsize[0]), float(args.plot_5_figsize[1])),
         plot_6_figsize=(float(args.plot_6_figsize[0]), float(args.plot_6_figsize[1])),
         mode=str(args.mode),
+        max_steps=args.max_steps,
         ref_strictest=bool(args.ref_strictest),
         linf_log_scale=bool(args.linf_log_scale),
         legend_position=str(args.legend_position),
