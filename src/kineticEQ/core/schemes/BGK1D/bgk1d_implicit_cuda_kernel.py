@@ -146,6 +146,7 @@ def step(
         warm_delta_weight_center = getattr(cfg.model_cfg.scheme_params, "warm_delta_weight_center", 0.5)
         warm_delta_weight_sharpness = getattr(cfg.model_cfg.scheme_params, "warm_delta_weight_sharpness", 10.0)
         warm_delta_weight_sigma = getattr(cfg.model_cfg.scheme_params, "warm_delta_weight_sigma", 3.0)
+        warm_delta_exclude_cells = getattr(cfg.model_cfg.scheme_params, "warm_delta_exclude_cells", 0)
         n1_int, u1_int, T1_int, _, _, _ = predict_next_moments_delta(
             model,
             n0,
@@ -165,6 +166,7 @@ def step(
             warm_delta_weight_center=warm_delta_weight_center,
             warm_delta_weight_sharpness=warm_delta_weight_sharpness,
             warm_delta_weight_sigma=warm_delta_weight_sigma,
+            warm_delta_exclude_cells=warm_delta_exclude_cells,
         )
 
         n1p[1:-1].copy_(torch.clamp(n1_int, min=n_floor))

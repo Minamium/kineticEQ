@@ -34,3 +34,4 @@ class Params:
     warm_delta_weight_center: float = 0.5
     warm_delta_weight_sharpness: float = 10.0
     warm_delta_weight_sigma: float = 3.0
+    warm_delta_exclude_cells: int = 0

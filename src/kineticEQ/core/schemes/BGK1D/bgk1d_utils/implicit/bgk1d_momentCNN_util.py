@@ -43,6 +43,13 @@ def _normalize_warm_delta_weight_mode(value: str | None) -> str:
     raise ValueError(f"unknown warm_delta_weight_mode={value!r}")
 
 
+def _normalize_warm_delta_exclude_cells(value: Any) -> int:
+    try:
+        return max(int(value), 0)
+    except Exception:
+        return 0
+
+
 def _to_dict(x: Any) -> dict | None:
     if isinstance(x, Mapping):
         return dict(x)
@@ -465,6 +472,7 @@ def predict_next_moments_delta(
     warm_delta_weight_center: float = 0.5,
     warm_delta_weight_sharpness: float = 10.0,
     warm_delta_weight_sigma: float = 3.0,
+    warm_delta_exclude_cells: int = 0,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor,
     torch.Tensor, torch.Tensor, torch.Tensor
@@ -506,6 +514,15 @@ def predict_next_moments_delta(
             sigma=warm_delta_weight_sigma,
         ).to(dtype=dy.dtype)
         dy = dy * alpha.unsqueeze(0)
+
+    exclude_cells = _normalize_warm_delta_exclude_cells(warm_delta_exclude_cells)
+    if exclude_cells > 0 and dy.shape[-1] > 0:
+        # Boundary cells are fixed separately. We additionally suppress the warm delta
+        # on the first/last `exclude_cells` interior cells by zeroing the adjacent band
+        # on the full-length prediction field.
+        band = min(exclude_cells + 1, int(dy.shape[-1]))
+        dy[..., :band] = 0
+        dy[..., -band:] = 0
 
     dn = dy[0].to(n0.dtype)
     dT = dy[2].to(T0.dtype)
