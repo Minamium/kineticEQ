@@ -2,11 +2,12 @@
 title: Models
 nav_order: 20
 has_children: true
+lang: ja
 ---
 
 # Models
 
-このセクションは「数理モデル」と「実装上の対応状況」の両方を扱う。
+本節では、支配方程式の記述だけでなく、現行コードがどの離散化と backend を実装しているかを併せて整理する。とくに BGK1D では、同じモデルに対して explicit / implicit / holo の三系統が実装されており、各 stepper の数値的責務は明確に分かれている。
 
-- [BGK1D1V](BGK1D1V/index.md): 実装済み（explicit / implicit / holo）
-- [BGK2D2V](BGK2D2V/index.md): 現状は Engine 実行経路が未整備
+- [BGK1D1V](BGK1D1V/index.md): 現行の主力実装。`explicit` / `implicit` / `holo` をサポートする。
+- [BGK2D2V](BGK2D2V/index.md): モデル定義と state は存在するが、`Engine` 実行経路は未完成である。

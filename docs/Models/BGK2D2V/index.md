@@ -3,26 +3,31 @@ title: BGK2D2V
 parent: Models
 nav_order: 22
 has_children: true
+lang: ja
 ---
 
 # BGK2D2V
 
-2 次元空間 + 2 次元速度空間の BGK モデル。
+BGK2D2V は、二次元空間 `(x,y)` と二次元速度 `(v_x,v_y)` を持つ BGK モデルである。state dataclass とパラメータ dataclass は整備されているが、現行版では `Engine` 実行経路が未完成である。
 
-## 現在の実装状態
+## 支配方程式
 
-現行コードベースでは **Engine 経路は未完成**。
+概念的には
 
-理由:
+$$
+\frac{\partial f}{\partial t} + v_x \frac{\partial f}{\partial x} + v_y \frac{\partial f}{\partial y}
+= \frac{1}{\tau}(f_M - f)
+$$
 
-1. `core/schemes/BGK2D2V/bgk2d2v_explicit_torch.py` の `step` は TODO ダミー実装。
-2. `params/BGK2D2V/ModelConfig` に `scheme_params` がなく、`Engine` 初期化時に `AttributeError` になる。
+を想定している。しかし、現行実装はこの方程式の完全な時間発展器を提供していない。
 
-したがって、ドキュメント上の「対応モデル」には含まれているが、現バージョンでは実行対象としては扱えない。
+## 実装の現状
 
-## 関連実装ファイル
+1. `State2D2V` は `f`, `f_new`, `x`, `y`, `vx`, `vy` を確保する。
+2. `core/schemes/BGK2D2V/bgk2d2v_explicit_torch.py` は registry には接続されているが、`step()` が TODO ダミーである。
+3. `params/BGK2D2V/BGK2D2V_params.py` の `ModelConfig` には `scheme_params` フィールドが無く、`Engine` 初期化中に `config.model_cfg.scheme_params` を参照する箇所で破綻する。
+4. `cuda_kernel/BGK2D2V/explicit_2d2v/` には拡張コードが存在するが、現行 registry には結線されていない。
 
-- `src/kineticEQ/params/BGK2D2V/BGK2D2V_params.py`
-- `src/kineticEQ/core/states/state_2d2v.py`
-- `src/kineticEQ/core/schemes/BGK2D2V/bgk2d2v_explicit_torch.py`
-- `src/kineticEQ/cuda_kernel/BGK2D2V/explicit_2d2v/*`（拡張コードはあるが Engine registry 未接続）
+## 結論
+
+`BGK2D2V` は、将来的な拡張の骨格としては存在するものの、現時点では API 公開対象というより開発中のコードパスと解釈すべきである。研究・検証の主対象は BGK1D 系に置くのが妥当である。

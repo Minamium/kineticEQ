@@ -2,6 +2,7 @@
 title: Legacy
 parent: Implementations
 nav_order: 36
+lang: ja
 ---
 
 # Legacy
@@ -12,7 +13,7 @@ nav_order: 36
 
 ## 内容
 
-旧クラスベース実装が残っている:
+旧クラスベース実装が残されている。
 
 - `BGK1Dsim.py`
 - `BGK1DPlotUtil.py`
@@ -20,13 +21,13 @@ nav_order: 36
 - `BGK2D2VPlotUtil.py`
 - `BGK2Dsim.py`
 
-## 現状
+## 現状の位置づけ
 
-- トップレベル `kineticEQ.__init__` は legacy シンボルを一部公開 (`LegacyBGK1D`, `BGK1DPlotMixin`)。
-- 新 API (`Config` / `Engine`) の主経路は `api/ + core/` 側。
-- legacy は互換目的で残置され、開発の主対象ではない。
+- 新しい主経路は `api/ + core/ + params/` にある。
+- legacy は互換性維持と参照用コードとして残置されている。
+- 旧ノートブックや旧可視化ロジックを追う場合にのみ参照するのがよい。
 
 ## 注意
 
-- legacy 側には未実装箇所や古い backend path 参照がある。
-- 新規利用は `api` / `core` 経路を推奨。
+- backend 名称や責務分離が現行 API と一致しない箇所がある。
+- 新規実装や性能評価は legacy ではなく現行 stepper 群を基準に行うべきである。

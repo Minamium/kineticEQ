@@ -2,6 +2,7 @@
 title: API Layer
 parent: Implementations
 nav_order: 32
+lang: ja
 ---
 
 # API Layer
@@ -10,24 +11,34 @@ nav_order: 32
 
 - `src/kineticEQ/api/`
 
-## ファイルと役割
+## ファイルと責務
 
-- `config.py`
-  - Enum 正規化 (`parse_enum`)
-  - alias (`exp`, `imp`, `hl` など)
-  - `Config` dataclass
-- `engine.py`
-  - `model_cfg` 補完
-  - `scheme_params` 補完
-  - device 検証
-  - `build_state` / `build_stepper`
-  - 時間ループ
-- `result.py`
-  - `Result(metrics, payload)`
-- `logging_utils.py`
-  - `kineticEQ` logger の level/handler 設定
+### `config.py`
 
-## 実装上の注意
+- `Model`, `Scheme`, `Backend`, `DType`, `LogLevel`, `UseTqdm` の Enum 定義
+- alias を含む `parse_enum()`
+- `Config` dataclass と正規化ロジック
+- `as_dict` や `*_name` 系アクセサ
 
-- `Engine.__init__` は `config.model_cfg.scheme_params` を参照するため、モデル側 `ModelConfig` に `scheme_params` が無いと失敗する。
-- `run(config)` は `Engine(config).run()` の薄いラッパ。
+### `engine.py`
+
+- `default_model_cfg()` と `expected_model_cfg_type()` による `model_cfg` 補完・型検証
+- `default_scheme_params()` による `scheme_params` 補完
+- `apply_logging()` と `resolve_device()` の呼び出し
+- `build_state()` / `build_stepper()` の統合
+- progress bar を伴う時間発展ループ
+
+### `result.py`
+
+- `Result(metrics, payload)` dataclass
+
+### `logging_utils.py`
+
+- `kineticEQ` logger の handler / level 設定
+- 既存 handler を再設定し、ログレベルだけが食い違う状態を避ける
+
+## 実装上の要点
+
+- `Engine` は `model_cfg.scheme_params` を参照するため、モデル dataclass 側にこのフィールドが無いと失敗する。
+- 初期条件の設定は API 層ではなく stepper builder 層で行われる。
+- `run(config)` は薄いラッパであり、API の本体はあくまで `Engine` である。

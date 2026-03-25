@@ -1,13 +1,13 @@
 ---
 title: Examples
-parent: Getting Started
+parent: English Getting Started
 nav_order: 13
-lang: ja
+lang: en
 ---
 
 # Examples
 
-## 1. BGK1D explicit (`torch`)
+## 1. BGK1D explicit with `torch`
 
 ```python
 from kineticEQ import Config, Engine, BGK1D
@@ -29,7 +29,7 @@ cfg = Config(
 Engine(cfg).run()
 ```
 
-## 2. BGK1D implicit (`cpu_kernel`)
+## 2. BGK1D implicit with `cpu_kernel`
 
 ```python
 from kineticEQ import Config, Engine, BGK1D
@@ -57,7 +57,7 @@ cfg = Config(
 Engine(cfg).run()
 ```
 
-## 3. BGK1D implicit (`cuda_kernel` + AA + CNN warm-start)
+## 3. BGK1D implicit with `cuda_kernel`, AA, and CNN warm-start
 
 ```python
 from kineticEQ import Config, Engine, BGK1D
@@ -88,7 +88,7 @@ cfg = Config(
 Engine(cfg).run()
 ```
 
-## 4. BGK1D holo (`cuda_kernel`)
+## 4. BGK1D holo with `cuda_kernel`
 
 ```python
 from kineticEQ import Config, Engine, BGK1D
@@ -116,25 +116,3 @@ cfg = Config(
 
 Engine(cfg).run()
 ```
-
-## 5. 解析ユーティリティの利用
-
-```python
-from kineticEQ.analysis.BGK1D.benchmark import run_benchmark
-from kineticEQ.analysis.BGK1D.plotting import plot_timing_benchmark
-
-result = run_benchmark(
-    bench_type="time",
-    scheme="explicit",
-    backend="cuda_kernel",
-    device="cuda",
-    nx_list=[65, 129, 257],
-    nv_list=[65, 129, 257],
-)
-plot_timing_benchmark(result, out_dir="./results/benchmarks")
-```
-
-## 6. 現時点で避けるべき構成
-
-- `model="BGK2D2V"`: state 生成は可能でも `Engine` 実行経路が未完成である。
-- `BGK1D + cuda_kernel/cpu_kernel + dtype="float32"`: binding 側 dtype 制約により失敗する。

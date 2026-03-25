@@ -2,15 +2,18 @@
 title: kineticEQ.api
 parent: API Reference
 nav_order: 1
+lang: ja
 ---
 
 # API リファレンス
 
-## トップレベル
+## トップレベル export
 
 ```python
 from kineticEQ import Config, Engine, run, Result, BGK1D, BGK2D2V
 ```
+
+`BGK1D` と `BGK2D2V` は、それぞれモデル固有の dataclass 群を束ねた namespace 的モジュールとして振る舞う。
 
 ## Config
 
@@ -27,12 +30,35 @@ Config(
 )
 ```
 
+### 主要フィールド
+
 - `model`: `BGK1D1V` / `BGK2D2V`
 - `scheme`: `explicit` / `implicit` / `holo`
-- `backend`: `torch` / `cuda_kernel`
+- `backend`: `torch` / `cuda_kernel` / `cpu_kernel`
+- `device`: `cuda` / `cpu` / `mps`
+- `dtype`: `float32` / `float64`
+- `model_cfg`: モデル固有 dataclass
+- `use_tqdm`: `true` / `false`
 
-注記:
-- `BGK2D2V` は現行 Engine 経路では未対応
+### alias
+
+- `model`: `bgk1d`, `bgk1d1v`, `bgk2d2v`
+- `scheme`: `exp`, `imp`, `hl`
+- `backend`: `pytorch`, `cuda_backend`, `cpu_backend`
+- `dtype`: `fp32`, `fp64`
+
+### アクセサ
+
+`Config` は正規化済み Enum に対する以下のプロパティを持つ。
+
+- `model_name`
+- `scheme_name`
+- `backend_name`
+- `dtype_name`
+- `log_level_name`
+- `use_tqdm_name`
+- `use_tqdm_bool`
+- `as_dict`
 
 ## Engine
 
@@ -40,13 +66,22 @@ Config(
 Engine(config: Config, apply_logging_flag: bool = True)
 ```
 
-### Engine.run
+### 役割
+
+- `model_cfg` の補完と型検証
+- `scheme_params` の既定値補完
+- logger 設定
+- device 検証
+- state 構築
+- stepper 構築
+
+### run
 
 ```python
 engine.run() -> Result
 ```
 
-時間発展ループを実行。
+`run()` は `model_cfg.time.n_steps` 回の時間発展を実行し、progress bar と benchlog を扱う。stepper が `benchlog` 属性を持つ場合、一定間隔で進捗出力に反映される。
 
 ## run
 
@@ -54,7 +89,7 @@ engine.run() -> Result
 run(config: Config) -> Result
 ```
 
-`Engine(config).run()` のショートカット。
+`Engine(config).run()` の薄いショートカットである。
 
 ## Result
 
@@ -65,11 +100,11 @@ class Result:
     payload: dict[str, Any] | None = None
 ```
 
----
+現時点ではコンテナのみが定義されており、トップレベル実行結果の自動格納は未実装である。
 
-## パラメータ: BGK1D
+## BGK1D パラメータ
 
-### ModelConfig
+### `BGK1D.ModelConfig`
 
 ```python
 BGK1D.ModelConfig(
@@ -81,33 +116,33 @@ BGK1D.ModelConfig(
 )
 ```
 
-### Grid1D1V
+### `BGK1D.Grid1D1V`
 
 - `nx: int = 124`
 - `nv: int = 64`
 - `Lx: float = 1.0`
 - `v_max: float = 10.0`
 
-### TimeConfig
+### `BGK1D.TimeConfig`
 
 - `dt: float = 5e-4`
 - `T_total: float = 0.05`
 - `n_steps = ceil(T_total / dt)`
 
-### BGK1D1VParams
+### `BGK1D.BGK1D1VParams`
 
 - `tau_tilde: float = 0.5`
 
-### InitialCondition1D
+### `BGK1D.InitialCondition1D`
 
-- `initial_regions: tuple[dict, ...]`
-- 各 dict は `x_range`, `n`, `u`, `T`
+- `initial_regions: tuple[Any, ...]`
+- 各要素は `x_range`, `n`, `u`, `T` を持つ dict もしくは同等属性をもつ object
 
-### explicit.Params
+### `BGK1D.explicit.Params`
 
 - 追加パラメータなし
 
-### implicit.Params
+### `BGK1D.implicit.Params`
 
 - `picard_iter: int = 16`
 - `picard_tol: float = 1e-4`
@@ -120,9 +155,16 @@ BGK1D.ModelConfig(
 - `aa_start_iter: int = 2`
 - `aa_reg: float = 1e-10`
 - `aa_alpha_max: float = 50.0`
+- `warm_enable: bool | None = None`
 - `moments_cnn_modelpath: str | None = None`
+- `warm_delta_weight_mode: str = "none"`
+- `warm_delta_weight_floor: float = 0.2`
+- `warm_delta_weight_center: float = 0.5`
+- `warm_delta_weight_sharpness: float = 10.0`
+- `warm_delta_weight_sigma: float = 3.0`
+- `warm_delta_exclude_cells: int = 0`
 
-### holo.Params
+### `BGK1D.holo.Params`
 
 - `ho_iter: int = 8`
 - `ho_tol: float = 1e-4`
@@ -133,11 +175,9 @@ BGK1D.ModelConfig(
 - `Con_Terms_do: bool = True`
 - `flux_consistency_do: bool = True`
 
----
+## BGK2D2V パラメータ
 
-## パラメータ: BGK2D2V
-
-### Grid2D2V
+### `BGK2D2V.Grid2D2V`
 
 - `nx: int = 124`
 - `ny: int = 124`
@@ -147,30 +187,22 @@ BGK1D.ModelConfig(
 - `Ly: float = 1.0`
 - `v_max: float = 10.0`
 
-### TimeConfig
+### `BGK2D2V.TimeConfig`
 
 - `dt: float = 5e-3`
 - `T_total: float = 0.05`
 - `n_steps = int(T_total / dt)`
 
-### BGK2D2VParams
+### `BGK2D2V.BGK2D2VParams`
 
 - `tau_tilde: float = 0.5`
 
 注記:
-- 現行 `BGK2D2V.ModelConfig` には `scheme_params` フィールドがないため、`Engine` 経路は未対応。
 
----
+- 現行 `BGK2D2V.ModelConfig` には `scheme_params` が存在しないため、`Engine` 経路では未対応である。
 
-## analysis.BGK1D
+## 実務上の注意
 
-実行関数:
-- `run_benchmark(...)`
-- `run_convergence_test(...)`
-- `run_scheme_comparison_test(...)`
-
-plotting:
-- `plot_benchmark_results(...)`
-- `plot_convergence_results(...)`
-- `plot_cross_scheme_results(...)`
-- `plot_timing_benchmark(...)`
+- `BGK1D + cuda_kernel` は fused binding の都合で `float64` を前提に考えるべきである。
+- `BGK1D + cpu_kernel` は implicit 専用である。
+- `BGK2D2V` は API 名としては公開されているが、実行可能モデルとしては扱わない方がよい。

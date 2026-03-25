@@ -2,6 +2,7 @@
 title: Support Modules
 parent: Implementations
 nav_order: 37
+lang: ja
 ---
 
 # Support Modules
@@ -10,18 +11,19 @@ nav_order: 37
 
 責務:
 
-- モデル設定 dataclass (`BGK1D`, `BGK2D2V`)
-- `(model, scheme)` ごとの既定 `scheme_params` 供給 (`params/registry.py`)
+- BGK1D / BGK2D2V のモデル dataclass
+- scheme 別既定 `scheme_params` の供給
+- `expected_model_cfg_type()` による API 層との型整合
 
 注意:
 
-- `BGK2D2V.ModelConfig` は現行 `scheme_params` を持たない
+- `BGK2D2V.ModelConfig` は現状 `scheme_params` を持たないため、`Engine` 初期化と噛み合わない。
 
 ## `utillib/`
 
-- `device_util.py`: `cuda` / `mps` / `cpu` の利用可否判定
-- `progress_bar.py`: tqdm 有無を吸収する progress API
-- `pretty.py`: dataclass/dict をログ向け key-value block へ整形
+- `device_util.py`: `cuda` / `mps` / `cpu` の検証
+- `progress_bar.py`: tqdm の有無を吸収する wrapper
+- `pretty.py`: dataclass / dict をログ向け key-value 形式へ整形
 
 ## `plotting/`
 
@@ -36,4 +38,5 @@ nav_order: 37
 
 補足:
 
-- test は構成・環境依存で skip 条件を多く含む（CUDA 非搭載環境など）。
+- skip 条件を多く含むため、テストの不実行は直ちに不具合を意味しない。
+- CUDA 非搭載環境では backend 依存テストの多くが skip される。
