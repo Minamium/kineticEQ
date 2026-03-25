@@ -23,3 +23,6 @@ cmake-build-*/
 # Workspace
 notebook/result/*
 notebook/*
+
+# tex
+LaTeX/*
