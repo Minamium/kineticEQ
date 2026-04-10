@@ -26,3 +26,6 @@ notebook/*
 
 # tex
 docs/paper/*
+
+# claude
+.claude/*
