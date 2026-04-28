@@ -8,8 +8,8 @@ from kineticEQ.api.config import Config, Model, Scheme, Backend
 Stepper = Callable[[int], None]
 StepperBuilder = Callable[[Config, Any], Stepper]  # (cfg, state) -> stepper
 
-from .BGK1D import bgk1d_explicit_torch
-from .BGK1D import bgk1d_explicit_cuda_kernel, bgk1d_implicit_cpu_kernel, bgk1d_implicit_cuda_kernel, bgk1d_holo_cuda_kernel
+from .BGK1D1V import bgk1d_explicit_torch
+from .BGK1D1V import bgk1d_explicit_cuda_kernel, bgk1d_implicit_cpu_kernel, bgk1d_implicit_cuda_kernel, bgk1d_holo_cuda_kernel
 from .BGK2D2V import bgk2d2v_explicit_torch
 
 _FACTORIES: dict[tuple[Model, Scheme, Backend], StepperBuilder] = {

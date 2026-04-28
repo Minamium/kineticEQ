@@ -7,7 +7,7 @@ from typing import Any
 import torch
 
 from kineticEQ import Engine, Config
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.general.bgk1d_compute_moments import calculate_moments
+from kineticEQ.core.schemes.BGK1D1V.bgk1d_utils.general.bgk1d_compute_moments import calculate_moments
 
 from .results import RunResult, StepRecord
 

@@ -120,8 +120,8 @@ Engine(cfg).run()
 ## 5. 解析ユーティリティの利用
 
 ```python
-from kineticEQ.analysis.BGK1D.benchmark import run_benchmark
-from kineticEQ.analysis.BGK1D.plotting import plot_timing_benchmark
+from kineticEQ.analysis.BGK1D1V.benchmark import run_benchmark
+from kineticEQ.analysis.BGK1D1V.plotting import plot_timing_benchmark
 
 result = run_benchmark(
     bench_type="time",

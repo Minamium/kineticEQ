@@ -35,8 +35,8 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from kineticEQ import Engine, Config, BGK1D
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.general.bgk1d_compute_moments import calculate_moments
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.implicit.bgk1d_momentCNN_util import (
+from kineticEQ.core.schemes.BGK1D1V.bgk1d_utils.general.bgk1d_compute_moments import calculate_moments
+from kineticEQ.core.schemes.BGK1D1V.bgk1d_utils.implicit.bgk1d_momentCNN_util import (
     load_moments_cnn_model, predict_next_moments_delta
 )
 from kineticEQ.plotting.bgk1d.plot_state import plot_state

@@ -1,6 +1,6 @@
 import pytest
 import torch
-from kineticEQ.params.BGK1D import Grid1D1V
+from kineticEQ.params.BGK1D1V import Grid1D1V
 from kineticEQ.utillib.device_util import resolve_device
 from kineticEQ import Config, Engine, BGK1D
 from kineticEQ.plotting.bgk1d import plot_state

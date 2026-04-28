@@ -14,7 +14,7 @@ import torch
 import torch.distributed as dist
 
 from kineticEQ import BGK1D, Config, Engine
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.general.bgk1d_compute_moments import calculate_moments
+from kineticEQ.core.schemes.BGK1D1V.bgk1d_utils.general.bgk1d_compute_moments import calculate_moments
 
 
 LOG_LEVEL_PRIORITY = {

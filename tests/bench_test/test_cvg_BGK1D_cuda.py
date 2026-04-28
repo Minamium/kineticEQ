@@ -1,6 +1,6 @@
 import pytest, torch
-from kineticEQ.analysis.BGK1D.convergence_test import run_convergence_test
-from kineticEQ.analysis.BGK1D.plotting.plot_convergence_result import plot_convergence_results
+from kineticEQ.analysis.BGK1D1V.convergence_test import run_convergence_test
+from kineticEQ.analysis.BGK1D1V.plotting.plot_convergence_result import plot_convergence_results
 from kineticEQ.utillib.device_util import resolve_device
 from kineticEQ import BGK1D
 

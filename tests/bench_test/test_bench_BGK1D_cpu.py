@@ -1,7 +1,7 @@
 import pytest
-from kineticEQ.analysis.BGK1D.benchmark import run_benchmark
-from kineticEQ.analysis.BGK1D.plotting.plot_benchmark_result import plot_benchmark_results
-from kineticEQ.analysis.BGK1D.plotting.plot_timing_benchmark import plot_timing_benchmark
+from kineticEQ.analysis.BGK1D1V.benchmark import run_benchmark
+from kineticEQ.analysis.BGK1D1V.plotting.plot_benchmark_result import plot_benchmark_results
+from kineticEQ.analysis.BGK1D1V.plotting.plot_timing_benchmark import plot_timing_benchmark
 
 @pytest.mark.parametrize("bench_type", ["x_grid", "v_grid", "time"])
 @pytest.mark.parametrize("scheme", ["explicit"])

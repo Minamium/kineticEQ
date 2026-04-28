@@ -1,6 +1,6 @@
 import torch
 
-from kineticEQ.core.schemes.BGK1D.bgk1d_utils.implicit.bgk1d_momentCNN_util import (
+from kineticEQ.core.schemes.BGK1D1V.bgk1d_utils.implicit.bgk1d_momentCNN_util import (
     predict_next_moments_delta,
 )
 

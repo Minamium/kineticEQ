@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from kineticEQ.api.config import Model, Scheme
-from .BGK1D import BGK1D1V_params, explicit, implicit, holo
+from .BGK1D1V import BGK1D1V_params, explicit, implicit, holo
 from .BGK2D2V import BGK2D2V_params
 
 _FACTORIES: dict[Model, Callable[[], Any]] = {

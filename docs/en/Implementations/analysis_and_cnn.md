@@ -8,7 +8,7 @@ lang: en
 
 # Analysis And CNN
 
-## `analysis/BGK1D`
+## `analysis/BGK1D1V`
 
 The analysis package provides benchmark, convergence, and cross-scheme utilities together with plotting helpers.
 

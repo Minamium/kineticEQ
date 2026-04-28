@@ -7,7 +7,7 @@ lang: ja
 
 # Analysis And CNN
 
-## `analysis/BGK1D`
+## `analysis/BGK1D1V`
 
 ### 実行モジュール
 
@@ -72,7 +72,7 @@ lang: ja
 
 ### core との接続
 
-`core/schemes/BGK1D/bgk1d_implicit_*` からは、以下の経路で CNN が利用される。
+`core/schemes/BGK1D1V/bgk1d_implicit_*` からは、以下の経路で CNN が利用される。
 
 1. `load_moments_cnn_model()` で checkpoint をロード
 2. `predict_next_moments_delta()` で内部セルの次時刻モーメント増分を予測

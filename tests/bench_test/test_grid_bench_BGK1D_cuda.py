@@ -1,8 +1,8 @@
 import pytest, torch
-from kineticEQ.analysis.BGK1D.benchmark import run_benchmark
+from kineticEQ.analysis.BGK1D1V.benchmark import run_benchmark
 from kineticEQ.utillib.device_util import resolve_device
-from kineticEQ.analysis.BGK1D.plotting.plot_benchmark_result import plot_benchmark_results
-from kineticEQ.analysis.BGK1D.plotting.plot_timing_benchmark import plot_timing_benchmark
+from kineticEQ.analysis.BGK1D1V.plotting.plot_benchmark_result import plot_benchmark_results
+from kineticEQ.analysis.BGK1D1V.plotting.plot_timing_benchmark import plot_timing_benchmark
 from kineticEQ import BGK1D
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
