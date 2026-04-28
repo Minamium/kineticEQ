@@ -111,7 +111,7 @@ The zero-velocity node has no wall-normal flux and is left as the adjacent inter
 
 ## Diffuse reflection
 
-Diffuse reflection re-emits particles as a wall Maxwellian at wall temperature $T_w$, while normalizing the emitted density so that the returned mass flux equals the incoming mass flux. With wall velocity $u_w$, the unit-density Maxwellian is
+Diffuse reflection re-emits particles as a wall Maxwellian at wall temperature $T_w$, while normalizing the emitted density so that the returned mass flux equals the incoming mass flux. The implementation assumes stationary walls, $u_w=0$. In the general formula, with wall velocity $u_w$, the unit-density Maxwellian is
 
 $$
 M_w^{(1)}(v)
@@ -211,6 +211,8 @@ f_{N_x-2,k}, & v_k>0,\\
 $$
 
 Diffuse reflection enforces zero net mass flux, but the wall may exchange momentum and energy with the gas.
+
+The implementation treats `bc_type="diffuse"`, `"diffuse_reflective"`, and `"diffuse_reflection"` as aliases. The wall temperatures are read from `BoundaryCondition1D.Lwall_temperature` and `BoundaryCondition1D.Rwall_temperature`.
 
 ## Note on implicit steppers
 

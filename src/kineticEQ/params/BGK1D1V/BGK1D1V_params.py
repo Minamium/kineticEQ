@@ -32,6 +32,8 @@ class InitialCondition1D:
 @dataclass(frozen=True)
 class BoundaryCondition1D:
     bc_type: str = "fixed_maxwellian"
+    Lwall_temperature: float = 1.0
+    Rwall_temperature: float = 1.0
 
 @dataclass(frozen=True)
 class ModelConfig:
@@ -45,6 +47,8 @@ class ModelConfig:
         "time.dt",
         "time.T_total",
         "boundary.bc_type",
+        "boundary.Lwall_temperature",
+        "boundary.Rwall_temperature",
         "scheme_params.",
         "initial.", 
     )

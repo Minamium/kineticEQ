@@ -39,7 +39,7 @@ def step(state: State1D1V, cfg: Config, num_steps: int) -> State1D1V:
     # 境界適用
     apply_bc(
         state,
-        cfg.model_cfg.boundary.bc_type,
+        cfg.model_cfg.boundary,
         target=state.f_tmp,
         source=state.f,
     )

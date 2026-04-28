@@ -123,7 +123,7 @@ $v_k=0$ は壁を横切るフラックスを持たないため、実装では隣
 
 ## 拡散反射境界
 
-拡散反射では、壁に入射した粒子は壁温度 $T_w$ の Maxwellian として再放出される。ただし、返す質量フラックスは壁へ入った質量フラックスと一致させる。壁速度を $u_w$ とすると、単位密度 Maxwellian を
+拡散反射では、壁に入射した粒子は壁温度 $T_w$ の Maxwellian として再放出される。ただし、返す質量フラックスは壁へ入った質量フラックスと一致させる。実装では静止壁 $u_w=0$ を仮定する。一般式として壁速度を $u_w$ とすると、単位密度 Maxwellian を
 
 $$
 M_w^{(1)}(v)
@@ -237,6 +237,8 @@ f_{N_x-2,k}, & v_k>0,\\
 $$
 
 で与える。
+
+実装上は `bc_type="diffuse"`、`"diffuse_reflective"`、`"diffuse_reflection"` を同義に扱う。左右の壁温度は `BoundaryCondition1D.Lwall_temperature` と `BoundaryCondition1D.Rwall_temperature` から取得する。
 
 ## implicit stepper での注意
 

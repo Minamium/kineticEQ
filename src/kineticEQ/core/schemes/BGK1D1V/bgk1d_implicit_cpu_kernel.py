@@ -67,7 +67,7 @@ def step(
     aa_head = 0
     u_max = 0.95 * float(torch.max(torch.abs(state.v)).item()) if n_inner > 0 else 0.0
 
-    f_bc_l, f_bc_r = boundary_rows(state, cfg.model_cfg.boundary.bc_type, source=state.f)
+    f_bc_l, f_bc_r = boundary_rows(state, cfg.model_cfg.boundary, source=state.f)
 
     if ws.B0.numel() > 0:
         ws.B0.copy_(state.f[1:-1, :].T)
@@ -253,7 +253,7 @@ def step(
         ws.fz, ws.fn_tmp = ws.fn_tmp, ws.fz
 
     state.f_tmp.copy_(latest)
-    apply_bc(state, cfg.model_cfg.boundary.bc_type, target=state.f_tmp, source=state.f)
+    apply_bc(state, cfg.model_cfg.boundary, target=state.f_tmp, source=state.f)
 
     if num_steps % 100 == 0 and not torch.isfinite(state.f_tmp).all():
         raise ValueError("NaN/Inf detected in f_tmp")

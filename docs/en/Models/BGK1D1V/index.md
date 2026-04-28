@@ -38,8 +38,9 @@ Current BGK1D1V boundary handling is centralized in `bgk1d_apply_BC.py`. Endpoin
 
 - `fixed_maxwellian` keeps the endpoint Maxwellian rows fixed.
 - `reflective` builds a specular boundary trace by reversing the velocity components of the adjacent interior rows.
+- `diffuse` builds a wall-temperature Maxwellian trace normalized by the outgoing mass flux into the wall.
 
-The continuous and discrete formulas are summarized in [Boundary Conditions](boundary_conditions.md). Diffuse reflection is documented there as the next implementation target, but is not implemented yet.
+The continuous and discrete formulas are summarized in [Boundary Conditions](boundary_conditions.md).
 
 ## Backend support
 

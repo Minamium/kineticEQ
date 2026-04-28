@@ -67,8 +67,9 @@ $$
 
 - `fixed_maxwellian`: 初期端点行に入っている Maxwellian 分布を固定境界として保持する。
 - `reflective`: 隣接内部行の速度反転により鏡面反射境界を作る。
+- `diffuse`: 壁へ入る質量フラックスと一致するように規格化した、壁温度 Maxwellian の拡散反射境界を作る。
 
-理論式と現行の離散式は [境界条件](boundary_conditions.md) に整理している。拡散反射は同ページに設計式を記述しているが、実装はまだ入っていない。
+理論式と現行の離散式は [境界条件](boundary_conditions.md) に整理している。
 
 ## backend とスキーム対応
 

@@ -75,7 +75,7 @@ def step(
     u_max = 0.95 * float(torch.max(torch.abs(state.v)).item()) if n_inner > 0 else 0.0
 
     # 固定境界 f（本step中は不変）
-    f_bc_l, f_bc_r = boundary_rows(state, cfg.model_cfg.boundary.bc_type, source=state.f)
+    f_bc_l, f_bc_r = boundary_rows(state, cfg.model_cfg.boundary, source=state.f)
 
     # f_prev interior を RHS 基底として1回だけ転置キャッシュ
     if ws.B0.numel() > 0:
@@ -290,7 +290,7 @@ def step(
         ws.fz, ws.fn_tmp = ws.fn_tmp, ws.fz
     
     state.f_tmp.copy_(latest)
-    apply_bc(state, cfg.model_cfg.boundary.bc_type, target=state.f_tmp, source=state.f)
+    apply_bc(state, cfg.model_cfg.boundary, target=state.f_tmp, source=state.f)
 
     # NaN/Infチェック
     if num_steps % 100 == 0:
