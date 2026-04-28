@@ -34,13 +34,12 @@ $$
 
 ## Boundary handling
 
-All current BGK1D steppers keep the boundary distribution fixed at each time step.
+Current BGK1D1V boundary handling is centralized in `bgk1d_apply_BC.py`. Endpoint rows `i=0` and `i=N_x-1` are treated as boundary traces rather than interior unknowns.
 
-- explicit copies the left and right boundary cells after the update;
-- implicit caches `f_bc_l` and `f_bc_r` and keeps them fixed during Picard iteration;
-- holo overwrites the boundary cells after the HO solve.
+- `fixed_maxwellian` keeps the endpoint Maxwellian rows fixed.
+- `reflective` builds a specular boundary trace by reversing the velocity components of the adjacent interior rows.
 
-This is therefore not a periodic implementation.
+The continuous and discrete formulas are summarized in [Boundary Conditions](boundary_conditions.md). Diffuse reflection is documented there as the next implementation target, but is not implemented yet.
 
 ## Backend support
 

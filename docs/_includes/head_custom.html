@@ -2,4 +2,18 @@
 <meta name="keq-doc-baseurl" content="{{ site.baseurl | default: '' }}">
 <meta name="keq-doc-url" content="{{ page.url | default: '/' }}">
 <link rel="stylesheet" href="{{ '/assets/css/keq-docs.css' | relative_url }}">
+<script>
+  window.MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$', '$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+    }
+  };
+</script>
+<script defer id="MathJax-script" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
 <script defer src="{{ '/assets/js/keq-docs.js' | relative_url }}"></script>
