@@ -10,7 +10,7 @@ import torch
 from kineticEQ.core.schemes.BGK1D1V.bgk1d_utils.general.bgk1d_compute_moments import (
     calculate_moments,
 )
-from kineticEQ.utillib.progress_bar import get_progress_bar
+from kineticEQ.utillib.progress_bar import get_progress_bar, progress_write
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +168,7 @@ def _save_gif(
     *,
     fps: int,
     dpi: int,
+    use_tqdm: bool,
 ) -> None:
     if not snapshots:
         raise ValueError("no snapshots captured")
@@ -179,8 +180,19 @@ def _save_gif(
         "T": _limits([s["T"] for s in snapshots]),
     }
 
-    frames = [_render_frame(s, limits, dpi=dpi) for s in snapshots]
+    frames = []
+    with get_progress_bar(
+        use_tqdm,
+        total=len(snapshots),
+        desc="Render GIF Frames",
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+    ) as pbar:
+        for snapshot in snapshots:
+            frames.append(_render_frame(snapshot, limits, dpi=dpi))
+            pbar.update(1)
+
     duration_ms = int(1000 / max(int(fps), 1))
+    progress_write(f"Saving GIF: {path}", use_tqdm)
     frames[0].save(
         path,
         save_all=True,
@@ -188,11 +200,18 @@ def _save_gif(
         duration=duration_ms,
         loop=0,
     )
+    progress_write(f"Saved GIF: {path}", use_tqdm)
     for frame in frames:
         frame.close()
 
 
-def _save_conservation_plot(records: list[dict[str, float]], path: Path, *, dpi: int) -> None:
+def _save_conservation_plot(
+    records: list[dict[str, float]],
+    path: Path,
+    *,
+    dpi: int,
+    use_tqdm: bool,
+) -> None:
     import matplotlib.pyplot as plt
 
     if not records:
@@ -219,8 +238,10 @@ def _save_conservation_plot(records: list[dict[str, float]], path: Path, *, dpi:
             ax.set_title(f"{name}: initial={y0:.8e}, final={y1:.8e}, delta={y1 - y0:.3e}")
     axes[-1].set_xlabel("Step")
     fig.tight_layout()
+    progress_write(f"Saving conservation plot: {path}", use_tqdm)
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
+    progress_write(f"Saved conservation plot: {path}", use_tqdm)
 
 
 def animate_state_run(
@@ -300,8 +321,8 @@ def animate_state_run(
 
             pbar.update(1)
 
-    _save_gif(snapshots, gif_path, fps=fps, dpi=dpi)
-    _save_conservation_plot(diagnostics, conservation_path, dpi=dpi)
+    _save_gif(snapshots, gif_path, fps=fps, dpi=dpi, use_tqdm=use_tqdm)
+    _save_conservation_plot(diagnostics, conservation_path, dpi=dpi, use_tqdm=use_tqdm)
 
     logger.info("Saved state animation: %s", gif_path)
     logger.info("Saved conservation plot: %s", conservation_path)
