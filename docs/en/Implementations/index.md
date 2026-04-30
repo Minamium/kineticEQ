@@ -1,7 +1,7 @@
 ---
 title: English Implementations
 nav_title: Implementations
-parent: English Docs
+parent: English
 nav_order: 30
 has_children: true
 lang: en

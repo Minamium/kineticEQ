@@ -1,8 +1,9 @@
 ---
-title: English Docs
+title: English
 nav_title: English
-nav_order: 95
+nav_order: 20
 has_children: true
+permalink: /en/
 lang: en
 ---
 

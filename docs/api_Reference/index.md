@@ -1,5 +1,6 @@
 ---
 title: API Reference
+parent: Japanese
 nav_order: 90
 has_children: true
 lang: ja

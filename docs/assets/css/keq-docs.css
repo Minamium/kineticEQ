@@ -1,3 +1,15 @@
+.keq-header-controls {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.keq-header-controls__button.is-active {
+  font-weight: 700;
+}
+
 .keq-page-controls {
   display: flex;
   flex-wrap: wrap;

@@ -1,5 +1,6 @@
 ---
-title: 境界条件
+title: BGK1D1V Boundary Conditions
+nav_title: Boundary Conditions
 parent: BGK1D1V
 nav_order: 2
 lang: ja
