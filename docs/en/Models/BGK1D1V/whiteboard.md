@@ -1,7 +1,9 @@
 ---
-title: Numerical Notes
-parent: English BGK1D1V
-nav_order: 1
+title: English BGK1D1V Numerical Notes
+nav_title: BGK1D1V Numerical Notes
+parent: English Models
+grand_parent: English
+nav_order: 3
 lang: en
 ---
 

@@ -2,6 +2,7 @@
 title: English CUDA Kernels
 nav_title: CUDA Kernels
 parent: English Implementations
+grand_parent: English
 nav_order: 34
 lang: en
 ---

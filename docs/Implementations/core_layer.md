@@ -1,6 +1,7 @@
 ---
 title: Core Layer
 parent: Implementations
+grand_parent: Japanese
 nav_order: 33
 lang: ja
 ---

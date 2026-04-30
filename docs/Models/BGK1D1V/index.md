@@ -1,8 +1,8 @@
 ---
 title: BGK1D1V
 parent: Models
-nav_order: 21
-has_children: true
+grand_parent: Japanese
+nav_order: 1
 lang: ja
 ---
 

@@ -2,6 +2,7 @@
 title: kineticEQ.api (English)
 nav_title: kineticEQ.api
 parent: English API Reference
+grand_parent: English
 nav_order: 1
 lang: en
 ---

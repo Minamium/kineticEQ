@@ -2,6 +2,7 @@
 title: English Analysis And CNN
 nav_title: Analysis And CNN
 parent: English Implementations
+grand_parent: English
 nav_order: 35
 lang: en
 ---

@@ -1,6 +1,7 @@
 ---
 title: API Layer
 parent: Implementations
+grand_parent: Japanese
 nav_order: 32
 lang: ja
 ---

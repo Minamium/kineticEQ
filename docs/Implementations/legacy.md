@@ -1,6 +1,7 @@
 ---
 title: Legacy
 parent: Implementations
+grand_parent: Japanese
 nav_order: 36
 lang: ja
 ---

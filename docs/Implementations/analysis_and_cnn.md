@@ -1,6 +1,7 @@
 ---
 title: Analysis And CNN
 parent: Implementations
+grand_parent: Japanese
 nav_order: 35
 lang: ja
 ---

@@ -1,6 +1,7 @@
 ---
 title: Installation
 parent: Getting Started
+grand_parent: Japanese
 nav_order: 11
 lang: ja
 ---
