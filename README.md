@@ -17,7 +17,7 @@
 
 kineticEQ is a Python library for numerical computation of the Boltzmann-BGK equation. It provides GPU computation through the `Config` / `Engine` API, using PyTorch and C++/CUDA kernels.
 
-kineticEQ は，Boltzmann-BGK 方程式の数値計算を扱うための Python ライブラリです。`Config` / `Engine` API から PyTorch と C++/CUDA カーネルによる GPU 計算を利用します。
+kineticEQ は，Boltzmann-BGK 方程式の数値計算を扱うための Python ライブラリ.`Config` / `Engine` API から PyTorch と C++/CUDA カーネルによる GPU 計算を利用を利用可能.
 
 ## Installation
 
