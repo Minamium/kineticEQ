@@ -4,11 +4,11 @@
 
 # kineticEQ
 
-**EN**  
 kineticEQ is a Python library for kinetic-equation solvers with a `Config` / `Engine` API and C++/CUDA acceleration.
 
-**JP**  
-kineticEQ は，`Config` / `Engine` API と C++/CUDA 高速化を備えた運動論方程式の数値計算ライブラリです。
+---
+
+kineticEQ は，`Config` / `Engine` API と C++/CUDA 高速化を備えた運動論方程式の数値計算ライブラリ.
 
 ## Links
 
