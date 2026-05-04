@@ -2,7 +2,6 @@
 title: BGK1D1V Numerical Notes
 nav_title: BGK1D1V Numerical Notes
 parent: Models
-grand_parent: Japanese
 nav_order: 3
 lang: ja
 ---

@@ -1,7 +1,6 @@
 ---
 title: kineticEQ.api
 parent: API Reference
-grand_parent: Japanese
 nav_order: 1
 lang: ja
 ---

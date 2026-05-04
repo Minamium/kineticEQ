@@ -1,6 +1,5 @@
 ---
 title: Implementations
-parent: Japanese
 nav_order: 30
 has_children: true
 lang: ja

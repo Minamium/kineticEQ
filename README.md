@@ -13,12 +13,92 @@
 
 # kineticEQ
 
-**GPU-accelerated kinetic-equation solvers for BGK-type models.**
+**GPU-accelerated solvers for the Boltzmann-BGK equation.**
 
-kineticEQ provides a high-level `Config` / `Engine` API for kinetic simulations, backed by PyTorch and optimized C++/CUDA kernels.
+kineticEQ is a Python library for numerical computation of the Boltzmann-BGK equation. It provides GPU computation through the `Config` / `Engine` API, using PyTorch and C++/CUDA kernels.
 
-kineticEQ は，運動論方程式の数値計算を `Config` / `Engine` API から扱うための Python ライブラリです。BGK 型モデルを中心に，PyTorch と C++/CUDA カーネルによる GPU 計算を利用します。
+kineticEQ は，Boltzmann-BGK 方程式の数値計算を扱うための Python ライブラリです。`Config` / `Engine` API から PyTorch と C++/CUDA カーネルによる GPU 計算を利用します。
 
-## Links
+## Installation
+
+```bash
+git clone https://github.com/Minamium/kineticEQ.git
+cd kineticEQ
+pip install -e ".[viz]"
+```
+
+CUDA backends require a CUDA-enabled PyTorch environment and `nvcc`.
+
+## Quick Start
+
+```python
+from kineticEQ import BGK1D, Config, Engine
+
+cfg = Config(
+    model="BGK1D1V",
+    scheme="explicit",
+    backend="torch",
+    device="cpu",
+    dtype="float64",
+    use_tqdm=False,
+    model_cfg=BGK1D.ModelConfig(
+        grid=BGK1D.Grid1D1V(nx=256, nv=128, Lx=1.0, v_max=10.0),
+        time=BGK1D.TimeConfig(dt=5e-6, T_total=5e-4),
+        params=BGK1D.BGK1D1VParams(tau_tilde=5e-5),
+    ),
+)
+
+result = Engine(cfg).run()
+```
+
+Use `backend="cuda_kernel"` and `device="cuda"` for CUDA kernel runs.
+
+## Plotting
+
+Static snapshots are available through `plot_state`.
+
+```python
+from kineticEQ.plotting.bgk1d import plot_state
+
+engine = Engine(cfg)
+engine.run()
+plot_state(engine.state, filename="state.png", output_dir="result")
+```
+
+GIF animation and conservation diagnostics are available through `animate_state_run`.
+
+```python
+from kineticEQ.plotting.bgk1d import animate_state_run
+
+paths = animate_state_run(
+    cfg,
+    frames=80,
+    filename="state.gif",
+    output_dir="result",
+    fps=10,
+)
+```
+
+## Engine Arguments
+
+| Argument | Where | Default | Description |
+|---|---|---|---|
+| `config` | `Engine` | required | `Config` object defining the simulation. |
+| `apply_logging_flag` | `Engine` | `True` | Apply logging settings during initialization. |
+| `model` | `Config` | `BGK1D1V` | Target model. Current production path is `BGK1D1V`. |
+| `scheme` | `Config` | `explicit` | Time-evolution scheme: `explicit`, `implicit`, or `holo`. |
+| `backend` | `Config` | `torch` | Compute backend: `torch`, `cuda_kernel`, or `cpu_kernel`. |
+| `device` | `Config` | `cuda` | Execution device such as `cpu`, `cuda`, or `mps`. |
+| `dtype` | `Config` | `float64` | Tensor precision. Kernel backends currently assume `float64`. |
+| `log_level` | `Config` | `info` | Logging level: `debug`, `info`, `warning`, or `error`. |
+| `model_cfg` | `Config` | `None` | Model-specific dataclass such as `BGK1D.ModelConfig`. |
+| `use_tqdm` | `Config` | `true` | Show progress bars during time evolution. |
+
+## Documentation
 
 - Documentation: https://minamium.github.io/kineticEQ/
+- [`docs/getting-started/`](https://minamium.github.io/kineticEQ/getting-started/)
+- [`docs/Models/`](https://minamium.github.io/kineticEQ/Models/)
+- [`docs/Implementations/`](https://minamium.github.io/kineticEQ/Implementations/)
+- [`docs/api_Reference/`](https://minamium.github.io/kineticEQ/api_Reference/)
+- [`docs/en/`](https://minamium.github.io/kineticEQ/en/)

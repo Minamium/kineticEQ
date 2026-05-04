@@ -1,7 +1,6 @@
 ---
 title: Examples
 parent: English Getting Started
-grand_parent: English
 nav_order: 13
 lang: en
 ---

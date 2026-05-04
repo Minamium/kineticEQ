@@ -1,7 +1,6 @@
 ---
 title: Examples
 parent: Getting Started
-grand_parent: Japanese
 nav_order: 13
 lang: ja
 ---

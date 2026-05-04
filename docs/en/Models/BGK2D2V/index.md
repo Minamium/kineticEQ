@@ -2,7 +2,6 @@
 title: English BGK2D2V
 nav_title: BGK2D2V
 parent: English Models
-grand_parent: English
 nav_order: 20
 lang: en
 ---

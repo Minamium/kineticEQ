@@ -2,7 +2,6 @@
 title: English BGK1D1V Boundary Conditions
 nav_title: BGK1D1V Boundary Conditions
 parent: English Models
-grand_parent: English
 nav_order: 2
 lang: en
 ---

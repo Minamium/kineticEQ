@@ -1,6 +1,5 @@
 ---
 title: Getting Started
-parent: Japanese
 nav_order: 10
 has_children: true
 lang: ja

@@ -1,7 +1,6 @@
 ---
 title: English Getting Started
 nav_title: Getting Started
-parent: English
 nav_order: 10
 has_children: true
 lang: en

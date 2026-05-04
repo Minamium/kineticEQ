@@ -1,7 +1,6 @@
 ---
 title: CUDA Kernels
 parent: Implementations
-grand_parent: Japanese
 nav_order: 34
 lang: ja
 ---

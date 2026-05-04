@@ -1,7 +1,6 @@
 ---
 title: English API Reference
 nav_title: API Reference
-parent: English
 nav_order: 90
 has_children: true
 lang: en

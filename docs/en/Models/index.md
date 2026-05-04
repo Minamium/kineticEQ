@@ -1,7 +1,6 @@
 ---
 title: English Models
 nav_title: Models
-parent: English
 nav_order: 20
 has_children: true
 lang: en

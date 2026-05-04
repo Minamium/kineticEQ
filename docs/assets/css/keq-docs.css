@@ -10,6 +10,10 @@
   font-weight: 700;
 }
 
+.keq-nav-hidden {
+  display: none !important;
+}
+
 .keq-page-controls {
   display: flex;
   flex-wrap: wrap;

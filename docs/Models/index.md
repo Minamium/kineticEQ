@@ -1,6 +1,5 @@
 ---
 title: Models
-parent: Japanese
 nav_order: 20
 has_children: true
 lang: ja

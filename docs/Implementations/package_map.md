@@ -1,7 +1,6 @@
 ---
 title: Package Map
 parent: Implementations
-grand_parent: Japanese
 nav_order: 31
 lang: ja
 ---

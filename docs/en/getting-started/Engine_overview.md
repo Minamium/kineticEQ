@@ -1,7 +1,6 @@
 ---
 title: Engine Overview
 parent: English Getting Started
-grand_parent: English
 nav_order: 12
 lang: en
 ---

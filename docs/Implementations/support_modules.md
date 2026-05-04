@@ -1,7 +1,6 @@
 ---
 title: Support Modules
 parent: Implementations
-grand_parent: Japanese
 nav_order: 37
 lang: ja
 ---

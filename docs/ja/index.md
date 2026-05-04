@@ -1,14 +1,13 @@
 ---
 title: Japanese
-nav_order: 10
-has_children: true
+nav_exclude: true
 permalink: /ja/
 lang: ja
 ---
 
 # 日本語ドキュメント
 
-`kineticEQ` は、BGK 型運動論方程式を対象とする数値計算ライブラリであり、`Config` / `Engine` による高水準 API と、BGK1D1V 向けに最適化された C++/CUDA 拡張を単一の実行系として統合している。
+`kineticEQ` は、Boltzmann-BGK 方程式を対象とする数値計算ライブラリであり、`Config` / `Engine` による高水準 API と、BGK1D1V 向けに最適化された C++/CUDA 拡張を単一の実行系として統合している。
 
 ## 現行実装の対応状況
 

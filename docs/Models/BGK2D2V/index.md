@@ -1,7 +1,6 @@
 ---
 title: BGK2D2V
 parent: Models
-grand_parent: Japanese
 nav_order: 20
 lang: ja
 ---

@@ -2,7 +2,6 @@
 title: English BGK1D1V
 nav_title: BGK1D1V
 parent: English Models
-grand_parent: English
 nav_order: 1
 lang: en
 ---

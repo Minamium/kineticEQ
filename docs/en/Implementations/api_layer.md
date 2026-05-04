@@ -2,7 +2,6 @@
 title: English API Layer
 nav_title: API Layer
 parent: English Implementations
-grand_parent: English
 nav_order: 32
 lang: en
 ---

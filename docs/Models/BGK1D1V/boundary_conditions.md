@@ -2,7 +2,6 @@
 title: BGK1D1V Boundary Conditions
 nav_title: BGK1D1V Boundary Conditions
 parent: Models
-grand_parent: Japanese
 nav_order: 2
 lang: ja
 ---

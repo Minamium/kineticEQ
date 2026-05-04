@@ -1,7 +1,6 @@
 ---
 title: Engine Overview
 parent: Getting Started
-grand_parent: Japanese
 nav_order: 12
 lang: ja
 ---
