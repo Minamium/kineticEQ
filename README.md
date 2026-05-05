@@ -7,6 +7,8 @@
   <img alt="Python" src="https://img.shields.io/badge/python-%E2%89%A53.10-1f6feb?style=flat-square&logo=python&logoColor=white">
   <img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-%E2%89%A52.0-ee4c2c?style=flat-square&logo=pytorch&logoColor=white">
   <img alt="CUDA" src="https://img.shields.io/badge/CUDA-kernels-76b900?style=flat-square&logo=nvidia&logoColor=white">
+  <img alt="GCC" src="https://img.shields.io/badge/GCC%2FG%2B%2B-%E2%89%A59%20recommended-004482?style=flat-square&logo=gnu&logoColor=white">
+  <img alt="NVHPC" src="https://img.shields.io/badge/NVHPC-optional-76b900?style=flat-square&logo=nvidia&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-546a7b?style=flat-square">
   <img alt="Author" src="https://img.shields.io/badge/author-Minamium-0f2233?style=flat-square">
 </p>
@@ -27,7 +29,17 @@ cd kineticEQ
 pip install -e ".[viz]"
 ```
 
-CUDA backends require a CUDA-enabled PyTorch environment and `nvcc`.
+CUDA backends require a CUDA-enabled PyTorch environment, CUDA Toolkit 12.x or newer, and `nvcc`.
+GCC/G++ 9 or newer is recommended for JIT compilation. NVHPC may work when supported by the installed CUDA Toolkit, but the recommended configuration for kineticEQ CUDA extensions is `nvcc` with GCC/G++.
+
+```bash
+# Optional: adjust these values for your compiler and build-cache environment.
+export CC=$(which gcc)
+export CXX=$(which g++)
+export CUDAHOSTCXX=$(which g++)
+export TORCH_EXTENSIONS_DIR=/path/to/your/torch_extensions
+export MAX_JOBS=8
+```
 
 ## Quick Start
 

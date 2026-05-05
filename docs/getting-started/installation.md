@@ -11,8 +11,11 @@ lang: ja
 
 - Python 3.10 以上
 - PyTorch 2.0 以上
-- `cuda_kernel` を利用する場合は CUDA 対応 GPU と `nvcc`
+- `cuda_kernel` を利用する場合は CUDA 対応 GPU、CUDA Toolkit 12.x 以上、`nvcc`
+- CUDA 拡張の JIT コンパイルでは GCC/G++ 9 以上を推奨
 - `cpu_kernel` を利用する場合は C++17 を扱えるホストコンパイラ
+
+NVHPC は CUDA Toolkit 側で対応する host compiler として利用できる場合がある。ただし kineticEQ の CUDA 拡張は PyTorch C++ extension としてビルドされるため、推奨・検証対象は `nvcc` + GCC/G++ である。
 
 ## 依存パッケージ
 
@@ -53,6 +56,22 @@ pip install -e ".[viz]"
 - `load_implicit_AA()`
 
 BGK1D の `cuda_kernel` 経路では、fused binding が `torch.float64` を要求するため、`dtype="float64"` を前提に設定する必要がある。
+
+JIT コンパイル時の host compiler とビルドキャッシュは、必要に応じて以下の環境変数で固定できる。`TORCH_EXTENSIONS_DIR` と `MAX_JOBS` は利用環境に合わせて任意のキャッシュ先と並列コンパイル数に置き換える。
+
+```bash
+# Optional: adjust these values for your compiler and build-cache environment.
+export CC=$(which gcc)
+export CXX=$(which g++)
+export CUDAHOSTCXX=$(which g++)
+export TORCH_EXTENSIONS_DIR=/path/to/your/torch_extensions
+export MAX_JOBS=8
+```
+
+- `CC` / `CXX`: PyTorch C++ extension が利用する C/C++ compiler
+- `CUDAHOSTCXX`: `nvcc` が利用する host C++ compiler
+- `TORCH_EXTENSIONS_DIR`: 任意の JIT build cache 出力先
+- `MAX_JOBS`: 任意の並列コンパイル数
 
 ### CPU 拡張
 
