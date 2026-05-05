@@ -8,6 +8,8 @@ lang: en
 
 # kineticEQ Documentation
 
+{% include keq_banner.html %}
+
 `kineticEQ` is a numerical library for the Boltzmann-BGK equation. It combines a high-level Python interface built around `Config` and `Engine` with optimized C++/CUDA extensions for the BGK1D production path. This documentation is written against the current `src/kineticEQ` implementation rather than the legacy notebook workflow.
 
 ## Current implementation status
